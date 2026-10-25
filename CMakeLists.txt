@@ -1,0 +1,68 @@
+cmake_minimum_required(VERSION 3.24)
+project(CADWorkbench VERSION 1.9.0 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_AUTOMOC ON)
+
+if (NOT WIN32)
+    message(FATAL_ERROR "v1.7 UI targets Windows (Win32 HWND). Run on Windows 10/11 with MSVC.")
+endif()
+
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets Concurrent)
+find_package(OpenCASCADE 8.0.1 REQUIRED CONFIG)
+
+add_library(cadcore STATIC
+    src/core/SceneDocument.h
+    src/core/SceneDocument.cpp
+    src/core/EngineeringComponents.cpp
+    src/core/AdvancedComponents.cpp
+    src/core/SpecializedComponents.cpp
+    src/core/IndustrialComponents.cpp
+    src/core/ExtendedComponents.cpp
+    src/core/PrecisionComponents.cpp
+    src/core/ProductionComponents.cpp
+    src/core/ModelingTools.cpp
+)
+target_include_directories(cadcore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src ${OpenCASCADE_INCLUDE_DIR})
+target_link_libraries(cadcore PUBLIC
+    Qt6::Core Qt6::Gui
+    TKernel TKMath TKG2d TKG3d TKBRep TKGeomBase TKGeomAlgo
+    TKPrim TKTopAlgo TKBO TKBool TKOffset TKFillet TKShHealing TKMesh
+    TKDESTEP TKDESTL TKXSBase
+)
+
+add_executable(CADWorkbench WIN32
+    src/main.cpp
+    src/ui/MainWindow.h
+    src/ui/MainWindow.cpp
+    src/ui/CadViewport.h
+    src/ui/CadViewport.cpp
+)
+target_link_libraries(CADWorkbench PRIVATE
+    cadcore Qt6::Widgets Qt6::Gui Qt6::Concurrent
+    TKV3d TKService TKOpenGl
+)
+target_compile_definitions(CADWorkbench PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+if(MSVC)
+    # UTF-8 source includes the degree/delta symbols used in tool dialogs.
+    target_compile_options(cadcore PRIVATE /utf-8 /W4)
+    target_compile_options(CADWorkbench PRIVATE /utf-8 /W4)
+endif()
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(cadcore_tests tests/cadcore_tests.cpp)
+    target_link_libraries(cadcore_tests PRIVATE cadcore Qt6::Core)
+    add_test(NAME cadcore_modeling_tools COMMAND cadcore_tests --modeling-tools)
+    add_test(NAME cadcore_wing_rib COMMAND cadcore_tests --wing-rib)
+    if(MSVC)
+        target_compile_options(cadcore_tests PRIVATE /utf-8 /W4)
+    endif()
+    add_test(NAME cadcore_geometry_and_persistence COMMAND cadcore_tests)
+endif()
+
+# Manual Windows install: deploy Qt with windeployqt + OCCT DLLs from vcpkg.
+# Do not upload DLL binaries of third-party libraries as source code.
+
