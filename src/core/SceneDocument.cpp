@@ -1,4 +1,4 @@
-#include "SceneDocument.h"
+﻿#include "SceneDocument.h"
 
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
@@ -8,6 +8,7 @@
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepFilletAPI_MakeChamfer.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
+#include <BRepOffsetAPI_MakePipeShell.hxx>
 #include <BRepOffsetAPI_ThruSections.hxx>
 #include <BRepOffsetAPI_DraftAngle.hxx>
 #include <BRepAdaptor_Surface.hxx>
@@ -32,7 +33,10 @@
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepTools.hxx>
 #include <GProp_GProps.hxx>
+#include <GeomAPI_Interpolate.hxx>
+#include <Geom_BSplineCurve.hxx>
 #include <IFSelect_ReturnStatus.hxx>
+#include <STEPControl_Reader.hxx>
 #include <STEPControl_StepModelType.hxx>
 #include <STEPControl_Writer.hxx>
 #include <Standard_Failure.hxx>
@@ -46,6 +50,10 @@
 #include <TopoDS_Face.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Iterator.hxx>
+#include <TopExp.hxx>
+#include <NCollection_IndexedMap.hxx>
+#include <NCollection_HArray1.hxx>
+#include <TopTools_ShapeMapHasher.hxx>
 #include <gp_Ax1.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Circ.hxx>
@@ -60,6 +68,7 @@
 
 #include <QColor>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -78,6 +87,7 @@
 namespace cad {
 namespace {
 constexpr qsizetype kMaxFileBytes = 96 * 1024 * 1024;
+constexpr qsizetype kMaxStepImportBytes = 512 * 1024 * 1024;
 constexpr int kMaxObjects = 2000;
 constexpr int kHistoryDepth = 40;
 const QString kSchema1 = QStringLiteral("cadworkbench.scene.v1");
@@ -397,6 +407,209 @@ bool SceneDocument::addTorusSegment(double majorRadius,double tubeRadius,double 
     return false;
 }
 
+bool SceneDocument::sweepCircularProfile(double radius,double pathLength,double lateralOffset,double verticalRise,QString* error) {
+    return addSweepProfile(true,false,radius,radius,pathLength,lateralOffset,verticalRise,error);
+}
+
+bool SceneDocument::sweepRectangularProfile(double width,double height,double pathLength,double lateralOffset,double verticalRise,QString* error) {
+    return addSweepProfile(false,false,width,height,pathLength,lateralOffset,verticalRise,error);
+}
+
+bool SceneDocument::sweepEllipticalProfile(double semiAxisA,double semiAxisB,double pathLength,double lateralOffset,
+                                            double verticalRise,QString* error) {
+    return addSweepProfile(false,true,semiAxisA,semiAxisB,pathLength,lateralOffset,verticalRise,error);
+}
+
+bool SceneDocument::addHelicalSweep(double profileRadius,double coilRadius,double pitch,double turns,QString* error) {
+    if(!finitePositive(profileRadius)||!finitePositive(coilRadius)||!finitePositive(pitch)||
+       !finitePositive(turns)||turns<0.25||turns>20.0||coilRadius<=profileRadius||pitch<=2.0*profileRadius){
+        setError(error,"Helix requires positive dimensions, at least 0.25 and at most 20 turns, coil radius greater than wire radius, and pitch greater than wire diameter.");
+        return false;
+    }
+    if(parts_.size()>=kMaxObjects){setError(error,"Scene object limit reached.");return false;}
+    try{
+        constexpr int samplesPerTurn=24;
+        const int sampleCount=std::max(6,static_cast<int>(std::ceil(turns*samplesPerTurn)));
+        Handle(NCollection_HArray1<gp_Pnt>) points=new NCollection_HArray1<gp_Pnt>(1,sampleCount+1);
+        for(int i=0;i<=sampleCount;++i){
+            const double angle=2.0*std::numbers::pi*turns*static_cast<double>(i)/sampleCount;
+            points->SetValue(i+1,gp_Pnt(coilRadius*std::cos(angle),coilRadius*std::sin(angle),pitch*turns*static_cast<double>(i)/sampleCount));
+        }
+        GeomAPI_Interpolate interpolation(points,false,1e-6);
+        interpolation.Perform();
+        if(!interpolation.IsDone()){setError(error,"Could not interpolate the helical path.");return false;}
+        const Handle(Geom_BSplineCurve) centerline=interpolation.Curve();
+        const TopoDS_Wire spine=BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(centerline).Edge()).Wire();
+        gp_Pnt start,tangentPoint;gp_Vec tangent;
+        centerline->D1(centerline->FirstParameter(),start,tangent);
+        if(tangent.SquareMagnitude()<=1e-16){setError(error,"Helical path has no initial direction.");return false;}
+        tangent.Normalize();
+        gp_Vec reference(0,0,1);reference-=tangent*tangent.Dot(reference);
+        if(reference.SquareMagnitude()<=1e-8){reference=gp_Vec(0,1,0);reference-=tangent*tangent.Dot(reference);}
+        const gp_Ax2 frame(start,gp_Dir(tangent),gp_Dir(reference));
+        const TopoDS_Wire profile=BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(gp_Circ(frame,profileRadius)).Edge()).Wire();
+        BRepOffsetAPI_MakePipeShell pipe(spine);
+        pipe.Add(profile);
+        pipe.Build();
+        if(!pipe.IsDone()||!pipe.MakeSolid()){
+            setError(error,"Open CASCADE could not build a solid from this helical path.");return false;
+        }
+        const TopoDS_Shape shape=pipe.Shape();
+        if(!validShape(shape,error))return false;
+        const QString name=uniqueName(QStringLiteral("Helical Sweep"));
+        checkpoint();parts_.append({generatedId(),name,shape});return true;
+    }catch(const Standard_Failure& e){setError(error,QStringLiteral("Helical sweep kernel error: %1").arg(e.what()));}
+     catch(const std::exception& e){setError(error,QString::fromUtf8(e.what()));}
+    return false;
+}
+
+bool SceneDocument::addVariablePitchHelicalSweep(double profileRadius,double coilRadius,double startPitch,
+                                                  double endPitch,double turns,QString* error) {
+    if(!finitePositive(profileRadius)||!finitePositive(coilRadius)||!finitePositive(startPitch)||
+       !finitePositive(endPitch)||!finitePositive(turns)||turns<0.25||turns>20.0||
+       coilRadius<=profileRadius||startPitch<=2.0*profileRadius||endPitch<=2.0*profileRadius){
+        setError(error,"Variable-pitch helix requires positive dimensions, 0.25–20 turns, coil radius greater than wire radius, and both pitches greater than wire diameter.");
+        return false;
+    }
+    if(parts_.size()>=kMaxObjects){setError(error,"Scene object limit reached.");return false;}
+    try{
+        constexpr int samplesPerTurn=32;
+        const int sampleCount=std::max(8,static_cast<int>(std::ceil(turns*samplesPerTurn)));
+        Handle(NCollection_HArray1<gp_Pnt>) points=new NCollection_HArray1<gp_Pnt>(1,sampleCount+1);
+        for(int i=0;i<=sampleCount;++i){
+            const double t=static_cast<double>(i)/sampleCount;
+            const double angle=2.0*std::numbers::pi*turns*t;
+            const double z=turns*(startPitch*t+0.5*(endPitch-startPitch)*t*t);
+            points->SetValue(i+1,gp_Pnt(coilRadius*std::cos(angle),coilRadius*std::sin(angle),z));
+        }
+        GeomAPI_Interpolate interpolation(points,false,1e-6);
+        interpolation.Perform();
+        if(!interpolation.IsDone()){setError(error,"Could not interpolate the variable-pitch helical path.");return false;}
+        const Handle(Geom_BSplineCurve) centerline=interpolation.Curve();
+        const TopoDS_Wire spine=BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(centerline).Edge()).Wire();
+        gp_Pnt start;gp_Vec tangent;
+        centerline->D1(centerline->FirstParameter(),start,tangent);
+        if(tangent.SquareMagnitude()<=1e-16){setError(error,"Variable-pitch path has no initial direction.");return false;}
+        tangent.Normalize();
+        gp_Vec reference(0,0,1);reference-=tangent*tangent.Dot(reference);
+        if(reference.SquareMagnitude()<=1e-8){reference=gp_Vec(0,1,0);reference-=tangent*tangent.Dot(reference);}
+        const gp_Ax2 frame(start,gp_Dir(tangent),gp_Dir(reference));
+        const TopoDS_Wire profile=BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(gp_Circ(frame,profileRadius)).Edge()).Wire();
+        BRepOffsetAPI_MakePipeShell pipe(spine);
+        pipe.Add(profile);pipe.Build();
+        if(!pipe.IsDone()||!pipe.MakeSolid()){
+            setError(error,"Open CASCADE could not build a solid from this variable-pitch path.");return false;
+        }
+        const TopoDS_Shape shape=pipe.Shape();
+        if(!validShape(shape,error))return false;
+        const QString name=uniqueName(QStringLiteral("Variable Pitch Helix"));
+        checkpoint();parts_.append({generatedId(),name,shape});return true;
+    }catch(const Standard_Failure& e){setError(error,QStringLiteral("Variable-pitch helix kernel error: %1").arg(e.what()));}
+     catch(const std::exception& e){setError(error,QString::fromUtf8(e.what()));}
+    return false;
+}
+
+bool SceneDocument::addTaperedHelicalSweep(double profileRadius,double startCoilRadius,double endCoilRadius,
+                                            double pitch,double turns,QString* error) {
+    if(!finitePositive(profileRadius)||!finitePositive(startCoilRadius)||!finitePositive(endCoilRadius)||
+       !finitePositive(pitch)||!finitePositive(turns)||turns<0.25||turns>20.0||
+       startCoilRadius<=profileRadius||endCoilRadius<=profileRadius||pitch<=2.0*profileRadius){
+        setError(error,"Tapered helix requires positive dimensions, 0.25–20 turns, both coil radii greater than wire radius, and pitch greater than wire diameter.");
+        return false;
+    }
+    if(parts_.size()>=kMaxObjects){setError(error,"Scene object limit reached.");return false;}
+    try{
+        constexpr int samplesPerTurn=32;
+        const int sampleCount=std::max(8,static_cast<int>(std::ceil(turns*samplesPerTurn)));
+        Handle(NCollection_HArray1<gp_Pnt>) points=new NCollection_HArray1<gp_Pnt>(1,sampleCount+1);
+        for(int i=0;i<=sampleCount;++i){
+            const double t=static_cast<double>(i)/sampleCount;
+            const double angle=2.0*std::numbers::pi*turns*t;
+            const double radius=startCoilRadius+(endCoilRadius-startCoilRadius)*t;
+            points->SetValue(i+1,gp_Pnt(radius*std::cos(angle),radius*std::sin(angle),pitch*turns*t));
+        }
+        GeomAPI_Interpolate interpolation(points,false,1e-6);
+        interpolation.Perform();
+        if(!interpolation.IsDone()){setError(error,"Could not interpolate the tapered helical path.");return false;}
+        const Handle(Geom_BSplineCurve) centerline=interpolation.Curve();
+        const TopoDS_Wire spine=BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(centerline).Edge()).Wire();
+        gp_Pnt start;gp_Vec tangent;
+        centerline->D1(centerline->FirstParameter(),start,tangent);
+        if(tangent.SquareMagnitude()<=1e-16){setError(error,"Tapered helical path has no initial direction.");return false;}
+        tangent.Normalize();
+        gp_Vec reference(0,0,1);reference-=tangent*tangent.Dot(reference);
+        if(reference.SquareMagnitude()<=1e-8){reference=gp_Vec(0,1,0);reference-=tangent*tangent.Dot(reference);}
+        const gp_Ax2 frame(start,gp_Dir(tangent),gp_Dir(reference));
+        const TopoDS_Wire profile=BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(gp_Circ(frame,profileRadius)).Edge()).Wire();
+        BRepOffsetAPI_MakePipeShell pipe(spine);
+        pipe.Add(profile);pipe.Build();
+        if(!pipe.IsDone()||!pipe.MakeSolid()){
+            setError(error,"Open CASCADE could not build a solid from this tapered helical path.");return false;
+        }
+        const TopoDS_Shape shape=pipe.Shape();
+        if(!validShape(shape,error))return false;
+        const QString name=uniqueName(QStringLiteral("Tapered Helix"));
+        checkpoint();parts_.append({generatedId(),name,shape});return true;
+    }catch(const Standard_Failure& e){setError(error,QStringLiteral("Tapered helix kernel error: %1").arg(e.what()));}
+     catch(const std::exception& e){setError(error,QString::fromUtf8(e.what()));}
+    return false;
+}
+
+bool SceneDocument::addSweepProfile(bool circular,bool elliptical,double width,double height,double pathLength,double lateralOffset,
+                                    double verticalRise,QString* error) {
+    if(!finitePositive(width)||(!circular&&!finitePositive(height))||!finitePositive(pathLength)||
+       !finiteOffset(lateralOffset)||!finiteOffset(verticalRise)){
+        setError(error,"Sweep dimensions must be finite and positive; path offsets must be within ±1,000,000 mm.");return false;
+    }
+    if(parts_.size()>=kMaxObjects){setError(error,"Scene object limit reached.");return false;}
+    try{
+        const gp_Pnt start(0,0,0),middle(pathLength*0.5,lateralOffset*0.35,verticalRise*0.5),
+                     end(pathLength,lateralOffset,verticalRise);
+        Handle(NCollection_HArray1<gp_Pnt>) points=new NCollection_HArray1<gp_Pnt>(1,3);
+        points->SetValue(1,start);points->SetValue(2,middle);points->SetValue(3,end);
+        GeomAPI_Interpolate interpolation(points,false,1e-6);
+        interpolation.Perform();
+        if(!interpolation.IsDone()){setError(error,"Could not interpolate the sweep path.");return false;}
+        const Handle(Geom_BSplineCurve) centerline=interpolation.Curve();
+        TopoDS_Wire spine=BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(centerline).Edge()).Wire();
+        gp_Pnt tangentPoint;gp_Vec tangent;
+        centerline->D1(centerline->FirstParameter(),tangentPoint,tangent);
+        if(tangent.SquareMagnitude()<=1e-16){setError(error,"Sweep path has no initial direction.");return false;}
+        tangent.Normalize();
+        gp_Vec reference(0,0,1);reference-=tangent*tangent.Dot(reference);
+        if(reference.SquareMagnitude()<=1e-8){reference=gp_Vec(0,1,0);reference-=tangent*tangent.Dot(reference);}
+        const gp_Ax2 frame(start,gp_Dir(tangent),gp_Dir(reference));
+        TopoDS_Wire profile;
+        if(circular){
+            profile=BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(gp_Circ(frame,width)).Edge()).Wire();
+        }else if(elliptical){
+            const double major=std::max(width,height),minor=std::min(width,height);
+            profile=BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(gp_Elips(frame,major,minor)).Edge()).Wire();
+        }else{
+            const gp_Vec x(frame.XDirection()),y(frame.YDirection());
+            const auto pointAt=[&](double u,double v){gp_Pnt point=start;point.Translate(x*u+y*v);return point;};
+            BRepBuilderAPI_MakePolygon section;
+            section.Add(pointAt(-width/2,-height/2));section.Add(pointAt(width/2,-height/2));
+            section.Add(pointAt(width/2,height/2));section.Add(pointAt(-width/2,height/2));section.Close();
+            if(!section.IsDone()){setError(error,"Could not construct the sweep profile.");return false;}
+            profile=section.Wire();
+        }
+        BRepOffsetAPI_MakePipeShell pipe(spine);
+        pipe.Add(profile);
+        pipe.Build();
+        if(!pipe.IsDone()||!pipe.MakeSolid()){
+            setError(error,"Open CASCADE could not build a solid from this profile and path.");return false;
+        }
+        const TopoDS_Shape shape=pipe.Shape();
+        if(!validShape(shape,error))return false;
+        const QString baseName=circular?QStringLiteral("Circular Sweep"):(elliptical?QStringLiteral("Elliptical Sweep"):QStringLiteral("Rectangular Sweep"));
+        const QString name=uniqueName(baseName);
+        checkpoint();parts_.append({generatedId(),name,shape});return true;
+    }catch(const Standard_Failure& e){setError(error,QStringLiteral("Sweep kernel error: %1").arg(e.what()));}
+     catch(const std::exception& e){setError(error,QString::fromUtf8(e.what()));}
+    return false;
+}
+
 bool SceneDocument::translate(const QString& id, double x, double y, double z, QString* error) {
     if (!finiteOffset(x) || !finiteOffset(y) || !finiteOffset(z)) { setError(error, "Translation offset out of range."); return false; }
     const Part* part = find(id);
@@ -416,7 +629,7 @@ bool SceneDocument::translate(const QString& id, double x, double y, double z, Q
 }
 
 bool SceneDocument::rotate(const QString& id, Axis axis, double degrees, QString* error) {
-    if (!std::isfinite(degrees) || std::abs(degrees) > 36000) { setError(error, "Angle must be finite and within ±36,000 degrees."); return false; }
+    if (!std::isfinite(degrees) || std::abs(degrees) > 36000) { setError(error, "Angle must be finite and within Â±36,000 degrees."); return false; }
     const Part* part = find(id);
     if (!part) { setError(error, "Object not found."); return false; }
     if (degrees == 0.0) return true;
@@ -435,7 +648,7 @@ bool SceneDocument::rotate(const QString& id, Axis axis, double degrees, QString
 }
 
 bool SceneDocument::scale(const QString& id, double factor, QString* error) {
-    if (!std::isfinite(factor) || factor < 1e-4 || factor > 1e4) { setError(error, "Scale must be 0.0001–10,000."); return false; }
+    if (!std::isfinite(factor) || factor < 1e-4 || factor > 1e4) { setError(error, "Scale must be 0.0001â€“10,000."); return false; }
     const Part* part = find(id);
     if (!part) { setError(error, "Object not found."); return false; }
     if (factor == 1.0) return true;
@@ -1246,6 +1459,49 @@ bool SceneDocument::linearPattern(const QString& id, Axis axis, int instanceCoun
     return false;
 }
 
+bool SceneDocument::linearPatternAlongVector(const QString& id,double directionX,double directionY,double directionZ,
+                                              int instanceCount,double spacing,QString* error) {
+    if(instanceCount<2||instanceCount>1000){setError(error,"Vector pattern count must be between 2 and 1,000 total instances.");return false;}
+    if(!std::isfinite(directionX)||!std::isfinite(directionY)||!std::isfinite(directionZ)||
+       std::max({std::abs(directionX),std::abs(directionY),std::abs(directionZ)})>1e6){
+        setError(error,"Pattern direction components must be finite and within ±1,000,000.");return false;
+    }
+    const double magnitude=std::hypot(directionX,directionY,directionZ);
+    if(!std::isfinite(magnitude)||magnitude<=1e-12){setError(error,"Pattern direction vector must not be zero.");return false;}
+    if(!std::isfinite(spacing)||std::abs(spacing)<1e-5||std::abs(spacing)>1e6||
+       std::abs(spacing)*(instanceCount-1)>1e6){
+        setError(error,"Pattern spacing and total offset must be finite and within 1,000,000 mm.");return false;
+    }
+    if(parts_.size()+instanceCount-1>kMaxObjects){setError(error,"Scene object limit reached.");return false;}
+    const Part* source=find(id);
+    if(!source){setError(error,"Object not found.");return false;}
+    const TopoDS_Shape sourceShape=source->shape;
+    const QString sourceName=source->name;
+    const bool visible=source->visible;
+    const QString color=source->color;
+    const gp_Vec direction(directionX/magnitude,directionY/magnitude,directionZ/magnitude);
+    QVector<Part> copies;
+    QSet<QString> reservedNames;
+    try{
+        for(int index=1;index<instanceCount;++index){
+            gp_Trsf transform;
+            transform.SetTranslation(direction*(spacing*index));
+            const TopoDS_Shape result=BRepBuilderAPI_Transform(sourceShape,transform,true).Shape();
+            if(!validShape(result,error))return false;
+            const QString baseName=sourceName+QStringLiteral(" Vector Pattern %1").arg(index+1);
+            QString name=uniqueName(baseName);int suffix=2;
+            while(reservedNames.contains(name.toCaseFolded()))name=uniqueName(baseName+QStringLiteral(" %1").arg(suffix++));
+            reservedNames.insert(name.toCaseFolded());
+            copies.append({generatedId(),name,result,visible,color});
+        }
+        checkpoint();
+        for(const Part& copy:copies)parts_.append(copy);
+        return true;
+    }catch(const Standard_Failure& e){setError(error,QStringLiteral("CAD kernel error: %1").arg(e.what()));}
+     catch(const std::exception& e){setError(error,QString::fromUtf8(e.what()));}
+    return false;
+}
+
 bool SceneDocument::rectangularPattern(const QString& id,Axis firstAxis,int firstCount,double firstSpacing,
                                        Axis secondAxis,int secondCount,double secondSpacing,QString* error) {
     if(firstCount<1||secondCount<1||firstCount>1000||secondCount>1000||firstCount>1000/secondCount||
@@ -1418,6 +1674,398 @@ bool SceneDocument::commitHole(const HoleCommand& command, const TopoDS_Shape& p
     return true;
 }
 
+bool SceneDocument::prepareDovetailGroove(const QString& id,double centerX,double centerY,double entryZ,
+                                          double mouthWidth,double bottomWidth,double depth,double length,
+                                          double angleDegrees,DovetailGrooveCommand* command,QString* error) const {
+    if(!command){setError(error,"The dovetail-groove command output is missing.");return false;}
+    if(!finiteOffset(centerX)||!finiteOffset(centerY)||!finiteOffset(entryZ)||
+       !finitePositive(mouthWidth)||!finitePositive(bottomWidth)||bottomWidth<=mouthWidth||
+       !finitePositive(depth)||!finitePositive(length)||!std::isfinite(angleDegrees)||
+       angleDegrees < -360.0||angleDegrees > 360.0||
+       std::abs(centerX)+bottomWidth/2.0>1e6||std::abs(centerY)+length/2.0>1e6||
+       std::abs(entryZ-depth)>1e6){
+        setError(error,"Dovetail groove dimensions are invalid. The undercut width must exceed the mouth width.");return false;
+    }
+    const Part* part=find(id);
+    if(!part){setError(error,"Object not found.");return false;}
+    command->partId=id;
+    command->geometryToken=part->geometryToken;
+    command->sourceShape=BRepBuilderAPI_Copy(part->shape).Shape();
+    command->centerX=centerX;command->centerY=centerY;command->entryZ=entryZ;
+    command->mouthWidth=mouthWidth;command->bottomWidth=bottomWidth;
+    command->depth=depth;command->length=length;command->angleDegrees=angleDegrees;
+    return true;
+}
+
+DovetailGroovePreview SceneDocument::buildDovetailGroovePreview(const DovetailGrooveCommand& command) {
+    DovetailGroovePreview preview;
+    try{
+        if(command.partId.isEmpty()||command.sourceShape.IsNull()||!finiteOffset(command.centerX)||
+           !finiteOffset(command.centerY)||!finiteOffset(command.entryZ)||!finitePositive(command.mouthWidth)||
+           !finitePositive(command.bottomWidth)||command.bottomWidth<=command.mouthWidth||
+           !finitePositive(command.depth)||!finitePositive(command.length)||!std::isfinite(command.angleDegrees)||
+           command.angleDegrees < -360.0||command.angleDegrees > 360.0){
+            preview.error="The dovetail-groove command is incomplete or invalid.";return preview;
+        }
+        const double margin=std::max(0.01,command.depth*1e-4);
+        const double halfLength=command.length/2.0+margin;
+        const double topZ=command.entryZ+margin;
+        BRepBuilderAPI_MakePolygon polygon;
+        polygon.Add(gp_Pnt(command.centerX-command.mouthWidth/2.0,command.centerY-halfLength,topZ));
+        polygon.Add(gp_Pnt(command.centerX+command.mouthWidth/2.0,command.centerY-halfLength,topZ));
+        polygon.Add(gp_Pnt(command.centerX+command.bottomWidth/2.0,command.centerY-halfLength,command.entryZ-command.depth));
+        polygon.Add(gp_Pnt(command.centerX-command.bottomWidth/2.0,command.centerY-halfLength,command.entryZ-command.depth));
+        polygon.Close();
+        if(!polygon.IsDone()){preview.error="The dovetail cutter profile could not be constructed.";return preview;}
+        const TopoDS_Face profile=BRepBuilderAPI_MakeFace(polygon.Wire()).Face();
+        const TopoDS_Shape straightCutter=BRepPrimAPI_MakePrism(profile,gp_Vec(0,2.0*halfLength,0)).Shape();
+        gp_Trsf rotation;
+        rotation.SetRotation(gp_Ax1(gp_Pnt(command.centerX,command.centerY,0),gp_Dir(0,0,1)),
+                             command.angleDegrees*std::numbers::pi/180.0);
+        const TopoDS_Shape cutter=BRepBuilderAPI_Transform(straightCutter,rotation,true).Shape();
+        BRepAlgoAPI_Cut operation(command.sourceShape,cutter);operation.Build();
+        if(!operation.IsDone()){preview.error="The kernel could not cut the requested dovetail groove.";return preview;}
+        preview.shape=operation.Shape();
+        if(!validShape(preview.shape,&preview.error)){preview.shape=TopoDS_Shape();return preview;}
+        GProp_GProps before,after;
+        BRepGProp::VolumeProperties(command.sourceShape,before);
+        BRepGProp::VolumeProperties(preview.shape,after);
+        const double removed=before.Mass()-after.Mass();
+        if(!std::isfinite(removed)||removed<=std::max(1e-9,before.Mass()*1e-12)){
+            preview.shape=TopoDS_Shape();preview.error="The dovetail cutter does not intersect the selected body.";
+        }
+    }catch(const Standard_Failure& e){preview.error=QStringLiteral("CAD kernel error: %1").arg(e.what());}
+     catch(const std::exception& e){preview.error=QString::fromUtf8(e.what());}
+    return preview;
+}
+
+bool SceneDocument::commitDovetailGroove(const DovetailGrooveCommand& command,const TopoDS_Shape& preview,QString* error){
+    const Part* part=find(command.partId);
+    if(!part){setError(error,"The selected body no longer exists.");return false;}
+    if(part->geometryToken!=command.geometryToken){setError(error,"The dovetail-groove preview is stale because the body geometry changed. Select the body again.");return false;}
+    if(!validShape(preview,error))return false;
+    checkpoint();
+    for(Part& target:parts_)if(target.id==command.partId){
+        target.shape=preview;
+        target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);
+        break;
+    }
+    return true;
+}
+
+bool SceneDocument::prepareTSlotGroove(const QString& id,double centerX,double centerY,double entryZ,
+                                        double neckWidth,double undercutWidth,double depth,double undercutHeight,
+                                        double length,double angleDegrees,TSlotGrooveCommand* command,QString* error) const {
+    if(!command){setError(error,"The T-slot command output is missing.");return false;}
+    if(!finiteOffset(centerX)||!finiteOffset(centerY)||!finiteOffset(entryZ)||
+       !finitePositive(neckWidth)||!finitePositive(undercutWidth)||undercutWidth<=neckWidth||
+       !finitePositive(depth)||!finitePositive(undercutHeight)||undercutHeight>=depth||
+       !finitePositive(length)||!std::isfinite(angleDegrees)||angleDegrees < -360.0||angleDegrees > 360.0||
+       std::abs(centerX)+undercutWidth/2.0>1e6||std::abs(centerY)+length/2.0>1e6||
+       std::abs(entryZ-depth)>1e6){
+        setError(error,"T-slot dimensions are invalid. The undercut must be wider than the neck and shallower than the total depth.");return false;
+    }
+    const Part* part=find(id);
+    if(!part){setError(error,"Object not found.");return false;}
+    command->partId=id;command->geometryToken=part->geometryToken;
+    command->sourceShape=BRepBuilderAPI_Copy(part->shape).Shape();
+    command->centerX=centerX;command->centerY=centerY;command->entryZ=entryZ;
+    command->neckWidth=neckWidth;command->undercutWidth=undercutWidth;
+    command->depth=depth;command->undercutHeight=undercutHeight;
+    command->length=length;command->angleDegrees=angleDegrees;
+    return true;
+}
+
+TSlotGroovePreview SceneDocument::buildTSlotGroovePreview(const TSlotGrooveCommand& command){
+    TSlotGroovePreview preview;
+    try{
+        if(command.partId.isEmpty()||command.sourceShape.IsNull()||!finiteOffset(command.centerX)||
+           !finiteOffset(command.centerY)||!finiteOffset(command.entryZ)||!finitePositive(command.neckWidth)||
+           !finitePositive(command.undercutWidth)||command.undercutWidth<=command.neckWidth||
+           !finitePositive(command.depth)||!finitePositive(command.undercutHeight)||command.undercutHeight>=command.depth||
+           !finitePositive(command.length)||!std::isfinite(command.angleDegrees)||
+           command.angleDegrees < -360.0||command.angleDegrees > 360.0){
+            preview.error="The T-slot command is incomplete or invalid.";return preview;
+        }
+        const double margin=std::max(0.01,command.depth*1e-4);
+        const double halfLength=command.length/2.0+margin;
+        const double topZ=command.entryZ+margin;
+        const double shoulderZ=command.entryZ-command.depth+command.undercutHeight;
+        const double bottomZ=command.entryZ-command.depth;
+        BRepBuilderAPI_MakePolygon polygon;
+        polygon.Add(gp_Pnt(command.centerX-command.neckWidth/2.0,command.centerY-halfLength,topZ));
+        polygon.Add(gp_Pnt(command.centerX+command.neckWidth/2.0,command.centerY-halfLength,topZ));
+        polygon.Add(gp_Pnt(command.centerX+command.neckWidth/2.0,command.centerY-halfLength,shoulderZ));
+        polygon.Add(gp_Pnt(command.centerX+command.undercutWidth/2.0,command.centerY-halfLength,shoulderZ));
+        polygon.Add(gp_Pnt(command.centerX+command.undercutWidth/2.0,command.centerY-halfLength,bottomZ));
+        polygon.Add(gp_Pnt(command.centerX-command.undercutWidth/2.0,command.centerY-halfLength,bottomZ));
+        polygon.Add(gp_Pnt(command.centerX-command.undercutWidth/2.0,command.centerY-halfLength,shoulderZ));
+        polygon.Add(gp_Pnt(command.centerX-command.neckWidth/2.0,command.centerY-halfLength,shoulderZ));
+        polygon.Close();
+        if(!polygon.IsDone()){preview.error="The T-slot cutter profile could not be constructed.";return preview;}
+        const TopoDS_Face profile=BRepBuilderAPI_MakeFace(polygon.Wire()).Face();
+        const TopoDS_Shape straightCutter=BRepPrimAPI_MakePrism(profile,gp_Vec(0,2.0*halfLength,0)).Shape();
+        gp_Trsf rotation;
+        rotation.SetRotation(gp_Ax1(gp_Pnt(command.centerX,command.centerY,0),gp_Dir(0,0,1)),
+                             command.angleDegrees*std::numbers::pi/180.0);
+        const TopoDS_Shape cutter=BRepBuilderAPI_Transform(straightCutter,rotation,true).Shape();
+        BRepAlgoAPI_Cut operation(command.sourceShape,cutter);operation.Build();
+        if(!operation.IsDone()){preview.error="The kernel could not cut the requested T-slot.";return preview;}
+        preview.shape=operation.Shape();
+        if(!validShape(preview.shape,&preview.error)){preview.shape=TopoDS_Shape();return preview;}
+        GProp_GProps before,after;
+        BRepGProp::VolumeProperties(command.sourceShape,before);
+        BRepGProp::VolumeProperties(preview.shape,after);
+        const double removed=before.Mass()-after.Mass();
+        if(!std::isfinite(removed)||removed<=std::max(1e-9,before.Mass()*1e-12)){
+            preview.shape=TopoDS_Shape();preview.error="The T-slot cutter does not intersect the selected body.";
+        }
+    }catch(const Standard_Failure& e){preview.error=QStringLiteral("CAD kernel error: %1").arg(e.what());}
+     catch(const std::exception& e){preview.error=QString::fromUtf8(e.what());}
+    return preview;
+}
+
+bool SceneDocument::commitTSlotGroove(const TSlotGrooveCommand& command,const TopoDS_Shape& preview,QString* error){
+    const Part* part=find(command.partId);
+    if(!part){setError(error,"The selected body no longer exists.");return false;}
+    if(part->geometryToken!=command.geometryToken){setError(error,"The T-slot preview is stale because the body geometry changed. Select the body again.");return false;}
+    if(!validShape(preview,error))return false;
+    checkpoint();
+    for(Part& target:parts_)if(target.id==command.partId){
+        target.shape=preview;
+        target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);
+        break;
+    }
+    return true;
+}
+
+bool SceneDocument::prepareRoundedSlot(const QString& id,double centerX,double centerY,double entryZ,
+                                        double width,double length,double depth,double angleDegrees,
+                                        RoundedSlotCommand* command,QString* error) const {
+    if(!command){setError(error,"The rounded-slot command output is missing.");return false;}
+    if(!finiteOffset(centerX)||!finiteOffset(centerY)||!finiteOffset(entryZ)||
+       !finitePositive(width)||!finitePositive(length)||length<width||!finitePositive(depth)||
+       !std::isfinite(angleDegrees)||angleDegrees < -360.0||angleDegrees > 360.0||
+       std::abs(centerX)+length/2.0>1e6||std::abs(centerY)+length/2.0>1e6||
+       std::abs(entryZ-depth)>1e6){
+        setError(error,"Rounded-slot dimensions are invalid. Length must be at least the slot width.");return false;
+    }
+    const Part* part=find(id);
+    if(!part){setError(error,"Object not found.");return false;}
+    command->partId=id;command->geometryToken=part->geometryToken;
+    command->sourceShape=BRepBuilderAPI_Copy(part->shape).Shape();
+    command->centerX=centerX;command->centerY=centerY;command->entryZ=entryZ;
+    command->width=width;command->length=length;command->depth=depth;command->angleDegrees=angleDegrees;
+    return true;
+}
+
+RoundedSlotPreview SceneDocument::buildRoundedSlotPreview(const RoundedSlotCommand& command){
+    RoundedSlotPreview preview;
+    try{
+        if(command.partId.isEmpty()||command.sourceShape.IsNull()||!finiteOffset(command.centerX)||
+           !finiteOffset(command.centerY)||!finiteOffset(command.entryZ)||!finitePositive(command.width)||
+           !finitePositive(command.length)||command.length<command.width||!finitePositive(command.depth)||
+           !std::isfinite(command.angleDegrees)||command.angleDegrees < -360.0||command.angleDegrees > 360.0){
+            preview.error="The rounded-slot command is incomplete or invalid.";return preview;
+        }
+        const double radius=command.width/2.0;
+        const double endOffset=(command.length-command.width)/2.0;
+        const double margin=std::max(0.01,command.depth*1e-4);
+        const double bottomZ=command.entryZ-command.depth;
+        TopoDS_Shape cutter;
+        if(endOffset>1e-8){
+            cutter=BRepPrimAPI_MakeBox(gp_Pnt(command.centerX-radius,command.centerY-endOffset,bottomZ),
+                                       command.width,2.0*endOffset,command.depth+margin).Shape();
+        }
+        const TopoDS_Shape firstEnd=BRepPrimAPI_MakeCylinder(
+            gp_Ax2(gp_Pnt(command.centerX,command.centerY-endOffset,bottomZ),gp_Dir(0,0,1)),
+            radius,command.depth+margin).Shape();
+        if(endOffset<=1e-8)cutter=firstEnd;
+        else {
+            const TopoDS_Shape secondEnd=BRepPrimAPI_MakeCylinder(
+                gp_Ax2(gp_Pnt(command.centerX,command.centerY+endOffset,bottomZ),gp_Dir(0,0,1)),
+                radius,command.depth+margin).Shape();
+            BRepAlgoAPI_Fuse firstJoin(cutter,firstEnd);firstJoin.Build();
+            if(!firstJoin.IsDone()){preview.error="The rounded-slot cutter could not be joined.";return preview;}
+            BRepAlgoAPI_Fuse fullJoin(firstJoin.Shape(),secondEnd);fullJoin.Build();
+            if(!fullJoin.IsDone()){preview.error="The rounded-slot cutter could not be joined.";return preview;}
+            cutter=fullJoin.Shape();
+        }
+        gp_Trsf rotation;
+        rotation.SetRotation(gp_Ax1(gp_Pnt(command.centerX,command.centerY,0),gp_Dir(0,0,1)),
+                             command.angleDegrees*std::numbers::pi/180.0);
+        cutter=BRepBuilderAPI_Transform(cutter,rotation,true).Shape();
+        BRepAlgoAPI_Cut operation(command.sourceShape,cutter);operation.Build();
+        if(!operation.IsDone()){preview.error="The kernel could not cut the requested rounded slot.";return preview;}
+        preview.shape=operation.Shape();
+        if(!validShape(preview.shape,&preview.error)){preview.shape=TopoDS_Shape();return preview;}
+        GProp_GProps before,after;
+        BRepGProp::VolumeProperties(command.sourceShape,before);BRepGProp::VolumeProperties(preview.shape,after);
+        const double removed=before.Mass()-after.Mass();
+        if(!std::isfinite(removed)||removed<=std::max(1e-9,before.Mass()*1e-12)){
+            preview.shape=TopoDS_Shape();preview.error="The rounded-slot cutter does not intersect the selected body.";
+        }
+    }catch(const Standard_Failure& e){preview.error=QStringLiteral("CAD kernel error: %1").arg(e.what());}
+     catch(const std::exception& e){preview.error=QString::fromUtf8(e.what());}
+    return preview;
+}
+
+bool SceneDocument::commitRoundedSlot(const RoundedSlotCommand& command,const TopoDS_Shape& preview,QString* error){
+    const Part* part=find(command.partId);
+    if(!part){setError(error,"The selected body no longer exists.");return false;}
+    if(part->geometryToken!=command.geometryToken){setError(error,"The rounded-slot preview is stale because the body geometry changed. Select the body again.");return false;}
+    if(!validShape(preview,error))return false;
+    checkpoint();
+    for(Part& target:parts_)if(target.id==command.partId){
+        target.shape=preview;target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);break;
+    }
+    return true;
+}
+
+bool SceneDocument::prepareKeyholeSlot(const QString& id,double centerX,double centerY,double entryZ,
+                                        double headDiameter,double throatWidth,double throatLength,double depth,
+                                        double angleDegrees,KeyholeSlotCommand* command,QString* error) const {
+    if(!command){setError(error,"The keyhole-slot command output is missing.");return false;}
+    if(!finiteOffset(centerX)||!finiteOffset(centerY)||!finiteOffset(entryZ)||
+       !finitePositive(headDiameter)||!finitePositive(throatWidth)||throatWidth>=headDiameter||
+       !finitePositive(throatLength)||!finitePositive(depth)||!std::isfinite(angleDegrees)||
+       angleDegrees < -360.0||angleDegrees > 360.0||
+       std::abs(centerX)+headDiameter/2.0+throatLength>1e6||
+       std::abs(centerY)+headDiameter/2.0+throatLength>1e6||std::abs(entryZ-depth)>1e6){
+        setError(error,"Keyhole-slot dimensions are invalid. The throat must be narrower than the round head.");return false;
+    }
+    const Part* part=find(id);
+    if(!part){setError(error,"Object not found.");return false;}
+    command->partId=id;command->geometryToken=part->geometryToken;
+    command->sourceShape=BRepBuilderAPI_Copy(part->shape).Shape();
+    command->centerX=centerX;command->centerY=centerY;command->entryZ=entryZ;
+    command->headDiameter=headDiameter;command->throatWidth=throatWidth;
+    command->throatLength=throatLength;command->depth=depth;command->angleDegrees=angleDegrees;
+    return true;
+}
+
+KeyholeSlotPreview SceneDocument::buildKeyholeSlotPreview(const KeyholeSlotCommand& command){
+    KeyholeSlotPreview preview;
+    try{
+        if(command.partId.isEmpty()||command.sourceShape.IsNull()||!finiteOffset(command.centerX)||
+           !finiteOffset(command.centerY)||!finiteOffset(command.entryZ)||!finitePositive(command.headDiameter)||
+           !finitePositive(command.throatWidth)||command.throatWidth>=command.headDiameter||
+           !finitePositive(command.throatLength)||!finitePositive(command.depth)||
+           !std::isfinite(command.angleDegrees)||command.angleDegrees < -360.0||command.angleDegrees > 360.0){
+            preview.error="The keyhole-slot command is incomplete or invalid.";return preview;
+        }
+        const double margin=std::max(0.01,command.depth*1e-4);
+        const double bottomZ=command.entryZ-command.depth;
+        const double height=command.depth+margin;
+        const TopoDS_Shape head=BRepPrimAPI_MakeCylinder(
+            gp_Ax2(gp_Pnt(command.centerX,command.centerY,bottomZ),gp_Dir(0,0,1)),
+            command.headDiameter/2.0,height).Shape();
+        const TopoDS_Shape throat=BRepPrimAPI_MakeBox(
+            gp_Pnt(command.centerX-command.throatWidth/2.0,command.centerY,bottomZ),
+            command.throatWidth,command.throatLength,height).Shape();
+        BRepAlgoAPI_Fuse cutterJoin(head,throat);cutterJoin.Build();
+        if(!cutterJoin.IsDone()){preview.error="The keyhole-slot cutter could not be joined.";return preview;}
+        gp_Trsf rotation;
+        rotation.SetRotation(gp_Ax1(gp_Pnt(command.centerX,command.centerY,0),gp_Dir(0,0,1)),
+                             command.angleDegrees*std::numbers::pi/180.0);
+        const TopoDS_Shape cutter=BRepBuilderAPI_Transform(cutterJoin.Shape(),rotation,true).Shape();
+        BRepAlgoAPI_Cut operation(command.sourceShape,cutter);operation.Build();
+        if(!operation.IsDone()){preview.error="The kernel could not cut the requested keyhole slot.";return preview;}
+        preview.shape=operation.Shape();
+        if(!validShape(preview.shape,&preview.error)){preview.shape=TopoDS_Shape();return preview;}
+        GProp_GProps before,after;
+        BRepGProp::VolumeProperties(command.sourceShape,before);BRepGProp::VolumeProperties(preview.shape,after);
+        const double removed=before.Mass()-after.Mass();
+        if(!std::isfinite(removed)||removed<=std::max(1e-9,before.Mass()*1e-12)){
+            preview.shape=TopoDS_Shape();preview.error="The keyhole-slot cutter does not intersect the selected body.";
+        }
+    }catch(const Standard_Failure& e){preview.error=QStringLiteral("CAD kernel error: %1").arg(e.what());}
+     catch(const std::exception& e){preview.error=QString::fromUtf8(e.what());}
+    return preview;
+}
+
+bool SceneDocument::commitKeyholeSlot(const KeyholeSlotCommand& command,const TopoDS_Shape& preview,QString* error){
+    const Part* part=find(command.partId);
+    if(!part){setError(error,"The selected body no longer exists.");return false;}
+    if(part->geometryToken!=command.geometryToken){setError(error,"The keyhole-slot preview is stale because the body geometry changed. Select the body again.");return false;}
+    if(!validShape(preview,error))return false;
+    checkpoint();
+    for(Part& target:parts_)if(target.id==command.partId){
+        target.shape=preview;target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);break;
+    }
+    return true;
+}
+
+bool SceneDocument::prepareRoundedSlotPattern(const QString& id,double centerX,double centerY,double entryZ,
+                                               double width,double length,double depth,double angleDegrees,
+                                               int instanceCount,double spacingX,double spacingY,
+                                               RoundedSlotPatternCommand* command,QString* error) const {
+    if(!command){setError(error,"The rounded-slot pattern command output is missing.");return false;}
+    if(!finiteOffset(centerX)||!finiteOffset(centerY)||!finiteOffset(entryZ)||!finitePositive(width)||
+       !finitePositive(length)||length<width||!finitePositive(depth)||!std::isfinite(angleDegrees)||
+       angleDegrees < -360.0||angleDegrees > 360.0||instanceCount<2||instanceCount>100||
+       !std::isfinite(spacingX)||!std::isfinite(spacingY)||
+       (std::abs(spacingX)<1e-5&&std::abs(spacingY)<1e-5)||
+       std::max(std::abs(spacingX),std::abs(spacingY))*(instanceCount-1)>1e6||
+       std::abs(centerX)+std::abs(spacingX)*(instanceCount-1)+length/2.0>1e6||
+       std::abs(centerY)+std::abs(spacingY)*(instanceCount-1)+length/2.0>1e6||
+       std::abs(entryZ-depth)>1e6){
+        setError(error,"Rounded-slot pattern dimensions are invalid. Use 2 to 100 instances and nonzero spacing.");return false;
+    }
+    const Part* part=find(id);
+    if(!part){setError(error,"Object not found.");return false;}
+    command->partId=id;command->geometryToken=part->geometryToken;
+    command->sourceShape=BRepBuilderAPI_Copy(part->shape).Shape();
+    command->centerX=centerX;command->centerY=centerY;command->entryZ=entryZ;
+    command->width=width;command->length=length;command->depth=depth;command->angleDegrees=angleDegrees;
+    command->instanceCount=instanceCount;command->spacingX=spacingX;command->spacingY=spacingY;
+    return true;
+}
+
+RoundedSlotPatternPreview SceneDocument::buildRoundedSlotPatternPreview(const RoundedSlotPatternCommand& command){
+    RoundedSlotPatternPreview preview;
+    if(command.sourceShape.IsNull()||command.partId.isEmpty()||command.instanceCount<2||command.instanceCount>100||
+       !std::isfinite(command.spacingX)||!std::isfinite(command.spacingY)||
+       (std::abs(command.spacingX)<1e-5&&std::abs(command.spacingY)<1e-5)){
+        preview.error="The rounded-slot pattern command is incomplete or invalid.";return preview;
+    }
+    TopoDS_Shape working=command.sourceShape;
+    GProp_GProps before,after;BRepGProp::VolumeProperties(command.sourceShape,before);
+    for(int i=0;i<command.instanceCount;++i){
+        RoundedSlotCommand slot;
+        slot.partId=command.partId;slot.geometryToken=command.geometryToken;slot.sourceShape=working;
+        slot.centerX=command.centerX+command.spacingX*i;
+        slot.centerY=command.centerY+command.spacingY*i;
+        slot.entryZ=command.entryZ;slot.width=command.width;slot.length=command.length;
+        slot.depth=command.depth;slot.angleDegrees=command.angleDegrees;
+        const RoundedSlotPreview slotPreview=buildRoundedSlotPreview(slot);
+        if(slotPreview.shape.IsNull()){
+            preview.error=QStringLiteral("Rounded slot %1 failed: %2").arg(i+1).arg(slotPreview.error);return preview;
+        }
+        working=slotPreview.shape;
+    }
+    if(!validShape(working,&preview.error))return preview;
+    BRepGProp::VolumeProperties(working,after);
+    const double removed=before.Mass()-after.Mass();
+    if(!std::isfinite(removed)||removed<=std::max(1e-9,before.Mass()*1e-12)){
+        preview.error="The rounded-slot pattern did not remove material.";return preview;
+    }
+    preview.shape=working;
+    return preview;
+}
+
+bool SceneDocument::commitRoundedSlotPattern(const RoundedSlotPatternCommand& command,const TopoDS_Shape& preview,QString* error){
+    const Part* part=find(command.partId);
+    if(!part){setError(error,"The selected body no longer exists.");return false;}
+    if(part->geometryToken!=command.geometryToken){setError(error,"The rounded-slot pattern preview is stale because the body geometry changed. Select the body again.");return false;}
+    if(!validShape(preview,error))return false;
+    checkpoint();
+    for(Part& target:parts_)if(target.id==command.partId){
+        target.shape=preview;target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);break;
+    }
+    return true;
+}
+
 bool SceneDocument::holePattern(const QString& id,double x,double y,double entryZ,double diameter,double depth,bool throughAll,
                                 int countX,double spacingX,int countY,double spacingY,QString* error) {
     if(countX<1||countY<1||countX>1000||countY>1000||countX>1000/countY||countX*countY<2){
@@ -1438,6 +2086,138 @@ bool SceneDocument::holePattern(const QString& id,double x,double y,double entry
         command.diameter=diameter;command.depth=depth;command.throughAll=throughAll;
         const HolePreview preview=buildHolePreview(command);
         if(preview.shape.IsNull()){setError(error,QStringLiteral("Hole at grid position %1, %2 failed: %3").arg(ix+1).arg(iy+1).arg(preview.error));return false;}
+        working=preview.shape;
+    }
+    if(!validShape(working,error))return false;
+    checkpoint();
+    for(Part& target:parts_)if(target.id==id){target.shape=working;target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);break;}
+    return true;
+}
+
+bool SceneDocument::circularHolePattern(const QString& id,double centerX,double centerY,double entryZ,double boltCircleRadius,
+                                       double diameter,double depth,bool throughAll,int instanceCount,
+                                       double totalAngleDegrees,QString* error) {
+    if(instanceCount<2||instanceCount>1000){setError(error,"Circular hole pattern count must be between 2 and 1,000.");return false;}
+    if(!finiteOffset(centerX)||!finiteOffset(centerY)||!finiteOffset(entryZ)||!finitePositive(boltCircleRadius)||
+       std::abs(centerX)+boltCircleRadius>1e6||std::abs(centerY)+boltCircleRadius>1e6||!finitePositive(diameter)||
+       (!throughAll&&!finitePositive(depth))||!std::isfinite(totalAngleDegrees)||totalAngleDegrees<1||totalAngleDegrees>360){
+        setError(error,"Circular hole pattern location, dimensions, or angle are invalid.");return false;
+    }
+    const Part* source=find(id);
+    if(!source){setError(error,"Object not found.");return false;}
+    const QString geometryToken=source->geometryToken;
+    TopoDS_Shape working=BRepBuilderAPI_Copy(source->shape).Shape();
+    const bool fullCircle=std::abs(totalAngleDegrees-360.0)<1e-9;
+    const double denominator=fullCircle?instanceCount:instanceCount-1;
+    for(int index=0;index<instanceCount;++index){
+        const double angle=totalAngleDegrees*index/denominator*std::numbers::pi/180.0;
+        HoleCommand command;command.partId=id;command.geometryToken=geometryToken;command.sourceShape=working;
+        command.x=centerX+boltCircleRadius*std::cos(angle);command.y=centerY+boltCircleRadius*std::sin(angle);
+        command.entryZ=entryZ;command.diameter=diameter;command.depth=depth;command.throughAll=throughAll;
+        const HolePreview preview=buildHolePreview(command);
+        if(preview.shape.IsNull()){
+            setError(error,QStringLiteral("Hole %1 of %2 failed: %3").arg(index+1).arg(instanceCount).arg(preview.error));return false;
+        }
+        working=preview.shape;
+    }
+    if(!validShape(working,error))return false;
+    checkpoint();
+    for(Part& target:parts_)if(target.id==id){target.shape=working;target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);break;}
+    return true;
+}
+
+bool SceneDocument::circularCountersinkPattern(const QString& id,double centerX,double centerY,double entryZ,double boltCircleRadius,
+                                               double diameter,double depth,bool throughAll,double headDiameter,
+                                               double includedAngleDegrees,int instanceCount,double totalAngleDegrees,
+                                               QString* error){
+    if(instanceCount<2||instanceCount>1000){setError(error,"Circular countersink pattern count must be between 2 and 1,000.");return false;}
+    if(!finiteOffset(centerX)||!finiteOffset(centerY)||!finiteOffset(entryZ)||!finitePositive(boltCircleRadius)||
+       std::abs(centerX)+boltCircleRadius>1e6||std::abs(centerY)+boltCircleRadius>1e6||!finitePositive(diameter)||
+       !finitePositive(headDiameter)||headDiameter<=diameter||(!throughAll&&!finitePositive(depth))||
+       !std::isfinite(includedAngleDegrees)||includedAngleDegrees<=1||includedAngleDegrees>=179||
+       !std::isfinite(totalAngleDegrees)||totalAngleDegrees<1||totalAngleDegrees>360){
+        setError(error,"Circular countersink pattern location, dimensions, angle, or count are invalid.");return false;
+    }
+    const Part* source=find(id);if(!source){setError(error,"Object not found.");return false;}
+    const QString geometryToken=source->geometryToken;
+    TopoDS_Shape working=BRepBuilderAPI_Copy(source->shape).Shape();
+    const bool fullCircle=std::abs(totalAngleDegrees-360.0)<1e-9;
+    const double denominator=fullCircle?instanceCount:instanceCount-1;
+    for(int index=0;index<instanceCount;++index){
+        const double angle=totalAngleDegrees*index/denominator*std::numbers::pi/180.0;
+        HoleCommand command;command.partId=id;command.geometryToken=geometryToken;command.sourceShape=working;
+        command.x=centerX+boltCircleRadius*std::cos(angle);command.y=centerY+boltCircleRadius*std::sin(angle);
+        command.entryZ=entryZ;command.diameter=diameter;command.depth=depth;command.throughAll=throughAll;
+        command.style=HoleStyle::Countersink;command.headDiameter=headDiameter;command.sinkAngleDegrees=includedAngleDegrees;
+        const HolePreview preview=buildHolePreview(command);
+        if(preview.shape.IsNull()){
+            setError(error,QStringLiteral("Countersink %1 of %2 failed: %3").arg(index+1).arg(instanceCount).arg(preview.error));return false;
+        }
+        working=preview.shape;
+    }
+    if(!validShape(working,error))return false;
+    checkpoint();
+    for(Part& target:parts_)if(target.id==id){target.shape=working;target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);break;}
+    return true;
+}
+
+bool SceneDocument::circularCounterborePattern(const QString& id,double centerX,double centerY,double entryZ,double boltCircleRadius,
+                                               double diameter,double depth,bool throughAll,double headDiameter,double headDepth,
+                                               int instanceCount,double totalAngleDegrees,QString* error){
+    if(instanceCount<2||instanceCount>1000){setError(error,"Circular counterbore pattern count must be between 2 and 1,000.");return false;}
+    if(!finiteOffset(centerX)||!finiteOffset(centerY)||!finiteOffset(entryZ)||!finitePositive(boltCircleRadius)||
+       std::abs(centerX)+boltCircleRadius>1e6||std::abs(centerY)+boltCircleRadius>1e6||!finitePositive(diameter)||
+       !finitePositive(headDiameter)||headDiameter<=diameter||!finitePositive(headDepth)||
+       (!throughAll&&(!finitePositive(depth)||headDepth>depth))||!std::isfinite(totalAngleDegrees)||
+       totalAngleDegrees<1||totalAngleDegrees>360){
+        setError(error,"Circular counterbore pattern location, dimensions, depth, angle, or count are invalid.");return false;
+    }
+    const Part* source=find(id);if(!source){setError(error,"Object not found.");return false;}
+    const QString geometryToken=source->geometryToken;
+    TopoDS_Shape working=BRepBuilderAPI_Copy(source->shape).Shape();
+    const bool fullCircle=std::abs(totalAngleDegrees-360.0)<1e-9;
+    const double denominator=fullCircle?instanceCount:instanceCount-1;
+    for(int index=0;index<instanceCount;++index){
+        const double angle=totalAngleDegrees*index/denominator*std::numbers::pi/180.0;
+        HoleCommand command;command.partId=id;command.geometryToken=geometryToken;command.sourceShape=working;
+        command.x=centerX+boltCircleRadius*std::cos(angle);command.y=centerY+boltCircleRadius*std::sin(angle);
+        command.entryZ=entryZ;command.diameter=diameter;command.depth=depth;command.throughAll=throughAll;
+        command.style=HoleStyle::Counterbore;command.headDiameter=headDiameter;command.headDepth=headDepth;
+        const HolePreview preview=buildHolePreview(command);
+        if(preview.shape.IsNull()){
+            setError(error,QStringLiteral("Counterbore %1 of %2 failed: %3").arg(index+1).arg(instanceCount).arg(preview.error));return false;
+        }
+        working=preview.shape;
+    }
+    if(!validShape(working,error))return false;
+    checkpoint();
+    for(Part& target:parts_)if(target.id==id){target.shape=working;target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);break;}
+    return true;
+}
+
+bool SceneDocument::linearKeyholeSlotPattern(const QString& id,double centerX,double centerY,double entryZ,double headDiameter,
+                                              double throatWidth,double throatLength,double depth,double angleDegrees,
+                                              int instanceCount,double spacingX,double spacingY,QString* error){
+    if(!finiteOffset(centerX)||!finiteOffset(centerY)||!finiteOffset(entryZ)||!finitePositive(headDiameter)||
+       !finitePositive(throatWidth)||throatWidth>=headDiameter||!finitePositive(throatLength)||!finitePositive(depth)||
+       !std::isfinite(angleDegrees)||angleDegrees < -360||angleDegrees > 360||instanceCount<2||instanceCount>100||
+       !std::isfinite(spacingX)||!std::isfinite(spacingY)||(std::abs(spacingX)<1e-5&&std::abs(spacingY)<1e-5)||
+       std::max(std::abs(spacingX),std::abs(spacingY))*(instanceCount-1)>1e6||
+       std::abs(centerX)+std::abs(spacingX)*(instanceCount-1)+throatLength+headDiameter>1e6||
+       std::abs(centerY)+std::abs(spacingY)*(instanceCount-1)+throatLength+headDiameter>1e6||std::abs(entryZ-depth)>1e6){
+        setError(error,"Keyhole-slot pattern dimensions are invalid. Use 2 to 100 instances and nonzero spacing.");return false;
+    }
+    const Part* source=find(id);if(!source){setError(error,"Object not found.");return false;}
+    const QString token=source->geometryToken;TopoDS_Shape working=BRepBuilderAPI_Copy(source->shape).Shape();
+    for(int index=0;index<instanceCount;++index){
+        KeyholeSlotCommand command;command.partId=id;command.geometryToken=token;command.sourceShape=working;
+        command.centerX=centerX+spacingX*index;command.centerY=centerY+spacingY*index;command.entryZ=entryZ;
+        command.headDiameter=headDiameter;command.throatWidth=throatWidth;command.throatLength=throatLength;
+        command.depth=depth;command.angleDegrees=angleDegrees;
+        const KeyholeSlotPreview preview=buildKeyholeSlotPreview(command);
+        if(preview.shape.IsNull()){
+            setError(error,QStringLiteral("Keyhole slot %1 failed: %2").arg(index+1).arg(preview.error));return false;
+        }
         working=preview.shape;
     }
     if(!validShape(working,error))return false;
@@ -1595,7 +2375,7 @@ bool SceneDocument::shellBody(const QString& id, Axis openingAxis, bool positive
 bool SceneDocument::rename(const QString& id, const QString& name, QString* error) {
     const QString trimmed = name.trimmed();
     if (trimmed.isEmpty() || trimmed.size() > 120 || trimmed.contains(QLatin1Char('\n'))) {
-        setError(error, "Names must contain 1–120 characters on a single line."); return false;
+        setError(error, "Names must contain 1â€“120 characters on a single line."); return false;
     }
     for (const auto& part : parts_) if (part.id != id && part.name.compare(trimmed, Qt::CaseInsensitive) == 0) {
         setError(error, "Another body already uses this name."); return false;
@@ -1748,6 +2528,63 @@ bool SceneDocument::load(const QString& path, QString* error) {
     return true;
 }
 
+bool SceneDocument::importSTEP(const QString& path, QString* error) {
+    if (path.trimmed().isEmpty()) { setError(error,"Provide a STEP file path."); return false; }
+    const QFileInfo fileInfo(path);
+    if (!fileInfo.exists() || !fileInfo.isFile() || fileInfo.size() <= 0) {
+        setError(error,"STEP file does not exist or is empty."); return false;
+    }
+    if (fileInfo.size() > kMaxStepImportBytes) {
+        setError(error,"STEP file exceeds the 512 MiB import limit."); return false;
+    }
+    if (parts_.size() >= kMaxObjects) { setError(error,"Scene object limit reached."); return false; }
+    try {
+        STEPControl_Reader reader;
+        if (reader.ReadFile(QFile::encodeName(path).constData()) != IFSelect_RetDone) {
+            setError(error,"Could not read the STEP file."); return false;
+        }
+        if (reader.TransferRoots() <= 0) {
+            setError(error,"The STEP file contains no transferable geometry."); return false;
+        }
+        const TopoDS_Shape combined = reader.OneShape();
+        if (combined.IsNull()) { setError(error,"The STEP file contains no geometry."); return false; }
+
+        NCollection_IndexedMap<TopoDS_Shape,TopTools_ShapeMapHasher> solids;
+        TopExp::MapShapes(combined,TopAbs_SOLID,solids);
+        if (solids.Extent()==0) { setError(error,"The STEP file contains no solid bodies."); return false; }
+        if (parts_.size() + solids.Extent() > kMaxObjects) {
+            setError(error,"Import would exceed the scene object limit."); return false;
+        }
+
+        const QString fileBase = fileInfo.completeBaseName().trimmed();
+        const QString baseName = fileBase.isEmpty() ? QStringLiteral("Imported STEP") : fileBase;
+        QVector<Part> imported;
+        imported.reserve(solids.Extent());
+        QSet<QString> reservedNames;
+        for (int index=1; index<=solids.Extent(); ++index) {
+            const TopoDS_Shape shape = solids(index);
+            if (!validShape(shape,error)) return false;
+            QString candidate = solids.Extent()==1 ? baseName : baseName + QStringLiteral(" %1").arg(index);
+            const QString requested = candidate;
+            int suffix=2;
+            while (reservedNames.contains(candidate.toCaseFolded()) || uniqueName(candidate)!=candidate) {
+                candidate=requested+QStringLiteral(" %1").arg(suffix++);
+            }
+            reservedNames.insert(candidate.toCaseFolded());
+            imported.append({generatedId(),candidate,shape,true,"#6c9dc2"});
+        }
+
+        checkpoint();
+        for (Part& part : imported) parts_.append(std::move(part));
+        return true;
+    } catch (const Standard_Failure& e) {
+        setError(error,QStringLiteral("STEP import kernel error: %1").arg(e.what()));
+    } catch (const std::exception& e) {
+        setError(error,QString::fromUtf8(e.what()));
+    }
+    return false;
+}
+
 bool SceneDocument::exportSTEP(const QString& path, QString* error) const {
     if (parts_.isEmpty()) { setError(error,"No geometry to export."); return false; }
     try {
@@ -1774,3 +2611,4 @@ bool SceneDocument::exportSTL(const QString& path, QString* error) const {
     } catch (const Standard_Failure& e) { setError(error,QStringLiteral("STL kernel error: %1").arg(e.what())); return false; }
 }
 } // namespace cad
+

@@ -16,6 +16,7 @@ find_package(OpenCASCADE 8.0.1 REQUIRED CONFIG)
 add_library(cadcore STATIC
     src/core/SceneDocument.h
     src/core/SceneDocument.cpp
+    src/core/FormFeatures.cpp
     src/core/EngineeringComponents.cpp
     src/core/AdvancedComponents.cpp
     src/core/SpecializedComponents.cpp
@@ -57,6 +58,21 @@ if(BUILD_TESTING)
     target_link_libraries(cadcore_tests PRIVATE cadcore Qt6::Core)
     add_test(NAME cadcore_modeling_tools COMMAND cadcore_tests --modeling-tools)
     add_test(NAME cadcore_wing_rib COMMAND cadcore_tests --wing-rib)
+    add_test(NAME cadcore_sweeps COMMAND cadcore_tests --sweeps)
+    add_test(NAME cadcore_tapered_helix COMMAND cadcore_tests --tapered-helix)
+    add_test(NAME cadcore_form_features COMMAND cadcore_tests --form-features)
+    add_test(NAME cadcore_vector_pattern COMMAND cadcore_tests --vector-pattern)
+    add_test(NAME cadcore_circular_hole_pattern COMMAND cadcore_tests --circular-hole-pattern)
+    add_test(NAME cadcore_helical_sweep COMMAND cadcore_tests --helical-sweep)
+    add_test(NAME cadcore_variable_pitch_helix COMMAND cadcore_tests --variable-pitch-helix)
+    add_test(NAME cadcore_dovetail_groove COMMAND cadcore_tests --dovetail-groove)
+    add_test(NAME cadcore_t_slot_groove COMMAND cadcore_tests --t-slot-groove)
+    add_test(NAME cadcore_rounded_slot COMMAND cadcore_tests --rounded-slot)
+    add_test(NAME cadcore_keyhole_slot COMMAND cadcore_tests --keyhole-slot)
+    add_test(NAME cadcore_rounded_slot_pattern COMMAND cadcore_tests --rounded-slot-pattern)
+    add_test(NAME cadcore_circular_countersink_pattern COMMAND cadcore_tests --circular-countersink-pattern)
+    add_test(NAME cadcore_circular_counterbore_pattern COMMAND cadcore_tests --circular-counterbore-pattern)
+    add_test(NAME cadcore_linear_keyhole_slot_pattern COMMAND cadcore_tests --linear-keyhole-slot-pattern)
     if(MSVC)
         target_compile_options(cadcore_tests PRIVATE /utf-8 /W4)
     endif()

@@ -1,4 +1,4 @@
-#include "core/SceneDocument.h"
+﻿#include "core/SceneDocument.h"
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepGProp.hxx>
 #include <BRepBndLib.hxx>
@@ -96,6 +96,557 @@ void testModelingTools() {
         validate(doc.parts().first());
         require(doc.undo()&&doc.parts().isEmpty(),"Modeling-tool undo failed");
     }
+}
+void testSweeps() {
+    QString error;
+    cad::SceneDocument doc;
+    require(!doc.sweepCircularProfile(0,60,20,10,&error)&&doc.parts().isEmpty(),"Sweep accepted a zero-radius profile");
+    const bool circleCreated=doc.sweepCircularProfile(3,60,20,12,&error);
+    require(circleCreated,("Circular sweep failed: "+error.toStdString()).c_str());
+    require(doc.parts().size()==1&&doc.parts().first().name=="Circular Sweep","Circular sweep was not inserted");
+    validate(doc.parts().first());
+    require(doc.undo()&&doc.parts().isEmpty(),"Circular sweep undo failed");
+    const bool rectangleCreated=doc.sweepRectangularProfile(10,6,60,18,10,&error);
+    require(rectangleCreated,("Rectangular sweep failed: "+error.toStdString()).c_str());
+    require(doc.parts().size()==1&&doc.parts().first().name=="Rectangular Sweep","Rectangular sweep was not inserted");
+    validate(doc.parts().first());
+    require(doc.undo()&&doc.parts().isEmpty(),"Rectangular sweep undo failed");
+    require(!doc.sweepEllipticalProfile(0,4,60,18,10,&error)&&doc.parts().isEmpty(),
+            "Elliptical sweep accepted a zero semi-axis");
+    const bool ellipseCreated=doc.sweepEllipticalProfile(8,4,60,18,10,&error);
+    require(ellipseCreated,("Elliptical sweep failed: "+error.toStdString()).c_str());
+    require(doc.parts().size()==1&&doc.parts().first().name=="Elliptical Sweep","Elliptical sweep was not inserted");
+    validate(doc.parts().first());
+    require(doc.undo()&&doc.parts().isEmpty(),"Elliptical sweep undo failed");
+}
+void testHelicalSweep() {
+    QString error;
+    cad::SceneDocument doc;
+    require(!doc.addHelicalSweep(1.5,12,2,6,&error)&&doc.parts().isEmpty(),"Helical sweep accepted pitch smaller than wire diameter");
+    require(!doc.addHelicalSweep(1.5,1.5,5,6,&error)&&doc.parts().isEmpty(),"Helical sweep accepted overlapping coil radius");
+    require(!doc.addHelicalSweep(1.5,12,5,21,&error)&&doc.parts().isEmpty(),"Helical sweep accepted more than 20 turns");
+    const bool created=doc.addHelicalSweep(1.5,12,5,6,&error);
+    require(created,("Helical sweep failed: "+error.toStdString()).c_str());
+    require(doc.parts().size()==1&&doc.parts().first().name=="Helical Sweep","Helical sweep was not inserted");
+    validate(doc.parts().first());
+    require(doc.undo()&&doc.parts().isEmpty(),"Helical sweep undo failed");
+    require(doc.redo()&&doc.parts().size()==1&&doc.parts().first().name=="Helical Sweep","Helical sweep redo failed");
+}
+void testVariablePitchHelicalSweep() {
+    QString error;
+    cad::SceneDocument doc;
+    require(!doc.addVariablePitchHelicalSweep(1.5,12,2,7,6,&error)&&doc.parts().isEmpty(),
+            "Variable-pitch helix accepted a start pitch smaller than wire diameter");
+    require(!doc.addVariablePitchHelicalSweep(1.5,12,4,2,6,&error)&&doc.parts().isEmpty(),
+            "Variable-pitch helix accepted an end pitch smaller than wire diameter");
+    require(!doc.addVariablePitchHelicalSweep(1.5,1.5,4,7,6,&error)&&doc.parts().isEmpty(),
+            "Variable-pitch helix accepted an overlapping coil radius");
+    require(!doc.addVariablePitchHelicalSweep(1.5,12,4,7,21,&error)&&doc.parts().isEmpty(),
+            "Variable-pitch helix accepted more than 20 turns");
+    const bool created=doc.addVariablePitchHelicalSweep(1.5,12,4,7,6,&error);
+    require(created,("Variable-pitch helix failed: "+error.toStdString()).c_str());
+    require(doc.parts().size()==1&&doc.parts().first().name=="Variable Pitch Helix",
+            "Variable-pitch helix was not inserted with expected name");
+    validate(doc.parts().first());
+    require(doc.undo()&&doc.parts().isEmpty(),"Variable-pitch helix undo failed");
+    require(doc.redo()&&doc.parts().size()==1&&doc.parts().first().name=="Variable Pitch Helix",
+            "Variable-pitch helix redo failed");
+}
+void testTaperedHelicalSweep() {
+    QString error;
+    cad::SceneDocument doc;
+    require(!doc.addTaperedHelicalSweep(1.5,1.5,12,5,6,&error)&&doc.parts().isEmpty(),
+            "Tapered helix accepted a start coil radius smaller than wire radius");
+    require(!doc.addTaperedHelicalSweep(1.5,12,1.5,5,6,&error)&&doc.parts().isEmpty(),
+            "Tapered helix accepted an end coil radius smaller than wire radius");
+    require(!doc.addTaperedHelicalSweep(1.5,8,16,2,6,&error)&&doc.parts().isEmpty(),
+            "Tapered helix accepted pitch smaller than wire diameter");
+    require(!doc.addTaperedHelicalSweep(1.5,8,16,5,21,&error)&&doc.parts().isEmpty(),
+            "Tapered helix accepted more than 20 turns");
+    const bool created=doc.addTaperedHelicalSweep(1.5,8,16,5,6,&error);
+    require(created,("Tapered helix failed: "+error.toStdString()).c_str());
+    require(doc.parts().size()==1&&doc.parts().first().name=="Tapered Helix","Tapered helix was not inserted");
+    validate(doc.parts().first());
+    require(doc.undo()&&doc.parts().isEmpty(),"Tapered helix undo failed");
+    require(doc.redo()&&doc.parts().size()==1&&doc.parts().first().name=="Tapered Helix","Tapered helix redo failed");
+}
+void testFormFeatures() {
+    QString error;
+    {
+        cad::SceneDocument doc;
+        require(!doc.addEllipticalPrism(0,10,25,&error)&&doc.parts().isEmpty(),"Elliptical prism accepted a zero semi-axis");
+        require(doc.addEllipticalPrism(16,9,25,&error),("Elliptical prism failed: "+error.toStdString()).c_str());
+        require(doc.parts().first().name=="Elliptical Prism","Elliptical prism name mismatch");validate(doc.parts().first());
+        require(doc.undo()&&doc.parts().isEmpty(),"Elliptical prism undo failed");
+    }
+    {
+        cad::SceneDocument doc;
+        require(!doc.addEllipticalTube(18,12,18,7,30,&error)&&doc.parts().isEmpty(),"Elliptical tube accepted an inner axis equal to its outer axis");
+        require(doc.addEllipticalTube(18,12,12,7,30,&error),("Elliptical tube failed: "+error.toStdString()).c_str());
+        require(doc.parts().first().name=="Elliptical Tube","Elliptical tube name mismatch");validate(doc.parts().first());
+        require(doc.undo()&&doc.parts().isEmpty(),"Elliptical tube undo failed");
+    }
+    {
+        cad::SceneDocument doc;
+        require(!doc.loftCircularSections(16,9,0,0,0,&error)&&doc.parts().isEmpty(),"Circular loft accepted zero height");
+        require(doc.loftCircularSections(16,9,35,4,-2,&error),("Circular loft failed: "+error.toStdString()).c_str());
+        require(doc.parts().first().name=="Circular Loft","Circular loft name mismatch");validate(doc.parts().first());
+        require(doc.undo()&&doc.parts().isEmpty(),"Circular loft undo failed");
+    }
+    {
+        cad::SceneDocument doc;
+        require(!doc.loftRectangleToCircle(35,25,0,30,0,0,&error)&&doc.parts().isEmpty(),"Rectangular-to-circular loft accepted zero radius");
+        require(doc.loftRectangleToCircle(35,25,12,30,2,3,&error),("Rectangular-to-circular loft failed: "+error.toStdString()).c_str());
+        require(doc.parts().first().name=="Rectangular to Circular Loft","Transition loft name mismatch");validate(doc.parts().first());
+        require(doc.undo()&&doc.parts().isEmpty(),"Transition loft undo failed");
+    }
+    {
+        cad::SceneDocument doc;
+        require(!doc.loftHollowReducer(18,18,10,6,35,0,0,&error)&&doc.parts().isEmpty(),"Hollow reducer accepted equal inner and outer radius");
+        require(doc.loftHollowReducer(18,12,10,6,35,1,0,&error),("Hollow reducer failed: "+error.toStdString()).c_str());
+        require(doc.parts().first().name=="Hollow Loft Reducer","Hollow reducer name mismatch");validate(doc.parts().first());
+        require(doc.undo()&&doc.parts().isEmpty(),"Hollow reducer undo failed");
+    }
+}
+void testVectorLinearPattern() {
+    cad::SceneDocument doc;QString error;
+    require(doc.addPrimitive(cad::Primitive::Box,{10,12,14},&error),"Could not create vector-pattern source body");
+    const QString id=doc.parts().first().id;
+    require(!doc.linearPatternAlongVector(id,0,0,0,3,10,&error)&&doc.parts().size()==1,
+            "Linear pattern accepted a zero direction vector");
+    require(!doc.linearPatternAlongVector(id,1,1,0,1,10,&error)&&doc.parts().size()==1,
+            "Linear pattern accepted fewer than two instances");
+    require(!doc.linearPatternAlongVector(id,1,0,0,3,0,&error)&&doc.parts().size()==1,
+            "Linear pattern accepted zero spacing");
+    require(!doc.linearPatternAlongVector("missing",1,0,0,3,10,&error)&&doc.parts().size()==1,
+            "Linear pattern accepted a missing source body");
+    require(doc.linearPatternAlongVector(id,1,1,0,3,10,&error),
+            ("Diagonal linear pattern failed: "+error.toStdString()).c_str());
+    require(doc.parts().size()==3&&doc.parts()[1].name.contains("Vector Pattern"),
+            "Vector pattern did not insert the expected instances");
+    for(const auto& part:doc.parts())validate(part);
+    Bnd_Box bounds;BRepBndLib::Add(doc.parts()[1].shape,bounds);
+    double xmin,ymin,zmin,xmax,ymax,zmax;bounds.Get(xmin,ymin,zmin,xmax,ymax,zmax);
+    closeTo(xmin,10/std::sqrt(2.0));closeTo(ymin,10/std::sqrt(2.0));
+    require(doc.undo()&&doc.parts().size()==1,"Vector pattern did not undo as one operation");
+    require(doc.redo()&&doc.parts().size()==3,"Vector pattern redo failed");
+}
+void testCircularHolePattern() {
+    QString error;cad::SceneDocument doc;
+    require(doc.addPrimitive(cad::Primitive::Box,{80,80,20},&error),"Could not create circular-hole-pattern test body");
+    const QString id=doc.parts().first().id;
+    const double originalVolume=volume(doc.parts().first().shape);
+    require(!doc.circularHolePattern(id,40,40,20,25,6,20,true,1,360,&error)&&doc.parts().size()==1,
+            "Circular hole pattern accepted fewer than two holes");
+    require(!doc.circularHolePattern(id,40,40,20,0,6,20,true,4,360,&error)&&doc.parts().size()==1,
+            "Circular hole pattern accepted a zero bolt-circle radius");
+    require(!doc.circularHolePattern(id,40,40,20,25,6,20,true,4,0,&error)&&doc.parts().size()==1,
+            "Circular hole pattern accepted a zero angle");
+    require(!doc.circularHolePattern(id,500,500,20,25,6,20,true,4,360,&error)&&doc.parts().size()==1,
+            "Circular hole pattern accepted cutters missing the target body");
+    closeTo(volume(doc.parts().first().shape),originalVolume);
+    require(doc.circularHolePattern(id,40,40,20,25,6,20,true,4,360,&error),
+            ("Four-hole circular pattern failed: "+error.toStdString()).c_str());
+    validate(doc.parts().first());
+    closeTo(volume(doc.parts().first().shape),originalVolume-4*std::numbers::pi*9*20,1e-4);
+    require(doc.undo()&&doc.parts().size()==1,"Circular hole pattern undo failed");
+    closeTo(volume(doc.parts().first().shape),originalVolume);
+    require(doc.redo()&&doc.parts().size()==1,"Circular hole pattern redo failed");
+    validate(doc.parts().first());
+}
+void testCircularCountersinkPattern(){
+    QString error;cad::SceneDocument doc;
+    require(doc.addPrimitive(cad::Primitive::Box,{80,80,20},&error),"Countersink-pattern body creation failed");
+    const QString id=doc.parts().first().id;const double original=volume(doc.parts().first().shape);
+    require(!doc.circularCountersinkPattern(id,40,40,20,25,6,20,true,5,90,4,360,&error),"Countersink pattern accepted a head narrower than the drill");
+    require(!doc.circularCountersinkPattern(id,40,40,20,25,6,20,true,10,180,4,360,&error),"Countersink pattern accepted a boundary angle");
+    require(!doc.circularCountersinkPattern(id,40,40,20,25,6,20,true,10,90,1,360,&error),"Countersink pattern accepted a single hole");
+    require(!doc.circularCountersinkPattern(id,40,40,20,0,6,20,true,10,90,4,360,&error),"Countersink pattern accepted zero bolt-circle radius");
+    require(!doc.circularCountersinkPattern(id,400,400,20,25,6,20,true,10,90,4,360,&error),"Countersink pattern accepted cutters outside the body");
+    require(!doc.circularCountersinkPattern("missing",40,40,20,25,6,20,true,10,90,4,360,&error),"Countersink pattern accepted an unknown body");
+    closeTo(volume(doc.parts().first().shape),original);
+    require(doc.circularCountersinkPattern(id,40,40,20,25,6,20,true,10,90,4,360,&error),
+            ("Circular countersink pattern failed: "+error.toStdString()).c_str());
+    validate(doc.parts().first());const double cut=original-volume(doc.parts().first().shape);
+    require(cut>2400&&cut<2800,"Countersink pattern removed an unexpected volume");
+    require(doc.undo(),"Countersink pattern undo failed");closeTo(volume(doc.parts().first().shape),original);
+    require(doc.redo(),"Countersink pattern redo failed");closeTo(volume(doc.parts().first().shape),original-cut);
+
+    cad::SceneDocument blind;
+    require(blind.addPrimitive(cad::Primitive::Box,{80,80,20},&error),"Blind countersink pattern fixture failed");
+    require(blind.circularCountersinkPattern(blind.parts().first().id,40,40,20,25,6,8,false,10,82,3,180,&error),
+            ("Blind partial countersink pattern failed: "+error.toStdString()).c_str());
+    validate(blind.parts().first());const double blindPatternVolume=volume(blind.parts().first().shape);
+    require(blindPatternVolume<128000,"Blind partial countersinks removed no material");
+    require(blind.undo(),"Blind partial countersink pattern undo failed");closeTo(volume(blind.parts().first().shape),128000);
+    require(blind.redo(),"Blind partial countersink pattern redo failed");closeTo(volume(blind.parts().first().shape),blindPatternVolume);
+
+    cad::SceneDocument lateFailure;
+    require(lateFailure.addPrimitive(cad::Primitive::Box,{80,80,20},&error),"Late-failure countersink fixture failed");
+    const QString lateFailureId=lateFailure.parts().first().id;
+    require(!lateFailure.circularCountersinkPattern(lateFailureId,20,40,20,30,6,20,true,10,90,2,180,&error),
+            "Countersink pattern accepted a later cutter missing the body");
+    closeTo(volume(lateFailure.parts().first().shape),128000);
+}
+void testCircularCounterborePattern(){
+    QString error;cad::SceneDocument doc;
+    require(doc.addPrimitive(cad::Primitive::Box,{80,80,20},&error),"Counterbore-pattern body creation failed");
+    const QString id=doc.parts().first().id;const double original=volume(doc.parts().first().shape);
+    require(!doc.circularCounterborePattern(id,40,40,20,25,6,20,true,5,3,4,360,&error),"Counterbore pattern accepted a head narrower than the drill");
+    require(!doc.circularCounterborePattern(id,40,40,20,25,6,8,false,10,9,4,360,&error),"Counterbore pattern accepted head depth beyond blind depth");
+    require(!doc.circularCounterborePattern(id,40,40,20,25,6,20,true,10,3,1,360,&error),"Counterbore pattern accepted a single hole");
+    require(!doc.circularCounterborePattern(id,40,40,20,0,6,20,true,10,3,4,360,&error),"Counterbore pattern accepted zero bolt-circle radius");
+    require(!doc.circularCounterborePattern(id,400,400,20,25,6,20,true,10,3,4,360,&error),"Counterbore pattern accepted cutters outside the body");
+    require(!doc.circularCounterborePattern("missing",40,40,20,25,6,20,true,10,3,4,360,&error),"Counterbore pattern accepted an unknown body");
+    closeTo(volume(doc.parts().first().shape),original);
+    require(doc.circularCounterborePattern(id,40,40,20,25,6,20,true,10,3,4,360,&error),
+            ("Circular counterbore pattern failed: "+error.toStdString()).c_str());
+    validate(doc.parts().first());const double cut=original-volume(doc.parts().first().shape);
+    require(cut>2700&&cut<3000,"Counterbore pattern removed an unexpected volume");
+    require(doc.undo(),"Counterbore pattern undo failed");closeTo(volume(doc.parts().first().shape),original);
+    require(doc.redo(),"Counterbore pattern redo failed");closeTo(volume(doc.parts().first().shape),original-cut);
+    cad::SceneDocument blind;require(blind.addPrimitive(cad::Primitive::Box,{80,80,20},&error),"Blind counterbore fixture failed");
+    require(blind.circularCounterborePattern(blind.parts().first().id,40,40,20,25,6,8,false,10,3,3,180,&error),
+            ("Blind partial counterbore pattern failed: "+error.toStdString()).c_str());
+    validate(blind.parts().first());require(volume(blind.parts().first().shape)<128000,"Blind counterbores removed no material");
+}
+void testLinearKeyholeSlotPattern(){
+    QString error;cad::SceneDocument doc;
+    require(doc.addPrimitive(cad::Primitive::Box,{40,30,20},&error),"Keyhole-pattern box fixture failed");
+    const QString id=doc.parts().first().id;const double original=volume(doc.parts().first().shape);
+    require(!doc.linearKeyholeSlotPattern(id,8,15,20,8,8,10,6,0,3,12,0,&error),"Keyhole pattern accepted a throat as wide as the head");
+    require(!doc.linearKeyholeSlotPattern(id,8,15,20,8,4,10,6,361,3,12,0,&error),"Keyhole pattern accepted invalid rotation");
+    require(!doc.linearKeyholeSlotPattern(id,8,15,20,8,4,10,6,0,1,12,0,&error),"Keyhole pattern accepted one instance");
+    require(!doc.linearKeyholeSlotPattern(id,8,15,20,8,4,10,6,0,3,0,0,&error),"Keyhole pattern accepted zero spacing");
+    require(!doc.linearKeyholeSlotPattern("missing",8,15,20,8,4,10,6,0,3,12,0,&error),"Keyhole pattern accepted an unknown body");
+    closeTo(volume(doc.parts().first().shape),original);
+    require(doc.linearKeyholeSlotPattern(id,8,15,20,8,4,10,6,0,3,12,0,&error),
+            ("Linear keyhole-slot pattern failed: "+error.toStdString()).c_str());
+    validate(doc.parts().first());const double cut=original-volume(doc.parts().first().shape);
+    require(cut>1000&&cut<2000,"Keyhole pattern removed an unexpected volume");
+    require(doc.undo(),"Keyhole-slot pattern undo failed");closeTo(volume(doc.parts().first().shape),original);
+    require(doc.redo(),"Keyhole-slot pattern redo failed");closeTo(volume(doc.parts().first().shape),original-cut);
+    cad::SceneDocument lateFailure;require(lateFailure.addPrimitive(cad::Primitive::Box,{40,30,20},&error),"Late-failure keyhole fixture failed");
+    const double lateFailureVolume=volume(lateFailure.parts().first().shape);
+    require(!lateFailure.linearKeyholeSlotPattern(lateFailure.parts().first().id,8,15,20,8,4,10,6,0,2,-20,0,&error),
+            "Keyhole pattern accepted a later slot missing the body");
+    closeTo(volume(lateFailure.parts().first().shape),lateFailureVolume);
+    cad::SceneDocument rotated;require(rotated.addPrimitive(cad::Primitive::Box,{40,30,20},&error),"Rotated keyhole pattern fixture failed");
+    require(rotated.linearKeyholeSlotPattern(rotated.parts().first().id,20,9,20,6,3,8,5,90,2,0,12,&error),
+            ("Rotated keyhole-slot pattern failed: "+error.toStdString()).c_str());
+    validate(rotated.parts().first());
+}
+void testDovetailGroove() {
+    QString error;
+    cad::SceneDocument doc;
+    require(doc.addPrimitive(cad::Primitive::Box,{40,30,20},&error),"Dovetail source box creation failed");
+    const QString sourceId=doc.parts().first().id;
+    const double originalVolume=volume(doc.parts().first().shape);
+    require(std::abs(originalVolume-24000.0)<1e-5,"Dovetail fixture volume is wrong");
+
+    cad::DovetailGrooveCommand command;
+    require(!doc.prepareDovetailGroove(sourceId,20,15,20,8,8,5,18,0,&command,&error),
+            "Dovetail accepted an undercut width equal to its mouth");
+    require(!doc.prepareDovetailGroove(sourceId,20,15,20,8,14,5,18,361,&command,&error),
+            "Dovetail accepted a rotation outside its supported range");
+    require(!doc.prepareDovetailGroove("missing",20,15,20,8,14,5,18,0,&command,&error),
+            "Dovetail accepted an unknown target body");
+    require(doc.parts().size()==1&&std::abs(volume(doc.parts().first().shape)-originalVolume)<1e-5,
+            "Rejected dovetail inputs changed the target body");
+
+    require(doc.prepareDovetailGroove(sourceId,20,15,20,8,14,5,18,0,&command,&error),
+            ("Dovetail preparation failed: "+error.toStdString()).c_str());
+    const auto preview=cad::SceneDocument::buildDovetailGroovePreview(command);
+    require(!preview.shape.IsNull()&&BRepCheck_Analyzer(preview.shape).IsValid(),
+            ("Dovetail preview was invalid: "+preview.error.toStdString()).c_str());
+    require(std::abs(volume(doc.parts().first().shape)-originalVolume)<1e-5,
+            "Building a dovetail preview mutated the source body");
+    const double removed=originalVolume-volume(preview.shape);
+    require(removed>980&&removed<1005,"Dovetail removed an unexpected amount of material");
+    require(doc.commitDovetailGroove(command,preview.shape,&error),
+            ("Dovetail commit failed: "+error.toStdString()).c_str());
+    closeTo(volume(doc.parts().first().shape),volume(preview.shape));
+    require(!doc.commitDovetailGroove(command,preview.shape,&error),
+            "Dovetail preview was reusable after its source geometry changed");
+    require(doc.undo(),"Dovetail undo failed");
+    closeTo(volume(doc.parts().first().shape),originalVolume);
+    require(doc.redo(),"Dovetail redo failed");
+    closeTo(volume(doc.parts().first().shape),originalVolume-removed);
+
+    cad::SceneDocument rotatedDoc;
+    require(rotatedDoc.addPrimitive(cad::Primitive::Box,{40,30,20},&error),"Rotated dovetail fixture failed");
+    cad::DovetailGrooveCommand rotatedCommand;
+    require(rotatedDoc.prepareDovetailGroove(rotatedDoc.parts().first().id,20,15,20,6,12,4,12,30,
+                                              &rotatedCommand,&error),"Rotated dovetail preparation failed");
+    const auto rotatedPreview=cad::SceneDocument::buildDovetailGroovePreview(rotatedCommand);
+    require(!rotatedPreview.shape.IsNull()&&BRepCheck_Analyzer(rotatedPreview.shape).IsValid(),
+            ("Rotated dovetail preview invalid: "+rotatedPreview.error.toStdString()).c_str());
+    require(volume(rotatedPreview.shape)<volume(rotatedDoc.parts().first().shape),
+            "Rotated dovetail did not remove material");
+
+    cad::DovetailGrooveCommand missedCommand;
+    require(rotatedDoc.prepareDovetailGroove(rotatedDoc.parts().first().id,200,200,20,6,12,4,12,0,
+                                              &missedCommand,&error),"Missed dovetail preparation failed early");
+    require(cad::SceneDocument::buildDovetailGroovePreview(missedCommand).shape.IsNull(),
+            "Dovetail outside the body produced a preview");
+
+    cad::SceneDocument staleDoc;
+    require(staleDoc.addPrimitive(cad::Primitive::Box,{40,30,20},&error),"Stale dovetail fixture failed");
+    cad::DovetailGrooveCommand staleCommand;
+    require(staleDoc.prepareDovetailGroove(staleDoc.parts().first().id,20,15,20,8,14,5,18,0,
+                                            &staleCommand,&error),"Stale dovetail preparation failed");
+    const auto stalePreview=cad::SceneDocument::buildDovetailGroovePreview(staleCommand);
+    require(!stalePreview.shape.IsNull(),"Stale dovetail fixture preview failed");
+    require(staleDoc.translate(staleDoc.parts().first().id,1,0,0,&error),"Stale dovetail mutation failed");
+    require(!staleDoc.commitDovetailGroove(staleCommand,stalePreview.shape,&error),
+            "Stale dovetail preview committed after target geometry changed");
+}
+void testTSlotGroove(){
+    QString error;
+    cad::SceneDocument doc;
+    require(doc.addPrimitive(cad::Primitive::Box,{40,30,20},&error),"T-slot source box creation failed");
+    const QString sourceId=doc.parts().first().id;
+    const double originalVolume=volume(doc.parts().first().shape);
+    cad::TSlotGrooveCommand command;
+    require(!doc.prepareTSlotGroove(sourceId,20,15,20,8,8,6,2,18,0,&command,&error),
+            "T-slot accepted an undercut width equal to its neck");
+    require(!doc.prepareTSlotGroove(sourceId,20,15,20,6,12,6,6,18,0,&command,&error),
+            "T-slot accepted an undercut height equal to total depth");
+    require(!doc.prepareTSlotGroove(sourceId,20,15,20,6,12,6,2,18,-361,&command,&error),
+            "T-slot accepted an out-of-range rotation");
+    require(!doc.prepareTSlotGroove("missing",20,15,20,6,12,6,2,18,0,&command,&error),
+            "T-slot accepted an unknown target body");
+    require(doc.parts().size()==1&&std::abs(volume(doc.parts().first().shape)-originalVolume)<1e-5,
+            "Rejected T-slot dimensions modified the body");
+
+    require(doc.prepareTSlotGroove(sourceId,20,15,20,6,12,6,2,18,0,&command,&error),
+            ("T-slot preparation failed: "+error.toStdString()).c_str());
+    const auto preview=cad::SceneDocument::buildTSlotGroovePreview(command);
+    require(!preview.shape.IsNull()&&BRepCheck_Analyzer(preview.shape).IsValid(),
+            ("T-slot preview invalid: "+preview.error.toStdString()).c_str());
+    require(std::abs(volume(doc.parts().first().shape)-originalVolume)<1e-5,
+            "T-slot preview changed its source before commit");
+    const double removed=originalVolume-volume(preview.shape);
+    require(removed>700&&removed<1000,"T-slot removed an unexpected amount of material");
+    require(doc.commitTSlotGroove(command,preview.shape,&error),
+            ("T-slot commit failed: "+error.toStdString()).c_str());
+    closeTo(volume(doc.parts().first().shape),volume(preview.shape));
+    require(!doc.commitTSlotGroove(command,preview.shape,&error),"Committed T-slot preview was reusable");
+    require(doc.undo(),"T-slot undo failed");closeTo(volume(doc.parts().first().shape),originalVolume);
+    require(doc.redo(),"T-slot redo failed");closeTo(volume(doc.parts().first().shape),originalVolume-removed);
+
+    cad::SceneDocument rotatedDoc;
+    require(rotatedDoc.addPrimitive(cad::Primitive::Box,{40,30,20},&error),"Rotated T-slot fixture failed");
+    cad::TSlotGrooveCommand rotatedCommand;
+    require(rotatedDoc.prepareTSlotGroove(rotatedDoc.parts().first().id,20,15,20,5,10,5,1.5,12,45,
+                                           &rotatedCommand,&error),"Rotated T-slot preparation failed");
+    const auto rotatedPreview=cad::SceneDocument::buildTSlotGroovePreview(rotatedCommand);
+    require(!rotatedPreview.shape.IsNull()&&BRepCheck_Analyzer(rotatedPreview.shape).IsValid(),
+            ("Rotated T-slot preview invalid: "+rotatedPreview.error.toStdString()).c_str());
+    require(volume(rotatedPreview.shape)<volume(rotatedDoc.parts().first().shape),
+            "Rotated T-slot failed to remove material");
+
+    cad::TSlotGrooveCommand missedCommand;
+    require(rotatedDoc.prepareTSlotGroove(rotatedDoc.parts().first().id,200,200,20,5,10,5,1.5,12,0,
+                                           &missedCommand,&error),"Missed T-slot preparation failed early");
+    require(cad::SceneDocument::buildTSlotGroovePreview(missedCommand).shape.IsNull(),
+            "T-slot cutter outside the body produced a preview");
+
+    cad::SceneDocument staleDoc;
+    require(staleDoc.addPrimitive(cad::Primitive::Box,{40,30,20},&error),"Stale T-slot fixture failed");
+    cad::TSlotGrooveCommand staleCommand;
+    require(staleDoc.prepareTSlotGroove(staleDoc.parts().first().id,20,15,20,6,12,6,2,18,0,
+                                         &staleCommand,&error),"Stale T-slot preparation failed");
+    const auto stalePreview=cad::SceneDocument::buildTSlotGroovePreview(staleCommand);
+    require(!stalePreview.shape.IsNull(),"Stale T-slot fixture preview failed");
+    require(staleDoc.translate(staleDoc.parts().first().id,1,0,0,&error),"Stale T-slot mutation failed");
+    require(!staleDoc.commitTSlotGroove(staleCommand,stalePreview.shape,&error),
+            "Stale T-slot preview committed after the body changed");
+}
+void testRoundedSlot(){
+    QString error;
+    cad::SceneDocument doc;
+    require(doc.addPrimitive(cad::Primitive::Box,{40,30,20},&error),"Rounded-slot source box creation failed");
+    const QString sourceId=doc.parts().first().id;
+    const double originalVolume=volume(doc.parts().first().shape);
+    cad::RoundedSlotCommand command;
+    require(!doc.prepareRoundedSlot(sourceId,20,15,20,0,18,6,0,&command,&error),
+            "Rounded slot accepted zero width");
+    require(!doc.prepareRoundedSlot(sourceId,20,15,20,8,7,6,0,&command,&error),
+            "Rounded slot accepted overall length shorter than width");
+    require(!doc.prepareRoundedSlot(sourceId,20,15,20,8,18,6,361,&command,&error),
+            "Rounded slot accepted out-of-range rotation");
+    require(!doc.prepareRoundedSlot("missing",20,15,20,8,18,6,0,&command,&error),
+            "Rounded slot accepted an unknown target body");
+    require(doc.parts().size()==1&&std::abs(volume(doc.parts().first().shape)-originalVolume)<1e-5,
+            "Rejected rounded-slot dimensions modified the source");
+
+    require(doc.prepareRoundedSlot(sourceId,20,15,20,8,18,6,0,&command,&error),
+            ("Rounded-slot preparation failed: "+error.toStdString()).c_str());
+    const auto preview=cad::SceneDocument::buildRoundedSlotPreview(command);
+    require(!preview.shape.IsNull()&&BRepCheck_Analyzer(preview.shape).IsValid(),
+            ("Rounded-slot preview invalid: "+preview.error.toStdString()).c_str());
+    require(std::abs(volume(doc.parts().first().shape)-originalVolume)<1e-5,
+            "Rounded-slot preview changed its source before commit");
+    const double removed=originalVolume-volume(preview.shape);
+    require(removed>700&&removed<900,"Rounded slot removed an unexpected amount of material");
+    require(doc.commitRoundedSlot(command,preview.shape,&error),
+            ("Rounded-slot commit failed: "+error.toStdString()).c_str());
+    closeTo(volume(doc.parts().first().shape),volume(preview.shape));
+    require(!doc.commitRoundedSlot(command,preview.shape,&error),"Committed rounded-slot preview was reusable");
+    require(doc.undo(),"Rounded-slot undo failed");closeTo(volume(doc.parts().first().shape),originalVolume);
+    require(doc.redo(),"Rounded-slot redo failed");closeTo(volume(doc.parts().first().shape),originalVolume-removed);
+
+    cad::SceneDocument circularDoc;
+    require(circularDoc.addPrimitive(cad::Primitive::Box,{40,30,20},&error),"Circular-slot fixture creation failed");
+    cad::RoundedSlotCommand circularCommand;
+    require(circularDoc.prepareRoundedSlot(circularDoc.parts().first().id,20,15,20,8,8,5,90,
+                                            &circularCommand,&error),"Circular rounded-slot preparation failed");
+    const auto circularPreview=cad::SceneDocument::buildRoundedSlotPreview(circularCommand);
+    require(!circularPreview.shape.IsNull()&&BRepCheck_Analyzer(circularPreview.shape).IsValid(),
+            ("Length-equals-width slot failed: "+circularPreview.error.toStdString()).c_str());
+    require(volume(circularPreview.shape)<volume(circularDoc.parts().first().shape),
+            "Circular degenerate slot did not remove material");
+
+    cad::SceneDocument rotatedDoc;
+    require(rotatedDoc.addPrimitive(cad::Primitive::Box,{40,30,20},&error),"Rotated rounded-slot fixture failed");
+    cad::RoundedSlotCommand rotatedCommand;
+    require(rotatedDoc.prepareRoundedSlot(rotatedDoc.parts().first().id,20,15,20,6,16,5,45,
+                                           &rotatedCommand,&error),"Rotated rounded-slot preparation failed");
+    const auto rotatedPreview=cad::SceneDocument::buildRoundedSlotPreview(rotatedCommand);
+    require(!rotatedPreview.shape.IsNull()&&BRepCheck_Analyzer(rotatedPreview.shape).IsValid(),
+            ("Rotated rounded-slot preview invalid: "+rotatedPreview.error.toStdString()).c_str());
+
+    cad::RoundedSlotCommand missedCommand;
+    require(rotatedDoc.prepareRoundedSlot(rotatedDoc.parts().first().id,200,200,20,6,16,5,0,
+                                           &missedCommand,&error),"Missed rounded-slot preparation failed early");
+    require(cad::SceneDocument::buildRoundedSlotPreview(missedCommand).shape.IsNull(),
+            "Rounded slot outside the body produced a preview");
+
+    cad::SceneDocument staleDoc;
+    require(staleDoc.addPrimitive(cad::Primitive::Box,{40,30,20},&error),"Stale rounded-slot fixture failed");
+    cad::RoundedSlotCommand staleCommand;
+    require(staleDoc.prepareRoundedSlot(staleDoc.parts().first().id,20,15,20,8,18,6,0,
+                                         &staleCommand,&error),"Stale rounded-slot preparation failed");
+    const auto stalePreview=cad::SceneDocument::buildRoundedSlotPreview(staleCommand);
+    require(!stalePreview.shape.IsNull(),"Stale rounded-slot fixture preview failed");
+    require(staleDoc.translate(staleDoc.parts().first().id,1,0,0,&error),"Stale rounded-slot mutation failed");
+    require(!staleDoc.commitRoundedSlot(staleCommand,stalePreview.shape,&error),
+            "Stale rounded-slot preview committed after the body changed");
+}
+void testKeyholeSlot(){
+    QString error;
+    cad::SceneDocument doc;
+    require(doc.addPrimitive(cad::Primitive::Box,{40,30,20},&error),"Keyhole source box creation failed");
+    const QString sourceId=doc.parts().first().id;
+    const double originalVolume=volume(doc.parts().first().shape);
+    cad::KeyholeSlotCommand command;
+    require(!doc.prepareKeyholeSlot(sourceId,20,10,20,8,8,10,6,0,&command,&error),
+            "Keyhole slot accepted throat width equal to head diameter");
+    require(!doc.prepareKeyholeSlot(sourceId,20,10,20,8,4,0,6,0,&command,&error),
+            "Keyhole slot accepted zero throat length");
+    require(!doc.prepareKeyholeSlot(sourceId,20,10,20,8,4,10,6,-361,&command,&error),
+            "Keyhole slot accepted out-of-range rotation");
+    require(!doc.prepareKeyholeSlot("missing",20,10,20,8,4,10,6,0,&command,&error),
+            "Keyhole slot accepted an unknown target body");
+    require(doc.parts().size()==1&&std::abs(volume(doc.parts().first().shape)-originalVolume)<1e-5,
+            "Rejected keyhole-slot inputs modified the source");
+
+    require(doc.prepareKeyholeSlot(sourceId,20,10,20,8,4,10,6,0,&command,&error),
+            ("Keyhole-slot preparation failed: "+error.toStdString()).c_str());
+    const auto preview=cad::SceneDocument::buildKeyholeSlotPreview(command);
+    require(!preview.shape.IsNull()&&BRepCheck_Analyzer(preview.shape).IsValid(),
+            ("Keyhole-slot preview invalid: "+preview.error.toStdString()).c_str());
+    require(std::abs(volume(doc.parts().first().shape)-originalVolume)<1e-5,
+            "Keyhole-slot preview changed the source before commit");
+    const double removed=originalVolume-volume(preview.shape);
+    require(removed>300&&removed<600,"Keyhole slot removed an unexpected amount of material");
+    require(doc.commitKeyholeSlot(command,preview.shape,&error),
+            ("Keyhole-slot commit failed: "+error.toStdString()).c_str());
+    closeTo(volume(doc.parts().first().shape),volume(preview.shape));
+    require(!doc.commitKeyholeSlot(command,preview.shape,&error),"Committed keyhole preview was reusable");
+    require(doc.undo(),"Keyhole-slot undo failed");closeTo(volume(doc.parts().first().shape),originalVolume);
+    require(doc.redo(),"Keyhole-slot redo failed");closeTo(volume(doc.parts().first().shape),originalVolume-removed);
+
+    cad::SceneDocument rotatedDoc;
+    require(rotatedDoc.addPrimitive(cad::Primitive::Box,{40,30,20},&error),"Rotated keyhole fixture failed");
+    cad::KeyholeSlotCommand rotatedCommand;
+    require(rotatedDoc.prepareKeyholeSlot(rotatedDoc.parts().first().id,20,10,20,8,4,10,5,90,
+                                           &rotatedCommand,&error),"Rotated keyhole preparation failed");
+    const auto rotatedPreview=cad::SceneDocument::buildKeyholeSlotPreview(rotatedCommand);
+    require(!rotatedPreview.shape.IsNull()&&BRepCheck_Analyzer(rotatedPreview.shape).IsValid(),
+            ("Rotated keyhole preview invalid: "+rotatedPreview.error.toStdString()).c_str());
+    require(volume(rotatedPreview.shape)<volume(rotatedDoc.parts().first().shape),
+            "Rotated keyhole slot did not remove material");
+
+    cad::KeyholeSlotCommand missedCommand;
+    require(rotatedDoc.prepareKeyholeSlot(rotatedDoc.parts().first().id,200,200,20,8,4,10,5,0,
+                                           &missedCommand,&error),"Missed keyhole preparation failed early");
+    require(cad::SceneDocument::buildKeyholeSlotPreview(missedCommand).shape.IsNull(),
+            "Keyhole cutter outside the body produced a preview");
+
+    cad::SceneDocument staleDoc;
+    require(staleDoc.addPrimitive(cad::Primitive::Box,{40,30,20},&error),"Stale keyhole fixture failed");
+    cad::KeyholeSlotCommand staleCommand;
+    require(staleDoc.prepareKeyholeSlot(staleDoc.parts().first().id,20,10,20,8,4,10,6,0,
+                                         &staleCommand,&error),"Stale keyhole preparation failed");
+    const auto stalePreview=cad::SceneDocument::buildKeyholeSlotPreview(staleCommand);
+    require(!stalePreview.shape.IsNull(),"Stale keyhole preview failed");
+    require(staleDoc.translate(staleDoc.parts().first().id,1,0,0,&error),"Stale keyhole mutation failed");
+    require(!staleDoc.commitKeyholeSlot(staleCommand,stalePreview.shape,&error),
+            "Stale keyhole preview committed after the body changed");
+}
+void testRoundedSlotPattern(){
+    QString error;
+    cad::SceneDocument doc;
+    require(doc.addPrimitive(cad::Primitive::Box,{40,30,20},&error),"Rounded-slot pattern source box creation failed");
+    const QString id=doc.parts().first().id;
+    const double original=volume(doc.parts().first().shape);
+    cad::RoundedSlotPatternCommand command;
+    require(!doc.prepareRoundedSlotPattern(id,8,15,20,8,18,6,0,1,12,0,&command,&error),"Rounded-slot pattern accepted one instance");
+    require(!doc.prepareRoundedSlotPattern(id,8,15,20,8,18,6,0,3,0,0,&command,&error),"Rounded-slot pattern accepted zero spacing");
+    require(!doc.prepareRoundedSlotPattern(id,8,15,20,8,7,6,0,3,12,0,&command,&error),"Rounded-slot pattern accepted length below width");
+    require(!doc.prepareRoundedSlotPattern(id,8,15,20,8,18,6,361,3,12,0,&command,&error),"Rounded-slot pattern accepted invalid angle");
+    require(!doc.prepareRoundedSlotPattern("missing",8,15,20,8,18,6,0,3,12,0,&command,&error),"Rounded-slot pattern accepted unknown body");
+    require(std::abs(volume(doc.parts().first().shape)-original)<1e-5,"Rejected rounded-slot inputs modified source body");
+
+    require(doc.prepareRoundedSlotPattern(id,8,15,20,8,18,6,0,3,12,0,&command,&error),
+            ("Rounded-slot pattern preparation failed: "+error.toStdString()).c_str());
+    const auto preview=cad::SceneDocument::buildRoundedSlotPatternPreview(command);
+    require(!preview.shape.IsNull()&&BRepCheck_Analyzer(preview.shape).IsValid(),
+            ("Rounded-slot pattern preview invalid: "+preview.error.toStdString()).c_str());
+    require(std::abs(volume(doc.parts().first().shape)-original)<1e-5,"Pattern preview modified source before commit");
+    const double removed=original-volume(preview.shape);
+    require(removed>1800&&removed<3000,"Pattern removed an unexpected amount of material");
+    require(doc.commitRoundedSlotPattern(command,preview.shape,&error),
+            ("Rounded-slot pattern commit failed: "+error.toStdString()).c_str());
+    closeTo(volume(doc.parts().first().shape),volume(preview.shape));
+    require(!doc.commitRoundedSlotPattern(command,preview.shape,&error),"Committed rounded-slot pattern preview was reusable");
+    require(doc.undo(),"Rounded-slot pattern undo failed");closeTo(volume(doc.parts().first().shape),original);
+    require(doc.redo(),"Rounded-slot pattern redo failed");closeTo(volume(doc.parts().first().shape),original-removed);
+
+    cad::SceneDocument rotated;
+    require(rotated.addPrimitive(cad::Primitive::Box,{40,30,20},&error),"Rotated rounded-slot pattern fixture failed");
+    cad::RoundedSlotPatternCommand rotatedCommand;
+    require(rotated.prepareRoundedSlotPattern(rotated.parts().first().id,20,9,20,6,14,5,90,2,0,12,&rotatedCommand,&error),
+            "Rotated rounded-slot pattern preparation failed");
+    const auto rotatedPreview=cad::SceneDocument::buildRoundedSlotPatternPreview(rotatedCommand);
+    require(!rotatedPreview.shape.IsNull()&&BRepCheck_Analyzer(rotatedPreview.shape).IsValid(),
+            ("Rotated rounded-slot pattern invalid: "+rotatedPreview.error.toStdString()).c_str());
+    require(volume(rotatedPreview.shape)<volume(rotated.parts().first().shape),"Rotated pattern did not remove material");
+
+    cad::RoundedSlotPatternCommand missed;
+    require(doc.prepareRoundedSlotPattern(id,200,200,20,8,18,6,0,2,12,0,&missed,&error),"Missed pattern setup failed early");
+    require(cad::SceneDocument::buildRoundedSlotPatternPreview(missed).shape.IsNull(),"Pattern outside body produced a preview");
+
+    cad::SceneDocument stale;
+    require(stale.addPrimitive(cad::Primitive::Box,{40,30,20},&error),"Stale pattern fixture failed");
+    cad::RoundedSlotPatternCommand staleCommand;
+    require(stale.prepareRoundedSlotPattern(stale.parts().first().id,8,15,20,8,18,6,0,3,12,0,&staleCommand,&error),"Stale pattern preparation failed");
+    const auto stalePreview=cad::SceneDocument::buildRoundedSlotPatternPreview(staleCommand);
+    require(!stalePreview.shape.IsNull(),"Stale pattern preview setup failed");
+    require(stale.translate(stale.parts().first().id,1,0,0,&error),"Stale pattern mutation failed");
+    require(!stale.commitRoundedSlotPattern(staleCommand,stalePreview.shape,&error),"Stale rounded-slot pattern was committed");
 }
 void execute() {
     QTemporaryDir dir;
@@ -902,18 +1453,55 @@ void execute() {
     require(booleanDoc.exportSTEP(step,&error) && QFileInfo(step).size()>100,"STEP export failed");
     require(booleanDoc.exportSTL(stl,&error) && QFileInfo(stl).size()>84,"STL export failed");
     require(!cad::SceneDocument{}.exportSTL(stl,&error),"Empty STL export accepted");
+    cad::SceneDocument stepSource;
+    require(stepSource.addPrimitive(cad::Primitive::Box,{10,12,14},&error),"Could not create STEP import test box");
+    require(stepSource.addPrimitive(cad::Primitive::Cylinder,{5,8},&error),"Could not create STEP import test cylinder");
+    const QString assemblyStep=dir.filePath("assembly.step");
+    require(stepSource.exportSTEP(assemblyStep,&error),"Multi-body STEP fixture export failed");
+    cad::SceneDocument stepTarget;
+    require(stepTarget.addPrimitive(cad::Primitive::Sphere,{3},&error),"Could not create preexisting body for STEP append test");
+    const double expectedImportedVolume=volume(stepSource.parts()[0].shape)+volume(stepSource.parts()[1].shape);
+    require(stepTarget.importSTEP(assemblyStep,&error),("STEP import failed: "+error.toStdString()).c_str());
+    require(stepTarget.parts().size()==3,"STEP import did not append both solid bodies");
+    require(stepTarget.parts()[0].name=="Sphere"&&stepTarget.parts()[1].name.startsWith("assembly")&&stepTarget.parts()[2].name.startsWith("assembly"),"STEP import did not preserve the existing body or assign imported names");
+    validate(stepTarget.parts()[1]); validate(stepTarget.parts()[2]);
+    require(std::abs(volume(stepTarget.parts()[1].shape)+volume(stepTarget.parts()[2].shape)-expectedImportedVolume)<1e-4,"STEP import changed the multi-body volume");
+    require(stepTarget.dirty()&&stepTarget.canUndo(),"STEP import was not tracked as an undoable document change");
+    require(stepTarget.undo()&&stepTarget.parts().size()==1&&stepTarget.parts()[0].name=="Sphere","STEP import undo did not restore the existing document");
+    const QString invalidStep=dir.filePath("invalid.step");
+    QFile invalidStepFile(invalidStep); require(invalidStepFile.open(QIODevice::WriteOnly),"Could not create invalid STEP test input");
+    invalidStepFile.write("not a STEP file"); invalidStepFile.close();
+    require(!stepTarget.importSTEP(invalidStep,&error)&&stepTarget.parts().size()==1,"Invalid STEP import mutated the existing document");
+    testSweeps();
+    testHelicalSweep();
     std::cout << "PASS: " << checks << " C++ assertions; primitives, 30 v1.3 engineering components, 30 v1.4 advanced components, 35 v1.5 specialized components, 70 v1.6 industrial components, 70 v1.7 extended components, 70 v1.8 precision components, 100 v1.9 production components, transforms, duplicates, metadata, "
               << "undo branches, atomic batch deletion, v1 migration, v2 save/load, "
               << "Boolean validity, fillet/chamfer transactions, profile extrusion/revolve preview and staleness, "
               << "mirror, linear/circular patterns, hole previews, split body, and shell with undo, "
-              << "corrupt rollback, STEP/STL output\n";
+              << "corrupt rollback, STEP import/export, circular/rectangular sweeps, and STL output\n";
 }
 } // namespace
 int main(int argc,char** argv) {
     try {
         if(argc==2&&std::string(argv[1])=="--wing-rib") { testWingRib(); std::cout<<"PASS: "<<checks<<" Wing rib assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--modeling-tools") { testModelingTools(); std::cout<<"PASS: "<<checks<<" assertions across "<<static_cast<int>(cad::ModelingTool::Count)<<" modeling tools\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--sweeps") { testSweeps(); std::cout<<"PASS: "<<checks<<" sweep assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--tapered-helix") { testTaperedHelicalSweep(); std::cout<<"PASS: "<<checks<<" tapered-helix assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--form-features") { testFormFeatures(); std::cout<<"PASS: "<<checks<<" form-feature assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--vector-pattern") { testVectorLinearPattern(); std::cout<<"PASS: "<<checks<<" vector-pattern assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--circular-hole-pattern") { testCircularHolePattern(); std::cout<<"PASS: "<<checks<<" circular-hole-pattern assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--helical-sweep") { testHelicalSweep(); std::cout<<"PASS: "<<checks<<" helical-sweep assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--variable-pitch-helix") { testVariablePitchHelicalSweep(); std::cout<<"PASS: "<<checks<<" variable-pitch-helix assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--dovetail-groove") { testDovetailGroove(); std::cout<<"PASS: "<<checks<<" dovetail-groove assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--t-slot-groove") { testTSlotGroove(); std::cout<<"PASS: "<<checks<<" t-slot-groove assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--rounded-slot") { testRoundedSlot(); std::cout<<"PASS: "<<checks<<" rounded-slot assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--keyhole-slot") { testKeyholeSlot(); std::cout<<"PASS: "<<checks<<" keyhole-slot assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--rounded-slot-pattern") { testRoundedSlotPattern(); std::cout<<"PASS: "<<checks<<" rounded-slot-pattern assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--circular-countersink-pattern") { testCircularCountersinkPattern(); std::cout<<"PASS: "<<checks<<" circular-countersink-pattern assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--circular-counterbore-pattern") { testCircularCounterborePattern(); std::cout<<"PASS: "<<checks<<" circular-counterbore-pattern assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--linear-keyhole-slot-pattern") { testLinearKeyholeSlotPattern(); std::cout<<"PASS: "<<checks<<" linear-keyhole-slot-pattern assertions\n"; return 0; }
         execute(); return 0;
     }
     catch (const std::exception& e) { std::cerr << "FAIL after " << checks << " checks: " << e.what() << '\n'; return 1; }
 }
+

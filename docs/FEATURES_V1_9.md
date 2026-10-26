@@ -135,3 +135,7 @@ The named parts are represented with nine reusable direct-solid geometry familie
 8. Limit switch bracket
 9. Conveyor photoeye mount
 10. Palletizer fork plate
+
+## Helical solid sweep
+
+The v1.9 update adds a configurable circular-profile sweep for spring-like coils. Set wire radius, coil radius, pitch, and turn count in the Create menu or ribbon. Core regression and live creation/undo/redo were verified on Windows; details are in [`HELICAL_SWEEP.md`](HELICAL_SWEEP.md).

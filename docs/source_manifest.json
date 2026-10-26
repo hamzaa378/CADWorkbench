@@ -3,24 +3,64 @@
   "algorithm": "SHA-256",
   "files": [
     {
-      "path": ".github/workflows/windows-ci.yml",
-      "sha256": "9f2ca58a0d4e1c4cae4152be68ffd40209a5313d60a42a3f652862dd16582385",
-      "size_bytes": 890
-    },
-    {
       "path": ".gitignore",
       "sha256": "2451f9908b4d4d6c9595c1ee23cf839143fb710f1c5eaa86b2432c3b8e0cfcfb",
       "size_bytes": 162
     },
     {
       "path": "CMakeLists.txt",
-      "sha256": "78065d45a1e298030ec36871f72da68e8e1a7ea83b0e4fa41cfa847cff0bd3f6",
-      "size_bytes": 2165
+      "sha256": "103454a3c2e88106481275831a28bc71bdfffd484f194aca27548627e7d1b883",
+      "size_bytes": 3681
+    },
+    {
+      "path": "LICENSE",
+      "sha256": "0f259ea469f4876e5180c879208c583bd0515b0f338527bd5365eb0043fdfd97",
+      "size_bytes": 1082
+    },
+    {
+      "path": "README.md",
+      "sha256": "71a339556ecdcda9b3f11ad044ddc63fa7f273b68cef435acf0b74f892f16f5e",
+      "size_bytes": 12727
+    },
+    {
+      "path": "vcpkg.json",
+      "sha256": "b3380ca80acbd65d20a26c4a3414882aaf93da609dafb8d72e4d3de6ae7aef6f",
+      "size_bytes": 201
+    },
+    {
+      "path": ".github/workflows/windows-ci.yml",
+      "sha256": "9f2ca58a0d4e1c4cae4152be68ffd40209a5313d60a42a3f652862dd16582385",
+      "size_bytes": 890
     },
     {
       "path": "docs/CHANGELOG.md",
-      "sha256": "d159c44cbedf6cc85965c7863866c1254ad7381ecc99fddb427b16ff1ca54ae0",
-      "size_bytes": 4685
+      "sha256": "60040855c4fce847b18bae4fe3c47e59759086d1dfd1404965a340c791dc57d0",
+      "size_bytes": 15409
+    },
+    {
+      "path": "docs/CIRCULAR_COUNTERBORE_PATTERN.md",
+      "sha256": "badead118d22d2f9ae17728025050a2c81c8e7cdc5020fdafd828896e1e41477",
+      "size_bytes": 1406
+    },
+    {
+      "path": "docs/CIRCULAR_COUNTERSINK_PATTERN.md",
+      "sha256": "fb8209376ea07bd2ab1774f3631e975cf31aa40ace6494ecae160708425d6798",
+      "size_bytes": 1658
+    },
+    {
+      "path": "docs/CIRCULAR_HOLE_PATTERN.md",
+      "sha256": "0bc6c5eb415d349c71e7b0fba953298798ef74c44f03f7d31e45d4b5dcc5183b",
+      "size_bytes": 1373
+    },
+    {
+      "path": "docs/DOVETAIL_GROOVE.md",
+      "sha256": "c634f68c11ed1c5e471dbafb8e1fbb91bc403a333c3b648f0588f24cef8a650d",
+      "size_bytes": 1623
+    },
+    {
+      "path": "docs/ELLIPTICAL_SWEEP.md",
+      "sha256": "2f2359a913f8499fbc7011f5d25759e69d881d68aa26fbcdea821f20917b5e79",
+      "size_bytes": 1247
     },
     {
       "path": "docs/FEATURE_GAP_COMPARISON.md",
@@ -64,8 +104,18 @@
     },
     {
       "path": "docs/FEATURES_V1_9.md",
-      "sha256": "ce6efe6075da92e529e754b8fee1834f01efd3930097e3a266711832658a59c8",
-      "size_bytes": 3376
+      "sha256": "66cd57ca729420a9d9807939b0cdac580efc8ec8da3a5d8796d81551a54ec64d",
+      "size_bytes": 3939
+    },
+    {
+      "path": "docs/FORM_FEATURES.md",
+      "sha256": "b2452c4a4ce63d9aec427900457add02b1e05987c8b946a435656ff059c7abd4",
+      "size_bytes": 1533
+    },
+    {
+      "path": "docs/HELICAL_SWEEP.md",
+      "sha256": "c474e1b7130d54ec1b51a9cb4e488fca4319324763ab6215734a9ab233e28414",
+      "size_bytes": 1657
     },
     {
       "path": "docs/kernel_reference_v02.json",
@@ -73,19 +123,64 @@
       "size_bytes": 476
     },
     {
+      "path": "docs/KEYHOLE_SLOT.md",
+      "sha256": "2f3f32793d57a9c129dd9d07ca860f79965003d18af81f0b97f2086357097ad0",
+      "size_bytes": 1519
+    },
+    {
+      "path": "docs/LINEAR_KEYHOLE_PATTERN.md",
+      "sha256": "2fea231408f6c20405b5ba241260e68a33eb41d00fcc3a39d91610f0198edda8",
+      "size_bytes": 1153
+    },
+    {
       "path": "docs/local_verification.json",
-      "sha256": "486f131233aeca357a6b5b59fd83e3b779052fcfceb23e9d645bb522571d2ba1",
-      "size_bytes": 3185
+      "sha256": "b6f621fb80184353082cb824d709684ddbfd5528e53d3c85a64a273d5363da8a",
+      "size_bytes": 11224
     },
     {
       "path": "docs/manual_qa_results.md",
-      "sha256": "8eb86f1982447dde82eacb05b31388420e1e3ca1f7754f3d8764abcb1396b734",
-      "size_bytes": 4420
+      "sha256": "126cff2e98fa1f0505adc77b60bb975b3e281d223a468d33c384085250cef83f",
+      "size_bytes": 8698
+    },
+    {
+      "path": "docs/MODELING_TOOLS.md",
+      "sha256": "53f740a6de08d9c47294142de18faf1eef80c6bad6bd0a770c10a4730ab9d871",
+      "size_bytes": 6059
+    },
+    {
+      "path": "docs/PROFILE_SWEEP.md",
+      "sha256": "5ccc0c3ae506092a143682398bb064b84ed2e4e9ab2c397642ed52ffbca2e5f8",
+      "size_bytes": 1385
     },
     {
       "path": "docs/QA_MATRIX.md",
-      "sha256": "199f411b3fb14e7cb8e822a682dcba205a069ea94e4185c35b6033970b606534",
-      "size_bytes": 2619
+      "sha256": "79086784c6aeb0f72033692f6ad029d28d8609ebc2828841cbb5257ef679cbd5",
+      "size_bytes": 18372
+    },
+    {
+      "path": "docs/ROUNDED_SLOT_PATTERN.md",
+      "sha256": "2d65725338508d6825a73e2b8fa80c4e2364db830484e3f6f090aa30f9526ff1",
+      "size_bytes": 1480
+    },
+    {
+      "path": "docs/ROUNDED_SLOT.md",
+      "sha256": "a52062759c9e26ddec70a1bb7a603de25ffd750b0988758f25f9903ec842f523",
+      "size_bytes": 1472
+    },
+    {
+      "path": "docs/STEP_IMPORT.md",
+      "sha256": "2f59019a46f1b9e82ddcb146fd6dda1caa8f5fa65787b5d1232c28f98ecf53e5",
+      "size_bytes": 1614
+    },
+    {
+      "path": "docs/T_SLOT_GROOVE.md",
+      "sha256": "9214cf30baa6b099ab8914531608bf626077a5e8241d2e375004b81a09c54970",
+      "size_bytes": 1446
+    },
+    {
+      "path": "docs/TAPERED_HELIX.md",
+      "sha256": "fc0faad08808a3dc0473df9a7cd8885598441dfb64eeb7009cefe2817de0df14",
+      "size_bytes": 1195
     },
     {
       "path": "docs/TECHNICAL_HANDOFF.md",
@@ -93,19 +188,19 @@
       "size_bytes": 1557
     },
     {
+      "path": "docs/VARIABLE_PITCH_HELIX.md",
+      "sha256": "f43763f65a5394f6d9a10828fbc6e6ea9f291176bea021a04284b819e720c516",
+      "size_bytes": 1532
+    },
+    {
+      "path": "docs/VECTOR_PATTERN.md",
+      "sha256": "56c34a3a255b002cd7ba3356a9f4b7141ee72d684f1c8082710fb62c3e301a66",
+      "size_bytes": 1211
+    },
+    {
       "path": "docs/windows_verification.example.json",
       "sha256": "f03deae98069a97ef30b04724f19a7ae0b21b4025f8646776b3cd94bc39cdb9f",
       "size_bytes": 611
-    },
-    {
-      "path": "LICENSE",
-      "sha256": "0f259ea469f4876e5180c879208c583bd0515b0f338527bd5365eb0043fdfd97",
-      "size_bytes": 1082
-    },
-    {
-      "path": "README.md",
-      "sha256": "f1a6de9f527cbe88e18d979a07e19b65e1354afc414a90b67a6ee14bb739484d",
-      "size_bytes": 2225
     },
     {
       "path": "scripts/build_windows.ps1",
@@ -124,8 +219,13 @@
     },
     {
       "path": "scripts/source_audit.py",
-      "sha256": "5d209378e565b41ec4536412a570af8f3e4df4aefc413b72a3546756b156d654",
-      "size_bytes": 7751
+      "sha256": "c602ff3d3b840d6ef0ee3e4271713b200bcf220598465ec734ef4016e53f6f29",
+      "size_bytes": 13705
+    },
+    {
+      "path": "src/main.cpp",
+      "sha256": "188b3b4b6ec09ca3f8c59c67f6f9bea5f81d22d930842833fdbb22d4979799f7",
+      "size_bytes": 673
     },
     {
       "path": "src/core/AdvancedComponents.cpp",
@@ -143,9 +243,19 @@
       "size_bytes": 18914
     },
     {
+      "path": "src/core/FormFeatures.cpp",
+      "sha256": "55f015f3d769b7973ff1d0500242b1e1003661945dc71d5ab346b41b103b5179",
+      "size_bytes": 8417
+    },
+    {
       "path": "src/core/IndustrialComponents.cpp",
       "sha256": "bb1d1b7b1b278c146cddc4158d0f2d5bfb3394fe78424a4dd5db8e95a337ca3e",
       "size_bytes": 18556
+    },
+    {
+      "path": "src/core/ModelingTools.cpp",
+      "sha256": "a3ef6ae1f4ed946866b16bbc469f552edfd68dd1756c80fd5ad0238fc550a40e",
+      "size_bytes": 21934
     },
     {
       "path": "src/core/PrecisionComponents.cpp",
@@ -154,28 +264,23 @@
     },
     {
       "path": "src/core/ProductionComponents.cpp",
-      "sha256": "7e33fc37f9e8ce46fbe8781867e18ceadbbfc99b5105a313d64c7bc2679612bc",
-      "size_bytes": 23864
+      "sha256": "bc513ec6461aed1b1868e52b994bcf8795450fe447e6dea913f9a97a3af441e1",
+      "size_bytes": 25984
     },
     {
       "path": "src/core/SceneDocument.cpp",
-      "sha256": "239757efc833f5085a3f8597d837eab793d1cdde6e729a3e83b541b9e0a5eabe",
-      "size_bytes": 103225
+      "sha256": "0958165074ee1ca208dcf16c0294112efcdd81165b5a5822ea4927664999a826",
+      "size_bytes": 158489
     },
     {
       "path": "src/core/SceneDocument.h",
-      "sha256": "8011ab9b7896bcb8913ecb0c1698fe50ca456e9844adb5f3504f62d5f276b2aa",
-      "size_bytes": 21027
+      "sha256": "290b4f8475a04731db207fa4d98a3b20ffd7c94d55fe5d35704ac259035f6042",
+      "size_bytes": 30212
     },
     {
       "path": "src/core/SpecializedComponents.cpp",
       "sha256": "3c886fa386abb0f210c04b6f7e8e825f70fd3a9d0b7e53414c0e29cf47d7cab7",
       "size_bytes": 22800
-    },
-    {
-      "path": "src/main.cpp",
-      "sha256": "188b3b4b6ec09ca3f8c59c67f6f9bea5f81d22d930842833fdbb22d4979799f7",
-      "size_bytes": 673
     },
     {
       "path": "src/ui/CadViewport.cpp",
@@ -189,28 +294,23 @@
     },
     {
       "path": "src/ui/MainWindow.cpp",
-      "sha256": "ff1f4d0d0355af5e5123406d7883ece23c96b21586b62465d02aec090538f1bd",
-      "size_bytes": 76308
+      "sha256": "44046472e0e9ab0a87aa05b6acc5aff2dbea6d61a69e1c279d76b2f24133f524",
+      "size_bytes": 114866
     },
     {
       "path": "src/ui/MainWindow.h",
-      "sha256": "75d366ad61220f5c1784ddcafad666c053a0b439e7d6e91876ee812b93d30a80",
-      "size_bytes": 2538
+      "sha256": "e57c6184415c8a071ed3d334a9bb46f17ec31e1532c4ee002cbc2ea480e642f7",
+      "size_bytes": 3429
     },
     {
       "path": "tests/cadcore_tests.cpp",
-      "sha256": "662969afa4f9f080976dbe38fa8aac1bb1b835f833223a7800785add4eabedea",
-      "size_bytes": 64912
+      "sha256": "9da608e6211fa9071ac474a6f156d6d18673be84f601005e9d68c927e30806fd",
+      "size_bytes": 114078
     },
     {
       "path": "tests/kernel_contract_smoke.py",
       "sha256": "c7b3ffe132fb7ae575c902953c41825a2d5e4f088be6e0960376d07f1f564c67",
       "size_bytes": 2844
-    },
-    {
-      "path": "vcpkg.json",
-      "sha256": "b3380ca80acbd65d20a26c4a3414882aaf93da609dafb8d72e4d3de6ae7aef6f",
-      "size_bytes": 201
     }
   ]
 }

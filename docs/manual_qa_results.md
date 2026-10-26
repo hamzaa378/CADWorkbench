@@ -71,3 +71,11 @@ The broader component catalog and unrelated workflows were not retested in this 
 The Windows build also emitted an unreachable-code warning in `SceneDocument.cpp` around line 131 and an OCCT 8.0 deprecation warning for `TColgp_Array1OfPnt` in `AdvancedComponents.cpp` around line 185. `windeployqt` reported missing `dxcompiler.dll`/`dxil.dll` (only relevant if Direct3D 12 is used) and an unset `VCINSTALLDIR`; deployment completed. These warnings were recorded and not changed.
 
 The source audit and this review do not substitute for the W01-W24 release checklist, clean-VM deployment, or approver sign-off. The release gate remains blocked.
+
+## Previously untested feature dialogs - live Windows UI (2026-10-25)
+
+In the rebuilt Windows Release app, each of the following Create commands opened its parameter dialog, accepted the displayed defaults, and added the expected body to the model browser and viewport: variable-pitch spring, tapered spring, elliptical profile sweep, elliptical prism, elliptical tube, circular loft, rectangular-to-circular transition, and hollow loft reducer.
+
+The selected Elliptical Prism was also used for Modify > Linear pattern along vector. The dialog exposed X/Y/Z direction, total instances, and spacing; the result added two pattern copies. Modify > Circular hole pattern was then configured for a four-instance, 8 mm bolt circle and 3 mm through-all holes centered at (0, 0) on the top face. The selected body's reported volume changed from 16,964.600 mm³ to 16,116.370 mm³, and faces/edges changed from 3/6 to 7/30.
+
+Ten Ctrl+Z steps returned the disposable Untitled test document to zero bodies. The Create ribbon displayed all eight related commands, and the Modify ribbon displayed the vector pattern and circular hole pattern buttons. Ribbon buttons were not individually activated, and this pass did not open the 100 Production Component dialogs individually.

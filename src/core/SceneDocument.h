@@ -116,6 +116,103 @@ struct HolePreview {
     QString error;
 };
 
+struct DovetailGrooveCommand {
+    QString partId;
+    QString geometryToken;
+    TopoDS_Shape sourceShape;
+    double centerX = 0.0;
+    double centerY = 0.0;
+    double entryZ = 0.0;
+    double mouthWidth = 0.0;
+    double bottomWidth = 0.0;
+    double depth = 0.0;
+    double length = 0.0;
+    double angleDegrees = 0.0;
+};
+
+struct DovetailGroovePreview {
+    TopoDS_Shape shape;
+    QString error;
+};
+
+struct TSlotGrooveCommand {
+    QString partId;
+    QString geometryToken;
+    TopoDS_Shape sourceShape;
+    double centerX = 0.0;
+    double centerY = 0.0;
+    double entryZ = 0.0;
+    double neckWidth = 0.0;
+    double undercutWidth = 0.0;
+    double depth = 0.0;
+    double undercutHeight = 0.0;
+    double length = 0.0;
+    double angleDegrees = 0.0;
+};
+
+struct TSlotGroovePreview {
+    TopoDS_Shape shape;
+    QString error;
+};
+
+struct RoundedSlotCommand {
+    QString partId;
+    QString geometryToken;
+    TopoDS_Shape sourceShape;
+    double centerX = 0.0;
+    double centerY = 0.0;
+    double entryZ = 0.0;
+    double width = 0.0;
+    double length = 0.0;
+    double depth = 0.0;
+    double angleDegrees = 0.0;
+};
+
+struct RoundedSlotPreview {
+    TopoDS_Shape shape;
+    QString error;
+};
+
+struct KeyholeSlotCommand {
+    QString partId;
+    QString geometryToken;
+    TopoDS_Shape sourceShape;
+    double centerX = 0.0;
+    double centerY = 0.0;
+    double entryZ = 0.0;
+    double headDiameter = 0.0;
+    double throatWidth = 0.0;
+    double throatLength = 0.0;
+    double depth = 0.0;
+    double angleDegrees = 0.0;
+};
+
+struct KeyholeSlotPreview {
+    TopoDS_Shape shape;
+    QString error;
+};
+
+struct RoundedSlotPatternCommand {
+    QString partId;
+    QString geometryToken;
+    TopoDS_Shape sourceShape;
+    double centerX = 0.0;
+    double centerY = 0.0;
+    double entryZ = 0.0;
+    double width = 0.0;
+    double length = 0.0;
+    double depth = 0.0;
+    double angleDegrees = 0.0;
+    int instanceCount = 0;
+    double spacingX = 0.0;
+    double spacingY = 0.0;
+};
+
+struct RoundedSlotPatternPreview {
+    TopoDS_Shape shape;
+    QString error;
+};
+
 enum class Primitive { Box, Cylinder, Sphere, Cone, Torus, RegularPrism, Capsule, Ellipsoid, Tube, Wedge, PyramidFrustum, HexNut };
 enum class EngineeringPart : int {
     SteppedShaft, KeyedShaft, SplinedShaft, SolidPulley, VGroovePulley, MultiGroovePulley,
@@ -235,6 +332,26 @@ public:
     bool addOrientedCone(double bottomRadius,double topRadius,double height,double ox,double oy,double oz,
                          double ax,double ay,double az,QString* error = nullptr);
     bool addTorusSegment(double majorRadius,double tubeRadius,double angleDegrees,QString* error = nullptr);
+    bool sweepCircularProfile(double radius,double pathLength,double lateralOffset,double verticalRise,
+                              QString* error = nullptr);
+    bool sweepRectangularProfile(double width,double height,double pathLength,double lateralOffset,double verticalRise,
+                                 QString* error = nullptr);
+    bool sweepEllipticalProfile(double semiAxisA,double semiAxisB,double pathLength,double lateralOffset,double verticalRise,
+                                QString* error = nullptr);
+    bool addHelicalSweep(double profileRadius,double coilRadius,double pitch,double turns,QString* error = nullptr);
+    bool addVariablePitchHelicalSweep(double profileRadius,double coilRadius,double startPitch,double endPitch,
+                                      double turns,QString* error = nullptr);
+    bool addTaperedHelicalSweep(double profileRadius,double startCoilRadius,double endCoilRadius,double pitch,
+                                double turns,QString* error = nullptr);
+    bool addEllipticalPrism(double semiAxisA,double semiAxisB,double height,QString* error = nullptr);
+    bool addEllipticalTube(double outerA,double outerB,double innerA,double innerB,double height,
+                           QString* error = nullptr);
+    bool loftCircularSections(double bottomRadius,double topRadius,double height,double offsetX,double offsetY,
+                              QString* error = nullptr);
+    bool loftRectangleToCircle(double width,double depth,double radius,double height,double offsetX,double offsetY,
+                               QString* error = nullptr);
+    bool loftHollowReducer(double bottomOuter,double bottomInner,double topOuter,double topInner,double height,
+                           double offsetX,double offsetY,QString* error = nullptr);
     bool loftRectangles(double bottomX,double bottomY,double bottomWidth,double bottomDepth,
                         double topX,double topY,double topWidth,double topDepth,double height,
                         QString* error = nullptr);
@@ -287,6 +404,8 @@ public:
     bool rotateAboutAxis(const QString& id, double ox, double oy, double oz,
                          double ax, double ay, double az, double degrees, QString* error = nullptr);
     bool linearPattern(const QString& id, Axis axis, int instanceCount, double spacing, QString* error = nullptr);
+    bool linearPatternAlongVector(const QString& id,double directionX,double directionY,double directionZ,
+                                  int instanceCount,double spacing,QString* error = nullptr);
     bool rectangularPattern(const QString& id, Axis firstAxis, int firstCount, double firstSpacing,
                             Axis secondAxis, int secondCount, double secondSpacing, QString* error = nullptr);
     bool prepareHole(const QString& id, double x, double y, double entryZ, double diameter,
@@ -299,8 +418,53 @@ public:
                             QString* error = nullptr) const;
     static HolePreview buildHolePreview(const HoleCommand& command);
     bool commitHole(const HoleCommand& command, const TopoDS_Shape& preview, QString* error = nullptr);
+    bool prepareDovetailGroove(const QString& id,double centerX,double centerY,double entryZ,
+                               double mouthWidth,double bottomWidth,double depth,double length,
+                               double angleDegrees,DovetailGrooveCommand* command,QString* error = nullptr) const;
+    static DovetailGroovePreview buildDovetailGroovePreview(const DovetailGrooveCommand& command);
+    bool commitDovetailGroove(const DovetailGrooveCommand& command,const TopoDS_Shape& preview,
+                              QString* error = nullptr);
+    bool prepareTSlotGroove(const QString& id,double centerX,double centerY,double entryZ,
+                            double neckWidth,double undercutWidth,double depth,double undercutHeight,
+                            double length,double angleDegrees,TSlotGrooveCommand* command,
+                            QString* error = nullptr) const;
+    static TSlotGroovePreview buildTSlotGroovePreview(const TSlotGrooveCommand& command);
+    bool commitTSlotGroove(const TSlotGrooveCommand& command,const TopoDS_Shape& preview,
+                           QString* error = nullptr);
+    bool prepareRoundedSlot(const QString& id,double centerX,double centerY,double entryZ,
+                            double width,double length,double depth,double angleDegrees,
+                            RoundedSlotCommand* command,QString* error = nullptr) const;
+    static RoundedSlotPreview buildRoundedSlotPreview(const RoundedSlotCommand& command);
+    bool commitRoundedSlot(const RoundedSlotCommand& command,const TopoDS_Shape& preview,
+                           QString* error = nullptr);
+    bool prepareKeyholeSlot(const QString& id,double centerX,double centerY,double entryZ,
+                            double headDiameter,double throatWidth,double throatLength,double depth,
+                            double angleDegrees,KeyholeSlotCommand* command,QString* error = nullptr) const;
+    static KeyholeSlotPreview buildKeyholeSlotPreview(const KeyholeSlotCommand& command);
+    bool commitKeyholeSlot(const KeyholeSlotCommand& command,const TopoDS_Shape& preview,
+                           QString* error = nullptr);
+    bool prepareRoundedSlotPattern(const QString& id,double centerX,double centerY,double entryZ,
+                                   double width,double length,double depth,double angleDegrees,
+                                   int instanceCount,double spacingX,double spacingY,
+                                   RoundedSlotPatternCommand* command,QString* error = nullptr) const;
+    static RoundedSlotPatternPreview buildRoundedSlotPatternPreview(const RoundedSlotPatternCommand& command);
+    bool commitRoundedSlotPattern(const RoundedSlotPatternCommand& command,const TopoDS_Shape& preview,
+                                  QString* error = nullptr);
     bool holePattern(const QString& id,double x,double y,double entryZ,double diameter,double depth,bool throughAll,
                      int countX,double spacingX,int countY,double spacingY,QString* error = nullptr);
+    bool circularHolePattern(const QString& id,double centerX,double centerY,double entryZ,double boltCircleRadius,
+                             double diameter,double depth,bool throughAll,int instanceCount,double totalAngleDegrees,
+                             QString* error = nullptr);
+    bool circularCountersinkPattern(const QString& id,double centerX,double centerY,double entryZ,double boltCircleRadius,
+                                    double diameter,double depth,bool throughAll,double headDiameter,
+                                    double includedAngleDegrees,int instanceCount,double totalAngleDegrees,
+                                    QString* error = nullptr);
+    bool circularCounterborePattern(const QString& id,double centerX,double centerY,double entryZ,double boltCircleRadius,
+                                    double diameter,double depth,bool throughAll,double headDiameter,double headDepth,
+                                    int instanceCount,double totalAngleDegrees,QString* error = nullptr);
+    bool linearKeyholeSlotPattern(const QString& id,double centerX,double centerY,double entryZ,double headDiameter,
+                                  double throatWidth,double throatLength,double depth,double angleDegrees,
+                                  int instanceCount,double spacingX,double spacingY,QString* error = nullptr);
     bool circularPattern(const QString& id, Axis axis, double centerU, double centerV,
                          int instanceCount, double totalAngleDegrees, QString* error = nullptr);
     bool splitBody(const QString& id, Axis axis, double planeOffset, QString* error = nullptr);
@@ -319,6 +483,7 @@ public:
     bool canRedo() const noexcept { return !redo_.isEmpty(); }
     bool saveAs(const QString& path, QString* error = nullptr);
     bool load(const QString& path, QString* error = nullptr);
+    bool importSTEP(const QString& path, QString* error = nullptr);
     bool exportSTEP(const QString& path, QString* error = nullptr) const;
     bool exportSTL(const QString& path, QString* error = nullptr) const;
 
@@ -334,6 +499,8 @@ private:
     void checkpoint();
     QString uniqueName(const QString& base) const;
     static bool validShape(const TopoDS_Shape& shape, QString* error);
+    bool addSweepProfile(bool circular,bool elliptical,double width,double height,double pathLength,double lateralOffset,
+                         double verticalRise,QString* error);
     static void setError(QString* error, const QString& text);
 };
 } // namespace cad

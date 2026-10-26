@@ -1,4 +1,4 @@
-﻿"""Dependency-free static source checks. These DO NOT verify compilation or native behavior."""
+"""Dependency-free static source checks. These DO NOT verify compilation or native behavior."""
 from pathlib import Path
 import json
 import re
@@ -91,6 +91,55 @@ checks = {
     'modeling_tool_ui_menu': ('src/ui/MainWindow.cpp', 'Modeling Tools'),
     'modeling_tool_regression': ('tests/cadcore_tests.cpp', 'testModelingTools()'),
     'modeling_tool_documentation': ('docs/MODELING_TOOLS.md', 'PASS: 210 assertions across 30 modeling tools'),
+    'step_import_builder': ('src/core/SceneDocument.cpp', 'bool SceneDocument::importSTEP'),
+    'step_import_ui': ('src/ui/MainWindow.cpp', 'Import STEP...'),
+    'step_import_regression': ('tests/cadcore_tests.cpp', 'STEP import undo did not restore the existing document'),
+    'step_import_documentation': ('docs/STEP_IMPORT.md', 'two-body STEP fixture'),
+    'circular_sweep_core': ('src/core/SceneDocument.cpp', 'bool SceneDocument::sweepCircularProfile'),
+    'rectangular_sweep_core': ('src/core/SceneDocument.cpp', 'bool SceneDocument::sweepRectangularProfile'),
+    'sweep_menu_and_ribbon': ('src/ui/MainWindow.cpp', 'Sweep circular profile...'),
+    'sweep_regression': ('tests/cadcore_tests.cpp', 'testSweeps()'),
+    'sweep_documentation': ('docs/PROFILE_SWEEP.md', '11 assertions'),
+    'helical_sweep_core': ('src/core/SceneDocument.cpp', 'bool SceneDocument::addHelicalSweep'),
+    'helical_sweep_menu_and_ribbon': ('src/ui/MainWindow.cpp', 'Helical sweep...'),
+    'helical_sweep_regression': ('tests/cadcore_tests.cpp', 'testHelicalSweep()'),
+    'helical_sweep_ctest': ('CMakeLists.txt', 'cadcore_helical_sweep'),
+    'helical_sweep_documentation': ('docs/HELICAL_SWEEP.md', '9 assertions'),
+    'variable_pitch_helix_core': ('src/core/SceneDocument.cpp', 'bool SceneDocument::addVariablePitchHelicalSweep'),
+    'variable_pitch_helix_menu_and_ribbon': ('src/ui/MainWindow.cpp', 'Variable-pitch spring...'),
+    'variable_pitch_helix_regression': ('tests/cadcore_tests.cpp', 'testVariablePitchHelicalSweep()'),
+    'variable_pitch_helix_ctest': ('CMakeLists.txt', 'cadcore_variable_pitch_helix'),
+    'variable_pitch_helix_documentation': ('docs/VARIABLE_PITCH_HELIX.md', '10 assertions'),
+    'elliptical_sweep_core': ('src/core/SceneDocument.cpp', 'bool SceneDocument::sweepEllipticalProfile'),
+    'elliptical_sweep_ui_menu_ribbon': ('src/ui/MainWindow.cpp', 'Sweep elliptical profile...'),
+    'elliptical_sweep_regression': ('tests/cadcore_tests.cpp', 'Elliptical sweep was not inserted'),
+    'elliptical_sweep_documentation': ('docs/ELLIPTICAL_SWEEP.md', '17 assertions'),
+    'tapered_helix_core': ('src/core/SceneDocument.cpp', 'bool SceneDocument::addTaperedHelicalSweep'),
+    'tapered_helix_ui_menu_ribbon': ('src/ui/MainWindow.cpp', 'Tapered spring...'),
+    'tapered_helix_regression': ('tests/cadcore_tests.cpp', 'testTaperedHelicalSweep()'),
+    'tapered_helix_ctest': ('CMakeLists.txt', 'cadcore_tapered_helix'),
+    'tapered_helix_documentation': ('docs/TAPERED_HELIX.md', '10 assertions'),
+    'form_elliptical_prism_core': ('src/core/FormFeatures.cpp', 'bool SceneDocument::addEllipticalPrism'),
+    'form_elliptical_tube_core': ('src/core/FormFeatures.cpp', 'bool SceneDocument::addEllipticalTube'),
+    'form_circular_loft_core': ('src/core/FormFeatures.cpp', 'bool SceneDocument::loftCircularSections'),
+    'form_rect_to_circle_core': ('src/core/FormFeatures.cpp', 'bool SceneDocument::loftRectangleToCircle'),
+    'form_hollow_reducer_core': ('src/core/FormFeatures.cpp', 'bool SceneDocument::loftHollowReducer'),
+    'form_features_ui': ('src/ui/MainWindow.cpp', 'Hollow loft reducer...'),
+    'form_features_regression': ('tests/cadcore_tests.cpp', 'testFormFeatures()'),
+    'form_features_ctest': ('CMakeLists.txt', 'cadcore_form_features'),
+    'form_features_documentation': ('docs/FORM_FEATURES.md', '30 assertions'),
+    'form_features_source': ('CMakeLists.txt', 'src/core/FormFeatures.cpp'),
+    'vector_linear_pattern_core': ('src/core/SceneDocument.cpp', 'bool SceneDocument::linearPatternAlongVector'),
+    'vector_linear_pattern_ui': ('src/ui/MainWindow.cpp', 'Linear pattern along vector...'),
+    'vector_linear_pattern_regression': ('tests/cadcore_tests.cpp', 'testVectorLinearPattern()'),
+    'vector_linear_pattern_ctest': ('CMakeLists.txt', 'cadcore_vector_pattern'),
+    'vector_linear_pattern_documentation': ('docs/VECTOR_PATTERN.md', '17 assertions'),
+    'circular_hole_pattern_core': ('src/core/SceneDocument.cpp', 'bool SceneDocument::circularHolePattern'),
+    'circular_hole_pattern_ui': ('src/ui/MainWindow.cpp', 'Circular hole pattern...'),
+    'circular_hole_pattern_regression': ('tests/cadcore_tests.cpp', 'testCircularHolePattern()'),
+    'circular_hole_pattern_ctest': ('CMakeLists.txt', 'cadcore_circular_hole_pattern'),
+    'circular_hole_pattern_documentation': ('docs/CIRCULAR_HOLE_PATTERN.md', '15 assertions'),
+    'elliptical_sweep_ctest_coverage': ('CMakeLists.txt', 'cadcore_sweeps'),
     'feature_gap_counts': ('docs/FEATURE_GAP_COMPARISON.md', '6 capability areas implemented, 3 partial, and **21 not yet implemented**'),
     'feature_gap_30th_area': ('docs/FEATURE_GAP_COMPARISON.md', '30 | CAD standards and standards checking'),
 }
@@ -104,9 +153,19 @@ for path in cpp:
     src=path.read_text(encoding='utf-8')
     if re.search(r'(?m)^\s*#include\s+["<]\.\./',src):
         problems.append('invalid_parent_include:'+path.name)
+header=(ROOT/'src/core/SceneDocument.h').read_text(encoding='utf-8')
+tests=(ROOT/'tests/cadcore_tests.cpp').read_text(encoding='utf-8')
+public_section=header.split('class SceneDocument {',1)[1].split('\nprivate:',1)[0]
+public_operations=set(re.findall(r'\b(?:bool|void|const QVector<Part>&|QString|const Part\*)\s+(\w+)\s*\(',public_section))
+missing_api_tests=sorted(name for name in public_operations if not re.search(r'\b'+re.escape(name)+r'\s*\(',tests))
+if missing_api_tests:
+    problems.extend('public_api_without_regression:'+name for name in missing_api_tests)
 report={
     'audit': 'textual repository contract only; no compilation',
     'source_checks': len(checks),
+    'public_api_operations': len(public_operations),
+    'public_api_referenced_by_regression': len(public_operations)-len(missing_api_tests),
+    'public_api_without_regression': missing_api_tests,
     'passed': not problems,
     'failed': problems,
 }

@@ -155,6 +155,7 @@ void MainWindow::buildUi() {
     auto* saveAction = file->addAction("&Save",this,[this]{saveFile();},QKeySequence::Save);
     auto* saveAsAction = file->addAction("Save &As...",this,[this]{saveFile(true);},QKeySequence::SaveAs);
     file->addSeparator();
+    auto* importStepAction = file->addAction("Import STEP...",this,&MainWindow::importSTEPFile);
     auto* exportStepAction = file->addAction("Export STEP...",this,[this]{exportFile(true);});
     auto* exportStlAction = file->addAction("Export STL...",this,[this]{exportFile(false);});
     file->addSeparator();
@@ -184,6 +185,17 @@ void MainWindow::buildUi() {
     auto* orientedCylinderAction=create->addAction("Oriented cylinder...",this,&MainWindow::makeOrientedCylinder);
     auto* orientedConeAction=create->addAction("Oriented cone...",this,&MainWindow::makeOrientedCone);
     auto* torusSegmentAction=create->addAction("Torus segment...",this,&MainWindow::makeTorusSegment);
+    auto* sweepCircleAction=create->addAction("Sweep circular profile...",this,&MainWindow::sweepCircularProfile);
+    auto* sweepRectangleAction=create->addAction("Sweep rectangular profile...",this,&MainWindow::sweepRectangularProfile);
+    auto* sweepEllipseAction=create->addAction("Sweep elliptical profile...",this,&MainWindow::sweepEllipticalProfile);
+    auto* helicalSweepAction=create->addAction("Helical sweep...",this,&MainWindow::makeHelicalSweep);
+    auto* variablePitchHelixAction=create->addAction("Variable-pitch spring...",this,&MainWindow::makeVariablePitchHelicalSweep);
+    auto* taperedHelixAction=create->addAction("Tapered spring...",this,&MainWindow::makeTaperedHelicalSweep);
+    auto* ellipticalPrismAction=create->addAction("Elliptical prism...",this,&MainWindow::makeEllipticalPrism);
+    auto* ellipticalTubeAction=create->addAction("Elliptical tube...",this,&MainWindow::makeEllipticalTube);
+    auto* circularLoftAction=create->addAction("Circular loft...",this,&MainWindow::makeCircularLoft);
+    auto* rectToCircleLoftAction=create->addAction("Rectangular to circular transition...",this,&MainWindow::makeRectangularToCircularLoft);
+    auto* hollowReducerAction=create->addAction("Hollow loft reducer...",this,&MainWindow::makeHollowLoftReducer);
     auto* extrusionAction = create->addAction("Sketch and extrude profile...",this,&MainWindow::sketchExtrusion);
     auto* loftAction = create->addAction("Loft between rectangles...",this,&MainWindow::loftRectangles);
     auto* revolveAction = create->addAction("Revolve rectangle profile...",this,&MainWindow::revolveRectangleProfile);
@@ -277,10 +289,20 @@ void MainWindow::buildUi() {
     auto* planeMirrorAction = modify->addAction("Mirror across custom plane...",this,&MainWindow::mirrorBodyAcrossPlane);
     auto* axisRotateAction = modify->addAction("Rotate about custom axis...",this,&MainWindow::rotateBodyAboutAxis);
     auto* patternAction = modify->addAction("Linear pattern selected body...",this,&MainWindow::linearPatternSelectedBody);
+    auto* vectorPatternAction = modify->addAction("Linear pattern along vector...",this,&MainWindow::linearPatternAlongVectorSelectedBody);
     auto* rectangularPatternAction = modify->addAction("Rectangular pattern selected body...",this,&MainWindow::rectangularPatternSelectedBody);
     auto* circularPatternAction = modify->addAction("Circular pattern selected body...",this,&MainWindow::circularPatternSelectedBody);
     auto* holeAction = modify->addAction("Hole selected body...",this,&MainWindow::holeSelectedBody);
     auto* holeGridAction = modify->addAction("Hole grid on selected body...",this,&MainWindow::holeGridSelectedBody);
+    auto* circularHolePatternAction = modify->addAction("Circular hole pattern...",this,&MainWindow::circularHolePatternSelectedBody);
+    auto* circularCountersinkPatternAction = modify->addAction("Circular countersink pattern...",this,&MainWindow::circularCountersinkPatternSelectedBody);
+    auto* circularCounterborePatternAction = modify->addAction("Circular counterbore pattern...",this,&MainWindow::circularCounterborePatternSelectedBody);
+    auto* linearKeyholePatternAction = modify->addAction("Linear keyhole-slot pattern...",this,&MainWindow::linearKeyholeSlotPatternSelectedBody);
+    auto* dovetailGrooveAction = modify->addAction("Dovetail groove...",this,&MainWindow::dovetailGrooveSelectedBody);
+    auto* tSlotGrooveAction = modify->addAction("T-slot groove...",this,&MainWindow::tSlotGrooveSelectedBody);
+    auto* roundedSlotAction = modify->addAction("Rounded slot...",this,&MainWindow::roundedSlotSelectedBody);
+    auto* keyholeSlotAction = modify->addAction("Keyhole slot...",this,&MainWindow::keyholeSlotSelectedBody);
+    auto* roundedSlotPatternAction = modify->addAction("Linear rounded-slot pattern...",this,&MainWindow::roundedSlotPatternSelectedBody);
     auto* splitAction = modify->addAction("Split selected body...",this,&MainWindow::splitSelectedBody);
     auto* shellAction = modify->addAction("Shell selected body...",this,&MainWindow::shellSelectedBody);
     auto* draftAction = modify->addAction("Draft planar face...",this,&MainWindow::draftSelectedFace);
@@ -375,12 +397,13 @@ void MainWindow::buildUi() {
     };
     addRibbonTab("File",{
         {"Document",{newAction,openAction,saveAction,saveAsAction,exitAction}},
+        {"Import",{importStepAction}},
         {"Export",{exportStepAction,exportStlAction}},
         {"History",{undoAction_,redoAction_}}
     });
     addRibbonTab("Create",{
         {"Primitives",{boxAction,cylAction,sphereAction,coneAction,torusAction,prismAction,capsuleAction,ellipsoidAction,tubeAction,wedgeAction,frustumAction,nutAction,orientedCylinderAction,orientedConeAction,torusSegmentAction}},
-        {"Profiles",{extrusionAction,loftAction,revolveAction,axisRevolveAction}},
+        {"Profiles",{extrusionAction,loftAction,revolveAction,axisRevolveAction,sweepCircleAction,sweepRectangleAction,sweepEllipseAction,helicalSweepAction,variablePitchHelixAction,taperedHelixAction,ellipticalPrismAction,ellipticalTubeAction,circularLoftAction,rectToCircleLoftAction,hollowReducerAction}},
         {"Mechanical",mechanicalActions},
         {"Advanced",advancedActions}
         ,{"Specialized",specializedActions},
@@ -393,8 +416,8 @@ void MainWindow::buildUi() {
     addRibbonTab("Modify",{
         {"Transform",{moveAction,rotateAction,axisRotateAction,scaleAction,copyAction,mirrorAction,planeMirrorAction}},
         {"Combine",{fuseAction,cutAction,commonAction}},
-        {"Pattern",{patternAction,rectangularPatternAction,circularPatternAction}},
-        {"Features",{holeAction,holeGridAction,splitAction,shellAction,draftAction,filletAction,chamferAction,filletAllAction,chamferAllAction}},
+        {"Pattern",{patternAction,vectorPatternAction,rectangularPatternAction,circularPatternAction}},
+        {"Features",{holeAction,holeGridAction,circularHolePatternAction,circularCountersinkPatternAction,circularCounterborePatternAction,dovetailGrooveAction,tSlotGrooveAction,roundedSlotAction,keyholeSlotAction,roundedSlotPatternAction,linearKeyholePatternAction,splitAction,shellAction,draftAction,filletAction,chamferAction,filletAllAction,chamferAllAction}},
         {"Manage",{renameAction,colorAction,deleteAction}}
     });
     addRibbonTab("Inspect",{
@@ -642,6 +665,99 @@ void MainWindow::makeTorusSegment() {
         {18,5,90},0.00001,360);if(!v)return;
     QString error;if(!document_.addTorusSegment((*v)[0],(*v)[1],(*v)[2],&error)){reportError("Torus segment",error);return;}
     refresh(true);
+}
+
+void MainWindow::sweepCircularProfile() {
+    const auto values=valuesDialog(this,"Sweep circular profile",
+        {"Profile radius (mm)","Path length (mm)","Lateral offset (mm)","Vertical rise (mm)"},{5,80,20,12},0,1e6);
+    if(!values)return;
+    QString error;
+    if(!document_.sweepCircularProfile((*values)[0],(*values)[1],(*values)[2],(*values)[3],&error))
+        reportError("Sweep circular profile",error);
+    else refresh(true);
+}
+
+void MainWindow::sweepRectangularProfile() {
+    const auto values=valuesDialog(this,"Sweep rectangular profile",
+        {"Profile width (mm)","Profile height (mm)","Path length (mm)","Lateral offset (mm)","Vertical rise (mm)"},{12,8,80,20,12},0,1e6);
+    if(!values)return;
+    QString error;
+    if(!document_.sweepRectangularProfile((*values)[0],(*values)[1],(*values)[2],(*values)[3],(*values)[4],&error))
+        reportError("Sweep rectangular profile",error);
+    else refresh(true);
+}
+
+void MainWindow::sweepEllipticalProfile() {
+    const auto values=valuesDialog(this,"Sweep elliptical profile",
+        {"Semi-axis A (mm)","Semi-axis B (mm)","Path length (mm)","Lateral offset (mm)","Vertical rise (mm)"},
+        {8,4,80,20,12},0,1e6);
+    if(!values)return;
+    QString error;
+    if(!document_.sweepEllipticalProfile((*values)[0],(*values)[1],(*values)[2],(*values)[3],(*values)[4],&error))
+        reportError("Sweep elliptical profile",error);
+    else refresh(true);
+}
+
+void MainWindow::makeHelicalSweep() {
+    const auto values=valuesDialog(this,"Create helical sweep",
+        {"Wire radius (mm)","Coil radius (mm)","Pitch (mm)","Turns"},{1.5,12,5,6},0,1e6);
+    if(!values)return;
+    QString error;
+    if(!document_.addHelicalSweep((*values)[0],(*values)[1],(*values)[2],(*values)[3],&error))
+        reportError("Helical sweep",error);
+    else refresh(true);
+}
+
+void MainWindow::makeVariablePitchHelicalSweep() {
+    const auto values=valuesDialog(this,"Create variable-pitch spring",
+        {"Wire radius (mm)","Coil radius (mm)","Start pitch (mm)","End pitch (mm)","Turns"},
+        {1.5,12,4,7,6},0,1e6);
+    if(!values)return;
+    QString error;
+    if(!document_.addVariablePitchHelicalSweep((*values)[0],(*values)[1],(*values)[2],(*values)[3],(*values)[4],&error))
+        reportError("Variable-pitch spring",error);
+    else refresh(true);
+}
+
+void MainWindow::makeTaperedHelicalSweep() {
+    const auto values=valuesDialog(this,"Create tapered spring",
+        {"Wire radius (mm)","Start coil radius (mm)","End coil radius (mm)","Pitch (mm)","Turns"},
+        {1.5,8,16,5,6},0,1e6);
+    if(!values)return;
+    QString error;
+    if(!document_.addTaperedHelicalSweep((*values)[0],(*values)[1],(*values)[2],(*values)[3],(*values)[4],&error))
+        reportError("Tapered spring",error);
+    else refresh(true);
+}
+
+void MainWindow::makeEllipticalPrism() {
+    const auto v=valuesDialog(this,"Create elliptical prism",{"Semi-axis A (mm)","Semi-axis B (mm)","Height (mm)"},{18,10,30},0,1e6);
+    if(!v)return;QString error;
+    if(!document_.addEllipticalPrism((*v)[0],(*v)[1],(*v)[2],&error))reportError("Elliptical prism",error);else refresh(true);
+}
+
+void MainWindow::makeEllipticalTube() {
+    const auto v=valuesDialog(this,"Create elliptical tube",{"Outer semi-axis A (mm)","Outer semi-axis B (mm)","Inner semi-axis A (mm)","Inner semi-axis B (mm)","Height (mm)"},{18,12,13,8,30},0,1e6);
+    if(!v)return;QString error;
+    if(!document_.addEllipticalTube((*v)[0],(*v)[1],(*v)[2],(*v)[3],(*v)[4],&error))reportError("Elliptical tube",error);else refresh(true);
+}
+
+void MainWindow::makeCircularLoft() {
+    const auto v=valuesDialog(this,"Create circular loft",{"Bottom radius (mm)","Top radius (mm)","Height (mm)","Top offset X (mm)","Top offset Y (mm)"},{16,9,35,5,0},0,1e6);
+    if(!v)return;QString error;
+    if(!document_.loftCircularSections((*v)[0],(*v)[1],(*v)[2],(*v)[3],(*v)[4],&error))reportError("Circular loft",error);else refresh(true);
+}
+
+void MainWindow::makeRectangularToCircularLoft() {
+    const auto v=valuesDialog(this,"Create rectangular-to-circular transition",{"Rectangle width (mm)","Rectangle depth (mm)","Circle radius (mm)","Height (mm)","Top offset X (mm)","Top offset Y (mm)"},{35,25,12,30,0,0},0,1e6);
+    if(!v)return;QString error;
+    if(!document_.loftRectangleToCircle((*v)[0],(*v)[1],(*v)[2],(*v)[3],(*v)[4],(*v)[5],&error))reportError("Rectangular-to-circular transition",error);else refresh(true);
+}
+
+void MainWindow::makeHollowLoftReducer() {
+    const auto v=valuesDialog(this,"Create hollow loft reducer",{"Bottom outer radius (mm)","Bottom inner radius (mm)","Top outer radius (mm)","Top inner radius (mm)","Height (mm)","Top offset X (mm)","Top offset Y (mm)"},{18,12,10,6,35,0,0},0,1e6);
+    if(!v)return;QString error;
+    if(!document_.loftHollowReducer((*v)[0],(*v)[1],(*v)[2],(*v)[3],(*v)[4],(*v)[5],(*v)[6],&error))reportError("Hollow loft reducer",error);else refresh(true);
 }
 
 void MainWindow::sketchExtrusion() {
@@ -960,6 +1076,31 @@ void MainWindow::linearPatternSelectedBody() {
     refresh(true);
 }
 
+void MainWindow::linearPatternAlongVectorSelectedBody() {
+    if(!requireBodyMode("Linear pattern along vector"))return;
+    const auto ids=selectedIds();
+    if(ids.size()!=1){reportError("Linear pattern along vector","Select exactly one body.");return;}
+    QDialog dialog(this);dialog.setWindowTitle("Linear pattern along vector");
+    auto* form=new QFormLayout(&dialog);
+    auto* directionX=new QDoubleSpinBox(&dialog);auto* directionY=new QDoubleSpinBox(&dialog);auto* directionZ=new QDoubleSpinBox(&dialog);
+    for(auto* field:{directionX,directionY,directionZ}){field->setRange(-1e6,1e6);field->setDecimals(4);}
+    directionX->setValue(1);directionY->setValue(1);
+    auto* instances=new QSpinBox(&dialog);instances->setRange(2,1000);instances->setValue(3);
+    auto* spacing=new QDoubleSpinBox(&dialog);spacing->setRange(-1e6,1e6);spacing->setDecimals(4);spacing->setValue(25);
+    form->addRow("Direction X",directionX);form->addRow("Direction Y",directionY);form->addRow("Direction Z",directionZ);
+    form->addRow("Total instances",instances);form->addRow("Spacing (mm)",spacing);
+    auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);
+    connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+    form->addRow(buttons);
+    if(dialog.exec()!=QDialog::Accepted)return;
+    QString error;
+    if(!document_.linearPatternAlongVector(ids.first(),directionX->value(),directionY->value(),directionZ->value(),
+                                           instances->value(),spacing->value(),&error)){
+        reportError("Linear pattern along vector",error);return;
+    }
+    refresh(true);
+}
+
 void MainWindow::rectangularPatternSelectedBody() {
     if(!requireBodyMode("Rectangular pattern"))return;
     const auto ids=selectedIds();
@@ -1164,6 +1305,401 @@ void MainWindow::holeGridSelectedBody() {
         reportError("Hole grid",error);return;
     }
     refresh();
+}
+
+void MainWindow::circularHolePatternSelectedBody() {
+    if(!requireBodyMode("Circular hole pattern"))return;
+    const auto ids=selectedIds();
+    if(ids.size()!=1){reportError("Circular hole pattern","Select exactly one body.");return;}
+    QDialog dialog(this);dialog.setWindowTitle("Circular hole pattern");
+    auto* form=new QFormLayout(&dialog);
+    auto field=[&](double minimum,double maximum,double value){auto* spin=new QDoubleSpinBox(&dialog);spin->setRange(minimum,maximum);spin->setDecimals(4);spin->setValue(value);return spin;};
+    auto* centerX=field(-1e6,1e6,40);auto* centerY=field(-1e6,1e6,40);auto* entryZ=field(-1e6,1e6,20);
+    auto* boltRadius=field(0.00001,1e6,25);auto* diameter=field(0.00001,1e6,6);auto* depth=field(0.00001,1e6,20);
+    auto* count=new QSpinBox(&dialog);count->setRange(2,1000);count->setValue(4);
+    auto* angle=field(1,360,360);auto* throughAll=new QCheckBox("Through all",&dialog);throughAll->setChecked(true);
+    depth->setEnabled(false);connect(throughAll,&QCheckBox::toggled,depth,&QDoubleSpinBox::setDisabled);
+    form->addRow("Center X (mm)",centerX);form->addRow("Center Y (mm)",centerY);form->addRow("Entry Z (mm)",entryZ);
+    form->addRow("Bolt-circle radius (mm)",boltRadius);form->addRow("Hole diameter (mm)",diameter);
+    form->addRow("Blind depth (mm)",depth);form->addRow("Total instances",count);form->addRow("Pattern angle (degrees)",angle);
+    form->addRow(throughAll);
+    auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);
+    connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+    form->addRow(buttons);
+    if(dialog.exec()!=QDialog::Accepted)return;
+    QString error;
+    if(!document_.circularHolePattern(ids.first(),centerX->value(),centerY->value(),entryZ->value(),boltRadius->value(),
+                                      diameter->value(),depth->value(),throughAll->isChecked(),count->value(),angle->value(),&error)){
+        reportError("Circular hole pattern",error);return;
+    }
+    refresh(true);
+}
+
+void MainWindow::circularCountersinkPatternSelectedBody(){
+    if(!requireBodyMode("Circular countersink pattern"))return;
+    const auto ids=selectedIds();
+    if(ids.size()!=1){reportError("Circular countersink pattern","Select exactly one body.");return;}
+    const cad::Part* part=document_.find(ids.first());if(!part)return;
+    Bnd_Box bounds;BRepBndLib::AddOptimal(part->shape,bounds,false,false);
+    if(bounds.IsVoid()){reportError("Circular countersink pattern","The selected body has no measurable bounds.");return;}
+    double xmin=0,ymin=0,zmin=0,xmax=0,ymax=0,zmax=0;bounds.Get(xmin,ymin,zmin,xmax,ymax,zmax);
+    const double minSpan=std::min(xmax-xmin,ymax-ymin);
+    QDialog dialog(this);dialog.setWindowTitle("Circular countersink pattern");
+    auto* form=new QFormLayout(&dialog);
+    auto field=[&](double minimum,double maximum,double value){
+        auto* spin=new QDoubleSpinBox(&dialog);spin->setRange(minimum,maximum);spin->setDecimals(4);spin->setValue(value);return spin;
+    };
+    auto* centerX=field(-1e6,1e6,(xmin+xmax)/2);auto* centerY=field(-1e6,1e6,(ymin+ymax)/2);
+    auto* entryZ=field(-1e6,1e6,zmax);auto* radius=field(0.00001,1e6,std::max(1.0,std::min(15.0,minSpan*0.25)));
+    auto* diameter=field(0.00001,1e6,std::max(1.0,std::min(4.0,minSpan*0.12)));
+    auto* headDiameter=field(0.00001,1e6,std::max(2.0,std::min(8.0,minSpan*0.24)));
+    auto* depth=field(0.00001,1e6,zmax-zmin);auto* angle=field(2,178,90);
+    auto* count=new QSpinBox(&dialog);count->setRange(2,1000);count->setValue(4);
+    auto* totalAngle=field(1,360,360);auto* throughAll=new QCheckBox("Through all",&dialog);throughAll->setChecked(true);
+    depth->setEnabled(false);connect(throughAll,&QCheckBox::toggled,depth,&QDoubleSpinBox::setDisabled);
+    form->addRow("Center X (mm)",centerX);form->addRow("Center Y (mm)",centerY);form->addRow("Entry Z (mm)",entryZ);
+    form->addRow("Bolt-circle radius (mm)",radius);form->addRow("Drill diameter (mm)",diameter);
+    form->addRow("Countersink diameter (mm)",headDiameter);form->addRow("Included angle (degrees)",angle);
+    form->addRow("Blind depth (mm)",depth);form->addRow("Total instances",count);
+    form->addRow("Pattern angle (degrees)",totalAngle);form->addRow(throughAll);
+    auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);form->addRow(buttons);
+    connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);
+    connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+    if(dialog.exec()!=QDialog::Accepted)return;
+    QString error;
+    if(!document_.circularCountersinkPattern(ids.first(),centerX->value(),centerY->value(),entryZ->value(),radius->value(),
+            diameter->value(),depth->value(),throughAll->isChecked(),headDiameter->value(),angle->value(),count->value(),
+            totalAngle->value(),&error)){
+        reportError("Circular countersink pattern",error);return;
+    }
+    refresh(true);
+}
+
+void MainWindow::circularCounterborePatternSelectedBody(){
+    if(!requireBodyMode("Circular counterbore pattern"))return;
+    const auto ids=selectedIds();if(ids.size()!=1){reportError("Circular counterbore pattern","Select exactly one body.");return;}
+    const cad::Part* part=document_.find(ids.first());if(!part)return;
+    Bnd_Box bounds;BRepBndLib::AddOptimal(part->shape,bounds,false,false);
+    if(bounds.IsVoid()){reportError("Circular counterbore pattern","The selected body has no measurable bounds.");return;}
+    double xmin=0,ymin=0,zmin=0,xmax=0,ymax=0,zmax=0;bounds.Get(xmin,ymin,zmin,xmax,ymax,zmax);
+    const double minSpan=std::min(xmax-xmin,ymax-ymin);
+    QDialog dialog(this);dialog.setWindowTitle("Circular counterbore pattern");auto* form=new QFormLayout(&dialog);
+    auto field=[&](double minimum,double maximum,double value){auto* spin=new QDoubleSpinBox(&dialog);spin->setRange(minimum,maximum);spin->setDecimals(4);spin->setValue(value);return spin;};
+    auto* centerX=field(-1e6,1e6,(xmin+xmax)/2);auto* centerY=field(-1e6,1e6,(ymin+ymax)/2);
+    auto* entryZ=field(-1e6,1e6,zmax);auto* radius=field(0.00001,1e6,std::max(1.0,std::min(15.0,minSpan*0.25)));
+    auto* diameter=field(0.00001,1e6,std::max(1.0,std::min(4.0,minSpan*0.12)));
+    auto* headDiameter=field(0.00001,1e6,std::max(2.0,std::min(8.0,minSpan*0.24)));
+    auto* headDepth=field(0.00001,1e6,std::max(0.5,std::min(3.0,(zmax-zmin)*0.15)));
+    auto* depth=field(0.00001,1e6,zmax-zmin);auto* count=new QSpinBox(&dialog);count->setRange(2,1000);count->setValue(4);
+    auto* totalAngle=field(1,360,360);auto* throughAll=new QCheckBox("Through all",&dialog);throughAll->setChecked(true);
+    depth->setEnabled(false);connect(throughAll,&QCheckBox::toggled,depth,&QDoubleSpinBox::setDisabled);
+    form->addRow("Center X (mm)",centerX);form->addRow("Center Y (mm)",centerY);form->addRow("Entry Z (mm)",entryZ);
+    form->addRow("Bolt-circle radius (mm)",radius);form->addRow("Drill diameter (mm)",diameter);
+    form->addRow("Counterbore diameter (mm)",headDiameter);form->addRow("Counterbore depth (mm)",headDepth);
+    form->addRow("Blind hole depth (mm)",depth);form->addRow("Total instances",count);form->addRow("Pattern angle (degrees)",totalAngle);
+    form->addRow(throughAll);auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);form->addRow(buttons);
+    connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+    if(dialog.exec()!=QDialog::Accepted)return;
+    QString error;
+    if(!document_.circularCounterborePattern(ids.first(),centerX->value(),centerY->value(),entryZ->value(),radius->value(),
+        diameter->value(),depth->value(),throughAll->isChecked(),headDiameter->value(),headDepth->value(),count->value(),
+        totalAngle->value(),&error)){
+        reportError("Circular counterbore pattern",error);return;
+    }
+    refresh(true);
+}
+
+void MainWindow::dovetailGrooveSelectedBody() {
+    if(!requireBodyMode("Dovetail groove"))return;
+    const auto ids=selectedIds();
+    if(ids.size()!=1){reportError("Dovetail groove","Select exactly one body.");return;}
+    const cad::Part* part=document_.find(ids.first());
+    if(!part)return;
+    Bnd_Box bounds;BRepBndLib::AddOptimal(part->shape,bounds,false,false);
+    if(bounds.IsVoid()){reportError("Dovetail groove","The selected body has no measurable bounds.");return;}
+    double xmin=0,ymin=0,zmin=0,xmax=0,ymax=0,zmax=0;
+    bounds.Get(xmin,ymin,zmin,xmax,ymax,zmax);
+    QDialog dialog(this);dialog.setWindowTitle("Cut dovetail groove");dialog.setMinimumWidth(380);
+    auto* form=new QFormLayout(&dialog);
+    auto field=[&](double minimum,double maximum,double step,double value){
+        auto* spin=new QDoubleSpinBox(&dialog);spin->setRange(minimum,maximum);spin->setDecimals(4);
+        spin->setSingleStep(step);spin->setValue(value);return spin;
+    };
+    auto* centerX=field(-1e6,1e6,1.0,(xmin+xmax)/2.0);
+    auto* centerY=field(-1e6,1e6,1.0,(ymin+ymax)/2.0);
+    auto* entryZ=field(-1e6,1e6,1.0,zmax);
+    auto* mouthWidth=field(0.0001,1e6,0.5,std::max(2.0,(xmax-xmin)*0.2));
+    auto* bottomWidth=field(0.0002,1e6,0.5,std::max(4.0,(xmax-xmin)*0.35));
+    auto* depth=field(0.0001,1e6,0.5,std::max(2.0,(zmax-zmin)*0.25));
+    auto* length=field(0.0001,1e6,1.0,std::max(10.0,(ymax-ymin)*0.6));
+    auto* angle=field(-360.0,360.0,5.0,0.0);
+    form->addRow("Center X (mm)",centerX);form->addRow("Center Y (mm)",centerY);
+    form->addRow("Entry Z (mm)",entryZ);form->addRow("Mouth width (mm)",mouthWidth);
+    form->addRow("Undercut width (mm)",bottomWidth);form->addRow("Depth (mm)",depth);
+    form->addRow("Length (mm)",length);form->addRow("Rotation about Z (degrees)",angle);
+    auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);
+    form->addRow(buttons);
+    connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);
+    connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+    if(dialog.exec()!=QDialog::Accepted)return;
+    cad::DovetailGrooveCommand command;QString error;
+    if(!document_.prepareDovetailGroove(ids.first(),centerX->value(),centerY->value(),entryZ->value(),
+          mouthWidth->value(),bottomWidth->value(),depth->value(),length->value(),angle->value(),&command,&error)){
+        reportError("Dovetail groove",error);return;
+    }
+    runPreviewAsync<cad::DovetailGroovePreview>(this,statusBar(),"Dovetail groove",
+        "Building dovetail-groove preview...",[command]{return cad::SceneDocument::buildDovetailGroovePreview(command);},
+        [this,command](const cad::DovetailGroovePreview& preview){
+            confirmPreview("Preview dovetail groove",
+                "Inspect the translucent gold result. Apply this groove to the selected body?",preview.shape,
+                [this,command,preview]{
+                    QString commitError;
+                    if(!document_.commitDovetailGroove(command,preview.shape,&commitError))
+                        reportError("Dovetail groove",commitError);
+                    else refresh();
+                });
+        });
+}
+
+void MainWindow::tSlotGrooveSelectedBody(){
+    if(!requireBodyMode("T-slot groove"))return;
+    const auto ids=selectedIds();
+    if(ids.size()!=1){reportError("T-slot groove","Select exactly one body.");return;}
+    const cad::Part* part=document_.find(ids.first());if(!part)return;
+    Bnd_Box bounds;BRepBndLib::AddOptimal(part->shape,bounds,false,false);
+    if(bounds.IsVoid()){reportError("T-slot groove","The selected body has no measurable bounds.");return;}
+    double xmin=0,ymin=0,zmin=0,xmax=0,ymax=0,zmax=0;
+    bounds.Get(xmin,ymin,zmin,xmax,ymax,zmax);
+    QDialog dialog(this);dialog.setWindowTitle("Cut T-slot groove");dialog.setMinimumWidth(390);
+    auto* form=new QFormLayout(&dialog);
+    auto field=[&](double minimum,double maximum,double step,double value){
+        auto* spin=new QDoubleSpinBox(&dialog);spin->setRange(minimum,maximum);spin->setDecimals(4);
+        spin->setSingleStep(step);spin->setValue(value);return spin;
+    };
+    auto* centerX=field(-1e6,1e6,1.0,(xmin+xmax)/2.0);
+    auto* centerY=field(-1e6,1e6,1.0,(ymin+ymax)/2.0);
+    auto* entryZ=field(-1e6,1e6,1.0,zmax);
+    auto* neckWidth=field(0.0001,1e6,0.5,std::max(2.0,(xmax-xmin)*0.15));
+    auto* undercutWidth=field(0.0002,1e6,0.5,std::max(4.0,(xmax-xmin)*0.3));
+    auto* depth=field(0.0001,1e6,0.5,std::max(3.0,(zmax-zmin)*0.3));
+    auto* undercutHeight=field(0.0001,1e6,0.5,std::max(1.0,(zmax-zmin)*0.1));
+    auto* length=field(0.0001,1e6,1.0,std::max(10.0,(ymax-ymin)*0.6));
+    auto* angle=field(-360.0,360.0,5.0,0.0);
+    form->addRow("Center X (mm)",centerX);form->addRow("Center Y (mm)",centerY);
+    form->addRow("Entry Z (mm)",entryZ);form->addRow("Neck width (mm)",neckWidth);
+    form->addRow("Undercut width (mm)",undercutWidth);form->addRow("Total depth (mm)",depth);
+    form->addRow("Undercut height (mm)",undercutHeight);form->addRow("Length (mm)",length);
+    form->addRow("Rotation about Z (degrees)",angle);
+    auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);form->addRow(buttons);
+    connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);
+    connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+    if(dialog.exec()!=QDialog::Accepted)return;
+    cad::TSlotGrooveCommand command;QString error;
+    if(!document_.prepareTSlotGroove(ids.first(),centerX->value(),centerY->value(),entryZ->value(),
+          neckWidth->value(),undercutWidth->value(),depth->value(),undercutHeight->value(),length->value(),
+          angle->value(),&command,&error)){
+        reportError("T-slot groove",error);return;
+    }
+    runPreviewAsync<cad::TSlotGroovePreview>(this,statusBar(),"T-slot groove",
+        "Building T-slot preview...",[command]{return cad::SceneDocument::buildTSlotGroovePreview(command);},
+        [this,command](const cad::TSlotGroovePreview& preview){
+            confirmPreview("Preview T-slot groove",
+                "Inspect the translucent gold result. Apply this T-slot to the selected body?",preview.shape,
+                [this,command,preview]{
+                    QString commitError;
+                    if(!document_.commitTSlotGroove(command,preview.shape,&commitError))
+                        reportError("T-slot groove",commitError);
+                    else refresh();
+                });
+        });
+}
+
+void MainWindow::roundedSlotSelectedBody(){
+    if(!requireBodyMode("Rounded slot"))return;
+    const auto ids=selectedIds();
+    if(ids.size()!=1){reportError("Rounded slot","Select exactly one body.");return;}
+    const cad::Part* part=document_.find(ids.first());if(!part)return;
+    Bnd_Box bounds;BRepBndLib::Add(part->shape,bounds);
+    double xmin=0,ymin=0,zmin=0,xmax=0,ymax=0,zmax=0;bounds.Get(xmin,ymin,zmin,xmax,ymax,zmax);
+    if(bounds.IsVoid()){reportError("Rounded slot","The selected body has no measurable bounds.");return;}
+    QDialog dialog(this);dialog.setWindowTitle("Cut rounded slot");dialog.setMinimumWidth(370);
+    auto* form=new QFormLayout(&dialog);
+    auto field=[&](double minimum,double maximum,double step,double value){
+        auto* spin=new QDoubleSpinBox(&dialog);spin->setRange(minimum,maximum);spin->setDecimals(4);
+        spin->setSingleStep(step);spin->setValue(value);return spin;
+    };
+    const double width=std::max(2.0,std::min(12.0,(xmax-xmin)*0.2));
+    auto* centerX=field(-1e6,1e6,1.0,(xmin+xmax)/2.0);
+    auto* centerY=field(-1e6,1e6,1.0,(ymin+ymax)/2.0);
+    auto* entryZ=field(-1e6,1e6,1.0,zmax);
+    auto* slotWidth=field(0.0001,1e6,0.5,width);
+    auto* length=field(0.0001,1e6,1.0,std::max(width,std::min(24.0,(ymax-ymin)*0.6)));
+    auto* depth=field(0.0001,1e6,0.5,std::max(3.0,(zmax-zmin)*0.3));
+    auto* angle=field(-360.0,360.0,5.0,0.0);
+    form->addRow("Center X (mm)",centerX);form->addRow("Center Y (mm)",centerY);
+    form->addRow("Entry Z (mm)",entryZ);form->addRow("Slot width (mm)",slotWidth);
+    form->addRow("Overall length (mm)",length);form->addRow("Depth (mm)",depth);
+    form->addRow("Rotation about Z (degrees)",angle);
+    auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);form->addRow(buttons);
+    connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);
+    connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+    if(dialog.exec()!=QDialog::Accepted)return;
+    cad::RoundedSlotCommand command;QString error;
+    if(!document_.prepareRoundedSlot(ids.first(),centerX->value(),centerY->value(),entryZ->value(),
+          slotWidth->value(),length->value(),depth->value(),angle->value(),&command,&error)){
+        reportError("Rounded slot",error);return;
+    }
+    runPreviewAsync<cad::RoundedSlotPreview>(this,statusBar(),"Rounded slot",
+        "Building rounded-slot preview...",[command]{return cad::SceneDocument::buildRoundedSlotPreview(command);},
+        [this,command](const cad::RoundedSlotPreview& preview){
+            confirmPreview("Preview rounded slot",
+                "Inspect the translucent gold result. Apply this rounded slot to the selected body?",preview.shape,
+                [this,command,preview]{
+                    QString commitError;
+                    if(!document_.commitRoundedSlot(command,preview.shape,&commitError))
+                        reportError("Rounded slot",commitError);
+                    else refresh();
+                });
+        });
+}
+
+void MainWindow::keyholeSlotSelectedBody(){
+    if(!requireBodyMode("Keyhole slot"))return;
+    const auto ids=selectedIds();
+    if(ids.size()!=1){reportError("Keyhole slot","Select exactly one body.");return;}
+    const cad::Part* part=document_.find(ids.first());if(!part)return;
+    Bnd_Box bounds;BRepBndLib::Add(part->shape,bounds);
+    if(bounds.IsVoid()){reportError("Keyhole slot","The selected body has no measurable bounds.");return;}
+    double xmin=0,ymin=0,zmin=0,xmax=0,ymax=0,zmax=0;bounds.Get(xmin,ymin,zmin,xmax,ymax,zmax);
+    QDialog dialog(this);dialog.setWindowTitle("Cut keyhole slot");dialog.setMinimumWidth(380);
+    auto* form=new QFormLayout(&dialog);
+    auto field=[&](double minimum,double maximum,double step,double value){
+        auto* spin=new QDoubleSpinBox(&dialog);spin->setRange(minimum,maximum);spin->setDecimals(4);
+        spin->setSingleStep(step);spin->setValue(value);return spin;
+    };
+    const double head=std::max(4.0,std::min(10.0,(xmax-xmin)*0.25));
+    const double throat=std::max(1.0,std::min(head*0.5,4.0));
+    const double throatLength=std::max(4.0,std::min(12.0,(ymax-ymin)*0.4));
+    auto* centerX=field(-1e6,1e6,1.0,(xmin+xmax)/2.0);
+    auto* centerY=field(-1e6,1e6,1.0,(ymin+ymax)/2.0-throatLength/3.0);
+    auto* entryZ=field(-1e6,1e6,1.0,zmax);
+    auto* headDiameter=field(0.0001,1e6,0.5,head);
+    auto* throatWidth=field(0.0001,1e6,0.5,throat);
+    auto* length=field(0.0001,1e6,1.0,throatLength);
+    auto* depth=field(0.0001,1e6,0.5,std::max(3.0,(zmax-zmin)*0.3));
+    auto* angle=field(-360.0,360.0,5.0,0.0);
+    form->addRow("Head center X (mm)",centerX);form->addRow("Head center Y (mm)",centerY);
+    form->addRow("Entry Z (mm)",entryZ);form->addRow("Head diameter (mm)",headDiameter);
+    form->addRow("Throat width (mm)",throatWidth);form->addRow("Throat length (mm)",length);
+    form->addRow("Depth (mm)",depth);form->addRow("Rotation about Z (degrees)",angle);
+    auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);form->addRow(buttons);
+    connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);
+    connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+    if(dialog.exec()!=QDialog::Accepted)return;
+    cad::KeyholeSlotCommand command;QString error;
+    if(!document_.prepareKeyholeSlot(ids.first(),centerX->value(),centerY->value(),entryZ->value(),
+          headDiameter->value(),throatWidth->value(),length->value(),depth->value(),angle->value(),
+          &command,&error)){
+        reportError("Keyhole slot",error);return;
+    }
+    runPreviewAsync<cad::KeyholeSlotPreview>(this,statusBar(),"Keyhole slot",
+        "Building keyhole-slot preview...",[command]{return cad::SceneDocument::buildKeyholeSlotPreview(command);},
+        [this,command](const cad::KeyholeSlotPreview& preview){
+            confirmPreview("Preview keyhole slot",
+                "Inspect the translucent gold result. Apply this keyhole slot to the selected body?",preview.shape,
+                [this,command,preview]{
+                    QString commitError;
+                    if(!document_.commitKeyholeSlot(command,preview.shape,&commitError))
+                        reportError("Keyhole slot",commitError);
+                    else refresh();
+                });
+        });
+}
+
+void MainWindow::roundedSlotPatternSelectedBody(){
+    if(!requireBodyMode("Rounded-slot pattern"))return;
+    const auto ids=selectedIds();
+    if(ids.size()!=1){reportError("Rounded-slot pattern","Select exactly one body.");return;}
+    const cad::Part* part=document_.find(ids.first());if(!part)return;
+    Bnd_Box bounds;BRepBndLib::Add(part->shape,bounds);
+    if(bounds.IsVoid()){reportError("Rounded-slot pattern","The selected body has no measurable bounds.");return;}
+    double xmin=0,ymin=0,zmin=0,xmax=0,ymax=0,zmax=0;bounds.Get(xmin,ymin,zmin,xmax,ymax,zmax);
+    QDialog dialog(this);dialog.setWindowTitle("Linear rounded-slot pattern");dialog.setMinimumWidth(390);
+    auto* form=new QFormLayout(&dialog);
+    auto field=[&](double minimum,double maximum,double step,double value){
+        auto* spin=new QDoubleSpinBox(&dialog);spin->setRange(minimum,maximum);spin->setDecimals(4);
+        spin->setSingleStep(step);spin->setValue(value);return spin;
+    };
+    const double width=std::max(2.0,std::min(10.0,(xmax-xmin)*0.2));
+    const double spacing=std::max(width+1.0,std::min(12.0,(xmax-xmin)/3.0));
+    auto* centerX=field(-1e6,1e6,1.0,(xmin+xmax)/2.0-spacing);
+    auto* centerY=field(-1e6,1e6,1.0,(ymin+ymax)/2.0);
+    auto* entryZ=field(-1e6,1e6,1.0,zmax);
+    auto* slotWidth=field(0.0001,1e6,0.5,width);
+    auto* length=field(0.0001,1e6,1.0,std::max(width,std::min(20.0,(ymax-ymin)*0.6)));
+    auto* depth=field(0.0001,1e6,0.5,std::max(3.0,(zmax-zmin)*0.3));
+    auto* angle=field(-360.0,360.0,5.0,0.0);
+    auto* count=new QSpinBox(&dialog);count->setRange(2,100);count->setValue(3);
+    auto* spacingX=field(-1e6,1e6,1.0,spacing);auto* spacingY=field(-1e6,1e6,1.0,0.0);
+    form->addRow("First center X (mm)",centerX);form->addRow("Center Y (mm)",centerY);
+    form->addRow("Entry Z (mm)",entryZ);form->addRow("Slot width (mm)",slotWidth);
+    form->addRow("Overall length (mm)",length);form->addRow("Depth (mm)",depth);
+    form->addRow("Rotation about Z (degrees)",angle);form->addRow("Instance count",count);
+    form->addRow("Spacing X (mm)",spacingX);form->addRow("Spacing Y (mm)",spacingY);
+    auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);form->addRow(buttons);
+    connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);
+    connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+    if(dialog.exec()!=QDialog::Accepted)return;
+    cad::RoundedSlotPatternCommand command;QString error;
+    if(!document_.prepareRoundedSlotPattern(ids.first(),centerX->value(),centerY->value(),entryZ->value(),
+          slotWidth->value(),length->value(),depth->value(),angle->value(),count->value(),
+          spacingX->value(),spacingY->value(),&command,&error)){
+        reportError("Rounded-slot pattern",error);return;
+    }
+    runPreviewAsync<cad::RoundedSlotPatternPreview>(this,statusBar(),"Rounded-slot pattern",
+        "Building rounded-slot pattern preview...",[command]{return cad::SceneDocument::buildRoundedSlotPatternPreview(command);},
+        [this,command](const cad::RoundedSlotPatternPreview& preview){
+            confirmPreview("Preview rounded-slot pattern",
+                "Inspect the translucent gold result. Apply this rounded-slot pattern to the selected body?",preview.shape,
+                [this,command,preview]{
+                    QString commitError;
+                    if(!document_.commitRoundedSlotPattern(command,preview.shape,&commitError))
+                        reportError("Rounded-slot pattern",commitError);
+                    else refresh();
+                });
+        });
+}
+
+void MainWindow::linearKeyholeSlotPatternSelectedBody(){
+    if(!requireBodyMode("Keyhole-slot pattern"))return;
+    const auto ids=selectedIds();if(ids.size()!=1){reportError("Keyhole-slot pattern","Select exactly one body.");return;}
+    const cad::Part* part=document_.find(ids.first());if(!part)return;
+    Bnd_Box bounds;BRepBndLib::AddOptimal(part->shape,bounds,false,false);
+    if(bounds.IsVoid()){reportError("Keyhole-slot pattern","The selected body has no measurable bounds.");return;}
+    double xmin=0,ymin=0,zmin=0,xmax=0,ymax=0,zmax=0;bounds.Get(xmin,ymin,zmin,xmax,ymax,zmax);
+    QDialog dialog(this);dialog.setWindowTitle("Linear keyhole-slot pattern");auto* form=new QFormLayout(&dialog);
+    auto field=[&](double minimum,double maximum,double value){auto* spin=new QDoubleSpinBox(&dialog);spin->setRange(minimum,maximum);spin->setDecimals(4);spin->setValue(value);return spin;};
+    const double head=std::max(2.0,std::min(10.0,(xmax-xmin)*0.2));
+    const double spacing=std::max(head+1.0,std::min(12.0,(xmax-xmin)/3.0));
+    auto* centerX=field(-1e6,1e6,(xmin+xmax)/2-spacing);auto* centerY=field(-1e6,1e6,(ymin+ymax)/2);
+    auto* entryZ=field(-1e6,1e6,zmax);auto* headDiameter=field(0.0001,1e6,head);
+    auto* throatWidth=field(0.0001,1e6,head*0.5);auto* throatLength=field(0.0001,1e6,std::max(5.0,std::min(12.0,(ymax-ymin)*0.4)));
+    auto* depth=field(0.0001,1e6,std::max(3.0,(zmax-zmin)*0.3));auto* angle=field(-360,360,0);
+    auto* count=new QSpinBox(&dialog);count->setRange(2,100);count->setValue(3);
+    auto* spacingX=field(-1e6,1e6,spacing);auto* spacingY=field(-1e6,1e6,0);
+    form->addRow("First center X (mm)",centerX);form->addRow("Center Y (mm)",centerY);form->addRow("Entry Z (mm)",entryZ);
+    form->addRow("Head diameter (mm)",headDiameter);form->addRow("Throat width (mm)",throatWidth);
+    form->addRow("Throat length (mm)",throatLength);form->addRow("Depth (mm)",depth);form->addRow("Rotation about Z (degrees)",angle);
+    form->addRow("Instance count",count);form->addRow("Spacing X (mm)",spacingX);form->addRow("Spacing Y (mm)",spacingY);
+    auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);form->addRow(buttons);
+    connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+    if(dialog.exec()!=QDialog::Accepted)return;
+    QString error;
+    if(!document_.linearKeyholeSlotPattern(ids.first(),centerX->value(),centerY->value(),entryZ->value(),headDiameter->value(),
+        throatWidth->value(),throatLength->value(),depth->value(),angle->value(),count->value(),spacingX->value(),spacingY->value(),&error)){
+        reportError("Keyhole-slot pattern",error);return;
+    }
+    refresh(true);
 }
 
 void MainWindow::splitSelectedBody() {
@@ -1431,6 +1967,14 @@ void MainWindow::openFile() {
     QString error;
     if (!document_.load(path,&error)) reportError("Open",error);
     else refresh(true);
+}
+void MainWindow::importSTEPFile() {
+    const QString path = QFileDialog::getOpenFileName(this,"Import STEP geometry",{},"STEP files (*.step *.stp)");
+    if (path.isEmpty()) return;
+    QString error;
+    if (!document_.importSTEP(path,&error)) { reportError("Import STEP",error); return; }
+    refresh(true);
+    statusBar()->showMessage(QString("Imported STEP: %1").arg(QFileInfo(path).fileName()),8000);
 }
 bool MainWindow::saveFile(bool as) {
     QString path = document_.path();

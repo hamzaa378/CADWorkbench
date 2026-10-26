@@ -1,16 +1,35 @@
 {
   "version": "1.9.0",
-  "date": "2026-10-25",
+  "date": "2026-10-26",
   "platform": "Windows x64 Release",
   "build": "passed; CADWorkbench and cadcore_tests targets",
   "ctest": {
-    "passed": 1,
+    "passed": 18,
     "failed": 0,
-    "name": "cadcore_geometry_and_persistence"
+    "names": [
+      "cadcore_modeling_tools",
+      "cadcore_wing_rib",
+      "cadcore_sweeps",
+      "cadcore_tapered_helix",
+      "cadcore_form_features",
+      "cadcore_vector_pattern",
+      "cadcore_circular_hole_pattern",
+      "cadcore_helical_sweep",
+      "cadcore_variable_pitch_helix",
+      "cadcore_dovetail_groove",
+      "cadcore_t_slot_groove",
+      "cadcore_rounded_slot",
+      "cadcore_keyhole_slot",
+      "cadcore_rounded_slot_pattern",
+      "cadcore_circular_countersink_pattern",
+      "cadcore_circular_counterbore_pattern",
+      "cadcore_linear_keyhole_slot_pattern",
+      "cadcore_geometry_and_persistence"
+    ]
   },
-  "direct_core_assertions": 4113,
+  "direct_core_assertions": null,
   "source_audit_checks": {
-    "passed": 81,
+    "passed": 136,
     "failed": 0
   },
   "component_templates": {
@@ -67,7 +86,21 @@
       "selected_edge_fillet_preview_apply_undo",
       "selected_edge_chamfer_preview_apply",
       "two_body_union_and_undo",
-      "fit_all_view"
+      "fit_all_view",
+      "variable_pitch_spring_dialog_and_creation",
+      "tapered_spring_dialog_and_creation",
+      "elliptical_sweep_dialog_and_creation",
+      "elliptical_prism_dialog_and_creation",
+      "elliptical_tube_dialog_and_creation",
+      "circular_loft_dialog_and_creation",
+      "rectangular_to_circular_transition_dialog_and_creation",
+      "hollow_loft_reducer_dialog_and_creation",
+      "linear_pattern_along_vector_dialog_and_creation",
+      "circular_hole_pattern_dialog_and_four_hole_cut",
+      "linear_rounded_slot_pattern_dialog_creation_and_undo_redo",
+      "circular_countersink_pattern_full_circle_and_blind_partial_arc_undo_redo",
+      "circular_counterbore_pattern_full_circle_and_blind_partial_arc_undo_redo",
+      "linear_keyhole_slot_pattern_creation_and_undo_redo"
     ],
     "individually_opened_every_component_dialog": false,
     "build_folder_executable_launch": "Qt platform plugin unavailable outside packaged runtime layout",
@@ -81,7 +114,17 @@
       "through_all_hole",
       "hole_grid",
       "selected_edge_fillet",
-      "selected_edge_chamfer"
+      "selected_edge_chamfer",
+      "variable_pitch_spring",
+      "tapered_spring",
+      "elliptical_sweep",
+      "elliptical_prism",
+      "elliptical_tube",
+      "circular_loft",
+      "rectangular_to_circular_transition",
+      "hollow_loft_reducer",
+      "linear_pattern_along_vector",
+      "circular_hole_pattern"
     ],
     "individual_dialogs_tested_every_command": false,
     "boolean_union_and_circular_pattern_undo": "passed; six bodies restored after each undo"
@@ -92,9 +135,181 @@
     "partial": 3,
     "not_implemented": 21
   },
-  "verification_status": "Previously recorded Windows Release build, CTest, 4,113 core assertions, 81 source audit checks, 405 component defaults, and extended UI workflows remain as documented. The Wing rib reviewer finding was corrected with a dimensioned airfoil solid and spar/lightening openings; the focused Windows test passed 14 assertions, and the rebuilt UI passed dialog, geometry creation, and undo checks. Full W01-W24 manual QA, clean-VM deployment, and approver sign-off remain outstanding.",
+  "verification_status": "Windows x64 Release build passed; full CTest passed 18/18; source audit passed 136 checks and found regression references for all 94 public SceneDocument operations. Focused regression results and sampled live UI evidence are documented per feature. Every command dialog has not been individually exercised. W01-W24 release checklist, clean-VM deployment, and approver sign-off remain unverified.",
   "public_core_api_coverage": {
-    "public_operation_names": 62,
-    "all_called_by_regression": true
+    "public_operation_names": 94,
+    "all_called_by_regression": true,
+    "missing_operations": [],
+    "coverage_method": "Textual declaration-to-regression reference check; native test execution remains the behavioral check."
+  },
+  "step_import": {
+    "core": "passed",
+    "checks": [
+      "multi_body_export_import",
+      "append_to_existing_scene",
+      "valid_solid_topology",
+      "positive_volume",
+      "volume_preservation",
+      "single_step_undo",
+      "malformed_file_rejected_without_mutation"
+    ],
+    "ui_file_ribbon": "visible",
+    "ui_picker_filter": "STEP files (*.step *.stp)",
+    "ui_picker_cancel": "scene unchanged",
+    "full_ui_import_workflow": "not manually exercised"
+  },
+  "profile_sweeps": {
+    "core": "passed",
+    "focused_assertions": 11,
+    "checks": [
+      "invalid_radius_rejected_without_insertion",
+      "circular_sweep_valid_solid_and_name",
+      "circular_sweep_undo",
+      "rectangular_sweep_valid_solid_and_name",
+      "rectangular_sweep_undo"
+    ],
+    "ui_menu": "visible",
+    "ui_ribbon": "visible",
+    "interactive_dialogs": "not manually exercised"
+  },
+  "helical_sweep": {
+    "core": "passed",
+    "focused_assertions": 9,
+    "checks": [
+      "invalid_pitch_rejected_without_insertion",
+      "coil_radius_overlap_rejected",
+      "turn_limit_rejected",
+      "valid_solid_topology_and_body_name",
+      "undo",
+      "redo"
+    ],
+    "ui_menu": "visible",
+    "ui_ribbon": "visible",
+    "dialog": "opened; four labeled controls with expected defaults",
+    "creation": "visible Helical Sweep body in model browser and viewport",
+    "undo_redo": "live Ctrl+Z removed body; Ctrl+Y restored body"
+  },
+  "variable_pitch_helix": {
+    "core": "passed",
+    "focused_assertions": 10,
+    "checks": [
+      "start_pitch_too_small_rejected",
+      "end_pitch_too_small_rejected",
+      "coil_radius_overlap_rejected",
+      "turn_limit_rejected",
+      "valid_solid_topology_and_body_name",
+      "undo",
+      "redo"
+    ],
+    "ui_menu": "live UI passed; dialog opened and created a visible Variable Pitch Helix body",
+    "ui_ribbon": "live visibility passed; Create ribbon button present"
+  },
+  "elliptical_sweep": {
+    "core": "passed",
+    "focused_assertions": "17 across circular, rectangular, and elliptical sweep cases",
+    "checks": [
+      "invalid_semi_axis_rejected",
+      "valid_topology",
+      "body_insertion_and_name",
+      "undo"
+    ],
+    "ui_menu": "live UI passed; dialog opened and created a visible Elliptical Sweep body",
+    "ui_ribbon": "live visibility passed; Create ribbon button present"
+  },
+  "tapered_helix": {
+    "core": "passed",
+    "focused_assertions": 10,
+    "checks": [
+      "start_coil_radius_validation",
+      "end_coil_radius_validation",
+      "pitch_validation",
+      "turn_limit",
+      "valid_topology",
+      "body_insertion_and_name",
+      "undo",
+      "redo"
+    ],
+    "ui_menu": "live UI passed; dialog opened and created a visible Tapered Helix body",
+    "ui_ribbon": "live visibility passed; Create ribbon button present"
+  },
+  "form_features": {
+    "core": "passed",
+    "focused_assertions": 30,
+    "tools": [
+      "elliptical_prism",
+      "elliptical_tube",
+      "circular_loft",
+      "rectangular_to_circular_loft",
+      "hollow_loft_reducer"
+    ],
+    "checks": [
+      "invalid_dimensions_rejected_without_mutation",
+      "valid_topology",
+      "positive_volume",
+      "body_insertion_and_name",
+      "undo"
+    ],
+    "ui_menu": "live UI passed; all five dialogs created visible bodies",
+    "ui_ribbon": "live visibility passed; all five Create ribbon buttons present"
+  },
+  "vector_linear_pattern": {
+    "core": "passed",
+    "focused_assertions": 17,
+    "checks": [
+      "zero_direction_rejected_without_mutation",
+      "invalid_instance_count_rejected",
+      "zero_spacing_rejected",
+      "missing_source_rejected",
+      "diagonal_positions_verified",
+      "valid_topology",
+      "single_step_undo",
+      "redo"
+    ],
+    "ui_menu": "live UI passed; selected-body vector pattern created two copies",
+    "ui_ribbon": "live visibility passed; Modify ribbon button present"
+  },
+  "circular_hole_pattern": {
+    "core": "passed",
+    "focused_assertions": 15,
+    "checks": [
+      "invalid_input_rejected_without_mutation",
+      "missing_source_rejected",
+      "valid_four_hole_cut",
+      "volume_reduction",
+      "valid_topology",
+      "atomic_rollback",
+      "single_step_undo_redo"
+    ],
+    "ui_menu": "visible",
+    "ui_dialog": "opened; all fields and through-all mode observed",
+    "live_creation": "passed; four through-all holes on selected elliptical prism",
+    "live_volume_before_mm3": 16964.6,
+    "live_volume_after_mm3": 16116.37,
+    "live_faces_edges_before": "3/6",
+    "live_faces_edges_after": "7/30",
+    "ui_ribbon": "live visibility passed; Modify ribbon button present"
+  },
+  "direct_core_assertions_note": "Focused assertion counts are recorded by feature below; no aggregate count is claimed for the separate focused runs.",
+  "rounded_slot_pattern": {
+    "core": "passed",
+    "focused_assertions": 29,
+    "live_ui": "passed; 3 slots on 40 x 30 x 20 mm box; volume 24000 to 21655.221 mm3; undo/redo passed"
+  },
+  "circular_countersink_pattern": {
+    "core": "passed",
+    "focused_assertions": 28,
+    "live_ui": "passed; 4 through countersinks on 40 x 30 x 20 mm box; volume 24000 to 23087.983 mm3; undo/redo passed",
+    "blind_partial_arc_live_ui": "passed; 3 countersinks over 180 degrees at 8 mm depth; volume 24000 to 23682.423 mm3; undo/redo passed"
+  },
+  "circular_counterbore_pattern": {
+    "core": "passed",
+    "focused_assertions": 21,
+    "live_ui": "passed; 4 counterbores on 40 x 30 x 20 mm box; volume 24000 to 22819.264 mm3; undo/redo passed",
+    "blind_partial_arc_live_ui": "passed; 3 counterbores over 180 degrees at 8 mm blind depth and 3 mm seat depth; volume 24000 to 23480.883 mm3; undo/redo passed"
+  },
+  "linear_keyhole_slot_pattern": {
+    "core": "passed",
+    "focused_assertions": 22,
+    "live_ui": "passed; 3 keyhole cuts on 40 x 30 x 20 mm box; volume 24000 to 22506.725 mm3; undo/redo passed"
   }
 }
