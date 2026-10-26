@@ -119,6 +119,379 @@ void testSweeps() {
     validate(doc.parts().first());
     require(doc.undo()&&doc.parts().isEmpty(),"Elliptical sweep undo failed");
 }
+void testEllipticalLoft() {
+    QString error;
+    cad::SceneDocument doc;
+    require(!doc.loftEllipticalSections(0,10,8,5,30,0,0,&error)&&doc.parts().isEmpty(),
+            "Elliptical loft accepted a zero semi-axis");
+    require(!doc.loftEllipticalSections(10,6,5,3,0,0,0,&error)&&doc.parts().isEmpty(),
+            "Elliptical loft accepted zero height");
+    require(!doc.loftEllipticalSections(10,6,5,3,30,std::numeric_limits<double>::infinity(),0,&error)&&doc.parts().isEmpty(),
+            "Elliptical loft accepted an infinite offset");
+    require(doc.loftEllipticalSections(10,6,5,3,30,4,-2,&error),
+            ("Elliptical loft failed: "+error.toStdString()).c_str());
+    require(doc.parts().size()==1&&doc.parts().first().name=="Lofted Ellipse",
+            "Elliptical loft did not create the expected body");
+    const auto part=doc.parts().first();
+    validate(part);
+    Bnd_Box bounds;BRepBndLib::AddOptimal(part.shape,bounds,false,false);
+    double xmin=0,ymin=0,zmin=0,xmax=0,ymax=0,zmax=0;bounds.Get(xmin,ymin,zmin,xmax,ymax,zmax);
+    closeTo(xmin,-10);closeTo(xmax,10);closeTo(ymin,-6);closeTo(ymax,6);closeTo(zmin,0);closeTo(zmax,30);
+    const double expected=std::numbers::pi*30.0*(60.0+0.5*(10.0*(-3.0)+6.0*(-5.0))+(-5.0*-3.0)/3.0);
+    closeTo(volume(part.shape),expected,1e-4);
+    require(doc.undo()&&doc.parts().isEmpty(),"Elliptical loft undo failed");
+    require(doc.redo()&&doc.parts().size()==1&&doc.parts().first().name=="Lofted Ellipse",
+            "Elliptical loft redo failed");
+    validate(doc.parts().first());
+}
+
+void testNonUniformScale() {
+    QString error;
+    cad::SceneDocument doc;
+    require(doc.addPrimitive(cad::Primitive::Box,{10,8,6},&error),"Nonuniform-scale fixture failed");
+    const QString id=doc.parts().first().id;
+    require(!doc.scaleNonUniform(id,0.0,1,1,&error),"Nonuniform scale accepted a zero factor");
+    require(!doc.scaleNonUniform(id,-1,1,1,&error),"Nonuniform scale accepted a negative factor");
+    require(!doc.scaleNonUniform(id,1,std::numeric_limits<double>::infinity(),1,&error),
+            "Nonuniform scale accepted an infinite factor");
+    require(!doc.scaleNonUniform(id,10001,1,1,&error),"Nonuniform scale accepted a factor over the limit");
+    require(!doc.scaleNonUniform("missing",2,1,1,&error),"Nonuniform scale accepted a missing body");
+    require(doc.scaleNonUniform(id,2,0.5,3,&error),
+            ("Nonuniform scale failed: "+error.toStdString()).c_str());
+    validate(doc.parts().first());
+    Bnd_Box bounds;BRepBndLib::AddOptimal(doc.parts().first().shape,bounds,false,false);
+    double xmin=0,ymin=0,zmin=0,xmax=0,ymax=0,zmax=0;bounds.Get(xmin,ymin,zmin,xmax,ymax,zmax);
+    closeTo(xmin,0);closeTo(xmax,20);closeTo(ymin,0);closeTo(ymax,4);closeTo(zmin,0);closeTo(zmax,18);
+    closeTo(volume(doc.parts().first().shape),1440);
+    require(doc.undo(),"Nonuniform scale undo failed");
+    closeTo(volume(doc.parts().first().shape),480);
+    require(doc.redo(),"Nonuniform scale redo failed");
+    closeTo(volume(doc.parts().first().shape),1440);
+    require(doc.scaleNonUniform(id,1,1,1,&error),"Identity nonuniform scale should be a no-op");
+    require(doc.undo(),"Identity scale unexpectedly added a history step");
+    closeTo(volume(doc.parts().first().shape),480);
+}
+
+void testCustomAxisCircularPattern() {
+    QString error;
+    cad::SceneDocument doc;
+    require(doc.addPrimitive(cad::Primitive::Box,{2,4,2},&error),"Custom-axis pattern fixture failed");
+    const QString id=doc.parts().first().id;
+    require(doc.translate(id,10,0,0,&error),"Could not position the custom-axis pattern fixture");
+    const int originalHistoryCount=doc.parts().size();
+    require(!doc.circularPatternAboutAxis(id,0,0,0,0,0,0,4,90,&error),"Custom-axis pattern accepted a zero direction");
+    require(!doc.circularPatternAboutAxis(id,0,0,0,0,0,std::numeric_limits<double>::infinity(),4,90,&error),
+            "Custom-axis pattern accepted a non-finite direction");
+    require(!doc.circularPatternAboutAxis(id,0,0,0,0,0,1,1,90,&error),"Custom-axis pattern accepted one instance");
+    require(!doc.circularPatternAboutAxis(id,0,0,0,0,0,1,4,361,&error),"Custom-axis pattern accepted an angle over 360 degrees");
+    require(!doc.circularPatternAboutAxis("missing",0,0,0,0,0,1,4,90,&error),"Custom-axis pattern accepted a missing body");
+    require(doc.parts().size()==originalHistoryCount,"Rejected custom-axis pattern mutated the scene");
+    require(doc.circularPatternAboutAxis(id,0,0,0,0,0,1,4,360,&error),
+            ("Custom-axis circular pattern failed: "+error.toStdString()).c_str());
+    require(doc.parts().size()==4,"Custom-axis pattern created the wrong number of bodies");
+    const double expectedX[4]={10,-4,-12,0};
+    const double expectedY[4]={0,10,-4,-12};
+    const double expectedWidth[4]={2,4,2,4};
+    const double expectedDepth[4]={4,2,4,2};
+    for(int index=0;index<4;++index){
+        validate(doc.parts()[index]);closeTo(volume(doc.parts()[index].shape),16);
+        Bnd_Box bounds;BRepBndLib::AddOptimal(doc.parts()[index].shape,bounds,false,false);
+        double xmin=0,ymin=0,zmin=0,xmax=0,ymax=0,zmax=0;bounds.Get(xmin,ymin,zmin,xmax,ymax,zmax);
+        closeTo(xmin,expectedX[index]);closeTo(ymin,expectedY[index]);
+        closeTo(xmax,expectedX[index]+expectedWidth[index]);closeTo(ymax,expectedY[index]+expectedDepth[index]);
+        closeTo(zmin,0);closeTo(zmax,2);
+    }
+    require(doc.undo()&&doc.parts().size()==1,"Custom-axis pattern undo failed");
+    require(doc.redo()&&doc.parts().size()==4,"Custom-axis pattern redo failed");
+}
+
+void testAsymmetricChamfer() {
+    QString error;
+    cad::SceneDocument doc;
+    require(doc.addPrimitive(cad::Primitive::Box,{10,10,10},&error),"Asymmetric-chamfer fixture failed");
+    const auto source=doc.parts().first();
+    const cad::EdgeReference edge{source.id,source.geometryToken,1};
+    cad::ChamferCommand invalid;
+    require(!doc.prepareAsymmetricChamfer(edge,0,2,&invalid,&error),"Asymmetric chamfer accepted a zero first distance");
+    require(!doc.prepareAsymmetricChamfer(edge,1,std::numeric_limits<double>::infinity(),&invalid,&error),
+            "Asymmetric chamfer accepted a non-finite distance");
+    require(!doc.prepareAsymmetricChamfer(edge,1,1e6+1,&invalid,&error),"Asymmetric chamfer accepted an over-limit distance");
+    require(!doc.prepareAsymmetricChamfer({source.id,QStringLiteral("stale"),1},1,2,&invalid,&error),
+            "Asymmetric chamfer accepted a stale edge reference");
+    require(!doc.prepareAsymmetricChamfer({source.id,source.geometryToken,999},1,2,&invalid,&error),
+            "Asymmetric chamfer accepted a missing edge");
+    require(!doc.prepareAsymmetricChamfer(edge,1,2,nullptr,&error),"Asymmetric chamfer accepted a null command output");
+    require(doc.parts().size()==1&&std::abs(volume(doc.parts().first().shape)-1000)<1e-5,
+            "Rejected asymmetric chamfer changed the source body");
+    cad::ChamferCommand command;
+    require(doc.prepareAsymmetricChamfer(edge,1,2,&command,&error),
+            ("Asymmetric chamfer preparation failed: "+error.toStdString()).c_str());
+    require(!command.referenceFace.IsNull()&&command.distance==1&&command.secondDistance==2,
+            "Asymmetric chamfer did not retain both distances and its reference face");
+    const auto preview=cad::SceneDocument::buildChamferPreview(command);
+    require(!preview.shape.IsNull()&&BRepCheck_Analyzer(preview.shape).IsValid(),
+            ("Asymmetric chamfer preview failed: "+preview.error.toStdString()).c_str());
+    require(doc.parts().size()==1&&std::abs(volume(doc.parts().first().shape)-1000)<1e-5,
+            "Asymmetric chamfer preview mutated the source body");
+    const double asymmetricVolume=volume(preview.shape);
+    require(asymmetricVolume>0&&asymmetricVolume<1000,"Asymmetric chamfer did not remove corner material");
+    cad::ChamferCommand symmetricCommand;
+    require(doc.prepareChamfer(edge,1,&symmetricCommand,&error),"Symmetric comparison chamfer preparation failed");
+    const auto symmetricPreview=cad::SceneDocument::buildChamferPreview(symmetricCommand);
+    require(!symmetricPreview.shape.IsNull()&&BRepCheck_Analyzer(symmetricPreview.shape).IsValid(),
+            "Symmetric comparison chamfer preview failed");
+    require(std::abs(asymmetricVolume-volume(symmetricPreview.shape))>1e-4,
+            "Unequal chamfer distances produced the symmetric result");
+    require(doc.commitChamfer(command,preview.shape,&error),"Asymmetric chamfer commit failed");
+    validate(doc.parts().first());
+    closeTo(volume(doc.parts().first().shape),asymmetricVolume);
+    require(doc.undo()&&std::abs(volume(doc.parts().first().shape)-1000)<1e-5,"Asymmetric chamfer undo failed");
+    require(doc.redo(),"Asymmetric chamfer redo failed");
+    closeTo(volume(doc.parts().first().shape),asymmetricVolume);
+    require(doc.undo(),"Asymmetric chamfer cleanup undo failed");
+    cad::ChamferCommand staleCommand;
+    require(doc.prepareAsymmetricChamfer(edge,1,2,&staleCommand,&error),"Staleness fixture preparation failed");
+    require(doc.translate(source.id,1,0,0,&error),"Staleness fixture translation failed");
+    require(!doc.commitChamfer(staleCommand,preview.shape,&error),"Asymmetric chamfer accepted a stale preview");
+}
+
+void testMultiEdgeBlends() {
+    QString error;
+    cad::SceneDocument filletDoc;
+    require(filletDoc.addPrimitive(cad::Primitive::Box,{20,20,20},&error),"Multi-edge fillet fixture failed");
+    const auto filletPart=filletDoc.parts().first();
+    const QVector<cad::EdgeReference> filletEdges={
+        {filletPart.id,filletPart.geometryToken,1},{filletPart.id,filletPart.geometryToken,4}};
+    cad::FilletCommand filletCommand;
+    require(!filletDoc.prepareFillet(QVector<cad::EdgeReference>{},1,&filletCommand,&error),"Empty fillet edge set accepted");
+    require(!filletDoc.prepareFillet(QVector<cad::EdgeReference>{filletEdges[0],filletEdges[0]},1,&filletCommand,&error),
+            "Duplicate fillet edge accepted");
+    require(!filletDoc.prepareFillet(QVector<cad::EdgeReference>{filletEdges[0],{QStringLiteral("other"),filletPart.geometryToken,4}},
+                                     1,&filletCommand,&error),"Mixed-body fillet edge set accepted");
+    require(!filletDoc.prepareFillet(QVector<cad::EdgeReference>{filletEdges[0],{filletPart.id,QStringLiteral("stale"),4}},
+                                     1,&filletCommand,&error),"Stale member of a fillet edge set accepted");
+    require(!filletDoc.prepareFillet(QVector<cad::EdgeReference>{filletEdges[0],{filletPart.id,filletPart.geometryToken,999}},
+                                     1,&filletCommand,&error),"Missing member of a fillet edge set accepted");
+    require(filletDoc.prepareFillet(filletEdges,1,&filletCommand,&error),
+            ("Two-edge fillet preparation failed: "+error.toStdString()).c_str());
+    require(filletCommand.sourceEdges.size()==2&&filletCommand.edges.size()==2,"Fillet command did not retain both selected edges");
+    const auto filletPreview=cad::SceneDocument::buildFilletPreview(filletCommand);
+    require(!filletPreview.shape.IsNull()&&BRepCheck_Analyzer(filletPreview.shape).IsValid(),
+            ("Two-edge fillet preview failed: "+filletPreview.error.toStdString()).c_str());
+    require(volume(filletPreview.shape)<volume(filletPart.shape)&&volume(filletPreview.shape)>0,
+            "Two-edge fillet did not remove a valid amount of material");
+    require(filletDoc.commitFillet(filletCommand,filletPreview.shape,&error),"Two-edge fillet commit failed");
+    validate(filletDoc.parts().first());
+    const double filletVolume=volume(filletDoc.parts().first().shape);
+    require(filletDoc.undo()&&std::abs(volume(filletDoc.parts().first().shape)-8000)<1e-5,"Multi-edge fillet undo failed");
+    require(filletDoc.redo(),"Multi-edge fillet redo failed");closeTo(volume(filletDoc.parts().first().shape),filletVolume);
+
+    cad::SceneDocument chamferDoc;
+    require(chamferDoc.addPrimitive(cad::Primitive::Box,{20,20,20},&error),"Multi-edge chamfer fixture failed");
+    const auto chamferPart=chamferDoc.parts().first();
+    const QVector<cad::EdgeReference> chamferEdges={
+        {chamferPart.id,chamferPart.geometryToken,1},{chamferPart.id,chamferPart.geometryToken,4}};
+    cad::ChamferCommand chamferCommand;
+    require(!chamferDoc.prepareChamfer(QVector<cad::EdgeReference>{},1,&chamferCommand,&error),"Empty chamfer edge set accepted");
+    require(!chamferDoc.prepareChamfer(QVector<cad::EdgeReference>{chamferEdges[0],chamferEdges[0]},1,&chamferCommand,&error),
+            "Duplicate chamfer edge accepted");
+    require(!chamferDoc.prepareChamfer(QVector<cad::EdgeReference>{chamferEdges[0],{chamferPart.id,QStringLiteral("stale"),4}},
+                                       1,&chamferCommand,&error),"Stale member of a chamfer edge set accepted");
+    require(!chamferDoc.prepareChamfer(QVector<cad::EdgeReference>{chamferEdges[0],{chamferPart.id,chamferPart.geometryToken,999}},
+                                       1,&chamferCommand,&error),"Missing member of a chamfer edge set accepted");
+    require(chamferDoc.prepareChamfer(chamferEdges,1,&chamferCommand,&error),
+            ("Two-edge chamfer preparation failed: "+error.toStdString()).c_str());
+    require(chamferCommand.sourceEdges.size()==2&&chamferCommand.edges.size()==2,"Chamfer command did not retain both selected edges");
+    const auto chamferPreview=cad::SceneDocument::buildChamferPreview(chamferCommand);
+    require(!chamferPreview.shape.IsNull()&&BRepCheck_Analyzer(chamferPreview.shape).IsValid(),
+            ("Two-edge chamfer preview failed: "+chamferPreview.error.toStdString()).c_str());
+    require(volume(chamferPreview.shape)<volume(chamferPart.shape)&&volume(chamferPreview.shape)>0,
+            "Two-edge chamfer did not remove a valid amount of material");
+    require(chamferDoc.commitChamfer(chamferCommand,chamferPreview.shape,&error),"Two-edge chamfer commit failed");
+    validate(chamferDoc.parts().first());
+    const double chamferVolume=volume(chamferDoc.parts().first().shape);
+    require(chamferDoc.undo()&&std::abs(volume(chamferDoc.parts().first().shape)-8000)<1e-5,"Multi-edge chamfer undo failed");
+    require(chamferDoc.redo(),"Multi-edge chamfer redo failed");closeTo(volume(chamferDoc.parts().first().shape),chamferVolume);
+}
+
+void testOrientedExtrusion() {
+    QString error;
+    struct PlaneCase { cad::SketchPlane plane;double xmin,xmax,ymin,ymax,zmin,zmax; };
+    const PlaneCase cases[]={
+        {cad::SketchPlane::XY,5,45,-4,26,0,20},
+        {cad::SketchPlane::XZ,5,45,-20,0,-4,26},
+        {cad::SketchPlane::YZ,0,20,5,45,-4,26}
+    };
+    for(const auto& test:cases){
+        cad::SceneDocument doc;cad::ExtrusionCommand command;
+        require(doc.prepareExtrusion(cad::SketchProfile::Rectangle,5,-4,40,30,20,&command,&error),
+                "Oriented extrusion preparation failed");
+        command.sketchPlane=test.plane;
+        const auto preview=cad::SceneDocument::buildExtrusionPreview(command);
+        require(!preview.shape.IsNull()&&BRepCheck_Analyzer(preview.shape).IsValid(),
+                ("Oriented extrusion preview failed: "+preview.error.toStdString()).c_str());
+        closeTo(volume(preview.shape),24000,1e-5);
+        Bnd_Box bounds;BRepBndLib::AddOptimal(preview.shape,bounds,false,false);
+        double xmin=0,ymin=0,zmin=0,xmax=0,ymax=0,zmax=0;bounds.Get(xmin,ymin,zmin,xmax,ymax,zmax);
+        closeTo(xmin,test.xmin);closeTo(xmax,test.xmax);closeTo(ymin,test.ymin);
+        closeTo(ymax,test.ymax);closeTo(zmin,test.zmin);closeTo(zmax,test.zmax);
+        require(doc.parts().isEmpty(),"Oriented extrusion preview mutated the document");
+        require(doc.commitExtrusion(command,preview.shape,&error),"Oriented extrusion commit failed");
+        require(doc.undo()&&doc.parts().isEmpty(),"Oriented extrusion undo failed");
+        require(doc.redo()&&doc.parts().size()==1,"Oriented extrusion redo failed");
+    }
+      const PlaneCase offsetCases[]={
+          {cad::SketchPlane::XY,5,45,-4,26,7,27},
+          {cad::SketchPlane::XZ,5,45,-27,-7,-4,26},
+          {cad::SketchPlane::YZ,7,27,5,45,-4,26}
+      };
+      for(const auto& test:offsetCases){
+          cad::SceneDocument offsetDoc;cad::ExtrusionCommand command;
+          require(offsetDoc.prepareExtrusion(cad::SketchProfile::Rectangle,5,-4,40,30,20,&command,&error),
+                  "Offset extrusion preparation failed");
+          command.sketchPlane=test.plane;command.planeOffset=7;
+          const auto preview=cad::SceneDocument::buildExtrusionPreview(command);
+          require(!preview.shape.IsNull()&&BRepCheck_Analyzer(preview.shape).IsValid(),
+                  "Offset extrusion preview failed");
+          closeTo(volume(preview.shape),24000,1e-5);
+          Bnd_Box bounds;BRepBndLib::AddOptimal(preview.shape,bounds,false,false);
+          double xmin=0,ymin=0,zmin=0,xmax=0,ymax=0,zmax=0;bounds.Get(xmin,ymin,zmin,xmax,ymax,zmax);
+          closeTo(xmin,test.xmin);closeTo(xmax,test.xmax);closeTo(ymin,test.ymin);
+          closeTo(ymax,test.ymax);closeTo(zmin,test.zmin);closeTo(zmax,test.zmax);
+      }
+      const PlaneCase reverseCases[]={
+          {cad::SketchPlane::XY,5,45,-4,26,-13,7},
+          {cad::SketchPlane::XZ,5,45,-7,13,-4,26},
+          {cad::SketchPlane::YZ,-13,7,5,45,-4,26}
+      };
+      for(const auto& test:reverseCases){
+          cad::SceneDocument reverseDoc;cad::ExtrusionCommand command;
+          require(reverseDoc.prepareExtrusion(cad::SketchProfile::Rectangle,5,-4,40,30,20,&command,&error),
+                  "Reverse extrusion preparation failed");
+          command.sketchPlane=test.plane;command.planeOffset=7;command.reverseDirection=true;
+          const auto preview=cad::SceneDocument::buildExtrusionPreview(command);
+          require(!preview.shape.IsNull()&&BRepCheck_Analyzer(preview.shape).IsValid(),
+                  "Reverse extrusion preview failed");
+          closeTo(volume(preview.shape),24000,1e-5);
+          Bnd_Box bounds;BRepBndLib::AddOptimal(preview.shape,bounds,false,false);
+          double xmin=0,ymin=0,zmin=0,xmax=0,ymax=0,zmax=0;bounds.Get(xmin,ymin,zmin,xmax,ymax,zmax);
+          closeTo(xmin,test.xmin);closeTo(xmax,test.xmax);closeTo(ymin,test.ymin);
+          closeTo(ymax,test.ymax);closeTo(zmin,test.zmin);closeTo(zmax,test.zmax);
+      }
+      const PlaneCase symmetricCases[]={
+          {cad::SketchPlane::XY,5,45,-4,26,-3,17},
+          {cad::SketchPlane::XZ,5,45,-17,3,-4,26},
+          {cad::SketchPlane::YZ,-3,17,5,45,-4,26}
+      };
+      for(const auto& test:symmetricCases){
+          cad::SceneDocument symmetricDoc;cad::ExtrusionCommand command;
+          require(symmetricDoc.prepareExtrusion(cad::SketchProfile::Rectangle,5,-4,40,30,20,&command,&error),
+                  "Symmetric extrusion preparation failed");
+          command.sketchPlane=test.plane;command.planeOffset=7;command.symmetric=true;
+          const auto forward=cad::SceneDocument::buildExtrusionPreview(command);
+          require(!forward.shape.IsNull()&&BRepCheck_Analyzer(forward.shape).IsValid(),
+                  "Symmetric extrusion preview failed");
+          closeTo(volume(forward.shape),24000,1e-5);
+          Bnd_Box forwardBounds;BRepBndLib::AddOptimal(forward.shape,forwardBounds,false,false);
+          double xmin=0,ymin=0,zmin=0,xmax=0,ymax=0,zmax=0;
+          forwardBounds.Get(xmin,ymin,zmin,xmax,ymax,zmax);
+          closeTo(xmin,test.xmin);closeTo(xmax,test.xmax);closeTo(ymin,test.ymin);
+          closeTo(ymax,test.ymax);closeTo(zmin,test.zmin);closeTo(zmax,test.zmax);
+          command.reverseDirection=true;
+          const auto reverse=cad::SceneDocument::buildExtrusionPreview(command);
+          require(!reverse.shape.IsNull()&&BRepCheck_Analyzer(reverse.shape).IsValid(),
+                  "Symmetric reverse-option preview failed");
+          closeTo(volume(reverse.shape),volume(forward.shape),1e-5);
+          Bnd_Box reverseBounds;BRepBndLib::AddOptimal(reverse.shape,reverseBounds,false,false);
+          double rxmin=0,rymin=0,rzmin=0,rxmax=0,rymax=0,rzmax=0;
+          reverseBounds.Get(rxmin,rymin,rzmin,rxmax,rymax,rzmax);
+          closeTo(rxmin,xmin);closeTo(rxmax,xmax);closeTo(rymin,ymin);
+          closeTo(rymax,ymax);closeTo(rzmin,zmin);closeTo(rzmax,zmax);
+      }
+      const PlaneCase circleCases[]={
+          {cad::SketchPlane::XY,-7,13,-14,6,2,7},
+          {cad::SketchPlane::XZ,-7,13,-7,-2,-14,6},
+          {cad::SketchPlane::YZ,2,7,-7,13,-14,6}
+      };
+      for(const auto& test:circleCases){
+          cad::SceneDocument circleDoc;cad::ExtrusionCommand command;
+          require(circleDoc.prepareExtrusion(cad::SketchProfile::Circle,3,-4,20,20,5,&command,&error),
+                  "Oriented circle extrusion preparation failed");
+          command.sketchPlane=test.plane;command.planeOffset=7;command.reverseDirection=true;
+          const auto preview=cad::SceneDocument::buildExtrusionPreview(command);
+          require(!preview.shape.IsNull()&&BRepCheck_Analyzer(preview.shape).IsValid(),
+                  "Oriented circle extrusion preview failed");
+          closeTo(volume(preview.shape),std::numbers::pi*100*5,1e-5);
+          Bnd_Box bounds;BRepBndLib::AddOptimal(preview.shape,bounds,false,false);
+          double xmin=0,ymin=0,zmin=0,xmax=0,ymax=0,zmax=0;
+          bounds.Get(xmin,ymin,zmin,xmax,ymax,zmax);
+          closeTo(xmin,test.xmin);closeTo(xmax,test.xmax);closeTo(ymin,test.ymin);
+          closeTo(ymax,test.ymax);closeTo(zmin,test.zmin);closeTo(zmax,test.zmax);
+      }
+      struct ThroughAllCase { cad::SketchPlane plane;double u,v,offset,removed;bool reverse; };
+      const ThroughAllCase throughAllCases[]={
+          {cad::SketchPlane::XY,10,10,0,500,false},
+          {cad::SketchPlane::XZ,10,5,-30,750,false},
+          {cad::SketchPlane::YZ,10,5,0,1000,false},
+          {cad::SketchPlane::XY,10,10,20,500,true},
+          {cad::SketchPlane::XZ,10,5,0,750,true},
+          {cad::SketchPlane::YZ,10,5,40,1000,true}
+      };
+      for(const auto& test:throughAllCases){
+          cad::SceneDocument cutDoc;
+          require(cutDoc.addPrimitive(cad::Primitive::Box,{40,30,20},&error),"Through-all target fixture failed");
+          const QString targetId=cutDoc.parts().first().id;
+          cad::ExtrusionCommand command;
+          require(cutDoc.prepareExtrusion(cad::SketchProfile::Rectangle,test.u,test.v,5,5,1,
+                  cad::ExtrusionMode::Cut,targetId,&command,&error),"Through-all Cut preparation failed");
+          command.sketchPlane=test.plane;command.planeOffset=test.offset;
+          command.reverseDirection=test.reverse;command.throughAll=true;
+          const auto preview=cad::SceneDocument::buildExtrusionPreview(command);
+          require(!preview.shape.IsNull()&&BRepCheck_Analyzer(preview.shape).IsValid(),
+                  ("Through-all Cut preview failed: "+preview.error.toStdString()).c_str());
+          closeTo(volume(preview.shape),24000-test.removed,1e-5);
+          require(cutDoc.commitExtrusion(command,preview.shape,&error),"Through-all Cut commit failed");
+          require(cutDoc.undo()&&cutDoc.parts().size()==1,"Through-all Cut undo failed");
+          closeTo(volume(cutDoc.parts().first().shape),24000,1e-5);
+      }
+      const PlaneCase reverseTaperCases[]={
+          {cad::SketchPlane::XY,0,40,0,30,-13,7},
+          {cad::SketchPlane::XZ,0,40,-7,13,0,30},
+          {cad::SketchPlane::YZ,-13,7,0,40,0,30}
+      };
+      for(const auto& test:reverseTaperCases){
+          cad::SceneDocument taperDoc;cad::ExtrusionCommand command;
+          require(taperDoc.prepareExtrusion(cad::SketchProfile::Rectangle,0,0,40,30,20,&command,&error),
+                  "Reverse tapered extrusion preparation failed");
+          command.sketchPlane=test.plane;command.planeOffset=7;command.reverseDirection=true;command.taperDegrees=5;
+          const auto preview=cad::SceneDocument::buildExtrusionPreview(command);
+          require(!preview.shape.IsNull()&&BRepCheck_Analyzer(preview.shape).IsValid(),
+                  "Reverse tapered extrusion preview failed");
+          require(volume(preview.shape)>0,"Reverse tapered extrusion has no volume");
+          Bnd_Box bounds;BRepBndLib::AddOptimal(preview.shape,bounds,false,false);
+          double xmin=0,ymin=0,zmin=0,xmax=0,ymax=0,zmax=0;bounds.Get(xmin,ymin,zmin,xmax,ymax,zmax);
+          closeTo(xmin,test.xmin);closeTo(xmax,test.xmax);closeTo(ymin,test.ymin);
+          closeTo(ymax,test.ymax);closeTo(zmin,test.zmin);closeTo(zmax,test.zmax);
+      }
+    cad::ExtrusionCommand invalid;
+    cad::SceneDocument doc;
+    require(doc.prepareExtrusion(cad::SketchProfile::Rectangle,0,0,10,8,5,&invalid,&error),"Invalid-plane fixture failed");
+    invalid.sketchPlane=static_cast<cad::SketchPlane>(3);
+    require(cad::SceneDocument::buildExtrusionPreview(invalid).shape.IsNull(),"Invalid sketch plane accepted");
+      require(doc.prepareExtrusion(cad::SketchProfile::Rectangle,0,0,10,8,5,&invalid,&error),"Offset invalid-case fixture failed");
+      invalid.planeOffset=std::numeric_limits<double>::quiet_NaN();
+      require(cad::SceneDocument::buildExtrusionPreview(invalid).shape.IsNull(),"Non-finite plane offset accepted");
+      require(doc.prepareExtrusion(cad::SketchProfile::Rectangle,0,0,10,8,5,&invalid,&error),"Through-all invalid-case fixture failed");
+      invalid.throughAll=true;
+      require(cad::SceneDocument::buildExtrusionPreview(invalid).shape.IsNull(),"Through-all New Body was accepted");
+      cad::SceneDocument awayDoc;
+      require(awayDoc.addPrimitive(cad::Primitive::Box,{40,30,20},&error),"Through-all direction fixture failed");
+      require(awayDoc.prepareExtrusion(cad::SketchProfile::Rectangle,10,10,5,5,1,cad::ExtrusionMode::Cut,
+              awayDoc.parts().first().id,&invalid,&error),"Through-all direction preparation failed");
+      invalid.throughAll=true;invalid.reverseDirection=true;
+      require(cad::SceneDocument::buildExtrusionPreview(invalid).shape.IsNull(),"Through-all accepted a direction away from the target");
+}
+
 void testHelicalSweep() {
     QString error;
     cad::SceneDocument doc;
@@ -231,6 +604,294 @@ void testVectorLinearPattern() {
     require(doc.undo()&&doc.parts().size()==1,"Vector pattern did not undo as one operation");
     require(doc.redo()&&doc.parts().size()==3,"Vector pattern redo failed");
 }
+void testVectorRectangularPattern(){
+    cad::SceneDocument doc;QString error;
+    require(doc.addPrimitive(cad::Primitive::Box,{2,3,4},&error),"Could not create vector rectangular-pattern source");
+    const QString id=doc.parts().first().id;
+    const double originalVolume=volume(doc.parts().first().shape);
+    require(!doc.rectangularPatternAlongVectors(id,0,0,0,2,10,0,1,0,2,10,&error)&&doc.parts().size()==1,
+            "Vector rectangular pattern accepted a zero first direction");
+    require(!doc.rectangularPatternAlongVectors(id,1,0,0,2,10,0,0,0,2,10,&error)&&doc.parts().size()==1,
+            "Vector rectangular pattern accepted a zero second direction");
+    require(!doc.rectangularPatternAlongVectors(id,1,0,0,2,10,2,0,0,2,10,&error)&&doc.parts().size()==1,
+            "Vector rectangular pattern accepted parallel directions");
+    require(!doc.rectangularPatternAlongVectors(id,std::numeric_limits<double>::infinity(),0,0,2,10,0,1,0,2,10,&error)&&doc.parts().size()==1,
+            "Vector rectangular pattern accepted non-finite direction data");
+    require(!doc.rectangularPatternAlongVectors(id,1,0,0,2,0,0,1,0,2,10,&error)&&doc.parts().size()==1,
+            "Vector rectangular pattern accepted zero spacing for a repeated direction");
+    require(!doc.rectangularPatternAlongVectors(id,1,0,0,1,0,2,0,0,1,0,&error)&&doc.parts().size()==1,
+            "Vector rectangular pattern accepted a single total instance");
+    require(!doc.rectangularPatternAlongVectors(id,1,0,0,34,10,0,1,0,30,10,&error)&&doc.parts().size()==1,
+            "Vector rectangular pattern accepted more than 1,000 total instances");
+    require(!doc.rectangularPatternAlongVectors("missing",1,0,0,2,10,0,1,0,2,10,&error)&&doc.parts().size()==1,
+            "Vector rectangular pattern accepted a missing source body");
+    closeTo(volume(doc.parts().first().shape),originalVolume);
+    require(doc.rectangularPatternAlongVectors(id,1,1,0,2,10,0,0,1,3,20,&error),
+            ("Diagonal vector rectangular pattern failed: "+error.toStdString()).c_str());
+    require(doc.parts().size()==6,"Vector rectangular pattern instance count mismatch");
+    QSet<QString> names;
+    for(const auto& part:doc.parts()){
+        validate(part);closeTo(volume(part.shape),originalVolume);
+        require(!names.contains(part.name.toCaseFolded()),"Vector rectangular pattern produced duplicate names");
+        names.insert(part.name.toCaseFolded());
+    }
+    Bnd_Box zCopy;BRepBndLib::AddOptimal(doc.parts()[1].shape,zCopy,false,false);
+    double x0,y0,z0,x1,y1,z1;zCopy.Get(x0,y0,z0,x1,y1,z1);closeTo(z0,20);closeTo(z1,24);
+    Bnd_Box diagonalCopy;BRepBndLib::AddOptimal(doc.parts()[3].shape,diagonalCopy,false,false);
+    diagonalCopy.Get(x0,y0,z0,x1,y1,z1);closeTo(x0,10/std::sqrt(2.0));closeTo(y0,10/std::sqrt(2.0));
+    require(doc.undo()&&doc.parts().size()==1,"Vector rectangular pattern did not undo atomically");
+    require(doc.redo()&&doc.parts().size()==6,"Vector rectangular pattern redo failed");
+    cad::SceneDocument oneDirection;
+    require(oneDirection.addPrimitive(cad::Primitive::Box,{1,1,1},&error),"Single-direction pattern fixture failed");
+    const QString oneId=oneDirection.parts().first().id;
+    require(oneDirection.rectangularPatternAlongVectors(oneId,1,0,0,1,0,0,0,1,3,5,&error)&&oneDirection.parts().size()==3,
+            "Vector rectangular pattern rejected a one-instance axis paired with a repeated axis");
+}
+void testMinimumDistanceMeasurement() {
+    cad::SceneDocument doc; QString error;
+    require(doc.addPrimitive(cad::Primitive::Box,{10,12,14},&error),"Could not create first clearance body");
+    require(doc.addPrimitive(cad::Primitive::Box,{10,12,14},&error),"Could not create second clearance body");
+    const QString first=doc.parts()[0].id,second=doc.parts()[1].id;
+    require(doc.translate(second,15,0,0,&error),"Could not position second clearance body");
+    const bool undoBefore=doc.canUndo();
+    cad::MinimumDistanceResult result;
+    require(!doc.measureMinimumDistance(first,first,&result,&error),"Distance measurement accepted the same body twice");
+    require(!doc.measureMinimumDistance(first,"missing",&result,&error),"Distance measurement accepted a missing body");
+    require(!doc.measureMinimumDistance(first,second,nullptr,&error),"Distance measurement accepted a null result");
+    require(doc.measureMinimumDistance(first,second,&result,&error),("Separated-body distance failed: "+error.toStdString()).c_str());
+    closeTo(result.distance,5);closeTo(result.firstX,10);closeTo(result.secondX,15);
+    closeTo(result.firstY,result.secondY);closeTo(result.firstZ,result.secondZ);
+    require(doc.canUndo()==undoBefore&&doc.parts().size()==2,"Read-only distance measurement changed document history or bodies");
+    require(doc.translate(second,-7,0,0,&error),"Could not overlap clearance test bodies");
+    require(doc.measureMinimumDistance(first,second,&result,&error),"Intersecting-body distance measurement failed");
+    closeTo(result.distance,0);
+    require(doc.translate(second,0,30,0,&error),"Could not reposition clearance body vertically");
+    require(doc.measureMinimumDistance(first,second,&result,&error),"Vertical clearance measurement failed");
+    closeTo(result.distance,18);closeTo(result.secondY-result.firstY,18);
+    require(doc.translate(second,0,-18,0,&error),"Could not position touching clearance body");
+    require(doc.measureMinimumDistance(first,second,&result,&error),"Touching-body clearance measurement failed");
+    closeTo(result.distance,0);
+}
+void testInterferenceMeasurement() {
+    cad::SceneDocument doc;QString error;
+    require(doc.addPrimitive(cad::Primitive::Box,{10,12,14},&error),"Could not create first interference body");
+    require(doc.addPrimitive(cad::Primitive::Box,{10,12,14},&error),"Could not create second interference body");
+    const QString a=doc.parts()[0].id,b=doc.parts()[1].id;
+    require(doc.translate(b,5,0,0,&error),"Could not overlap interference bodies");
+    const bool undoBefore=doc.canUndo();cad::InterferenceResult result;
+    const double firstVolumeBefore=volume(doc.find(a)->shape),secondVolumeBefore=volume(doc.find(b)->shape);
+    require(!doc.measureInterference(a,a,&result,&error),"Interference measurement accepted duplicate body");
+    require(!doc.measureInterference(a,"missing",&result,&error),"Interference measurement accepted missing body");
+    require(!doc.measureInterference(a,b,nullptr,&error),"Interference measurement accepted null result");
+    require(doc.measureInterference(a,b,&result,&error),("Overlap measurement failed: "+error.toStdString()).c_str());
+    closeTo(result.volume,840);
+    closeTo(result.centroidX,7.5);closeTo(result.centroidY,6);closeTo(result.centroidZ,7);
+    closeTo(volume(doc.find(a)->shape),firstVolumeBefore);closeTo(volume(doc.find(b)->shape),secondVolumeBefore);
+    require(doc.canUndo()==undoBefore&&doc.parts().size()==2,"Interference measurement changed document history");
+    require(doc.translate(b,10,0,0,&error),"Could not separate interference bodies");
+    require(doc.measureInterference(a,b,&result,&error),"Disjoint-body interference query failed");closeTo(result.volume,0);
+    require(doc.translate(b,-5,0,0,&error),"Could not position touching interference bodies");
+    require(doc.measureInterference(a,b,&result,&error),"Touching-body interference query failed");closeTo(result.volume,0);
+    require(doc.addPrimitive(cad::Primitive::Box,{8,9,10},&error),"Could not create contained interference body");
+    const QString inner=doc.parts().last().id;
+    require(doc.translate(inner,1,1,1,&error),"Could not position contained interference body");
+    require(doc.measureInterference(a,inner,&result,&error),"Contained-body interference query failed");closeTo(result.volume,720);
+    closeTo(result.centroidX,5);closeTo(result.centroidY,5.5);closeTo(result.centroidZ,6);
+}
+
+void testBodyDiagnostics() {
+    cad::SceneDocument doc;QString error;
+    require(doc.addPrimitive(cad::Primitive::Box,{10,12,14},&error),"Could not create diagnostics test box");
+    const QString id=doc.parts().first().id;
+    const bool undoBefore=doc.canUndo();
+    cad::BodyDiagnostics result;
+    require(doc.diagnoseBody(id,&result,&error),("Diagnostics query failed: "+error.toStdString()).c_str());
+    require(result.valid,"Box diagnostics marked a valid box invalid");
+    require(result.solids==1&&result.shells==1,"Box solid/shell counts were incorrect");
+    require(result.faces==6&&result.wires==6&&result.edges==12,
+            "Box topology counts were incorrect");
+    require(result.vertices==8,"Box diagnostics did not count unique vertices");
+    closeTo(result.volume,1680);closeTo(result.surfaceArea,856);
+    closeTo(result.minX,0);closeTo(result.maxX,10);closeTo(result.minY,0);closeTo(result.maxY,12);
+    closeTo(result.minZ,0);closeTo(result.maxZ,14);
+    closeTo(result.centerX,5);closeTo(result.centerY,6);closeTo(result.centerZ,7);
+    require(!doc.diagnoseBody("missing",&result,&error),"Diagnostics accepted a missing body ID");
+    require(!doc.diagnoseBody(id,nullptr,&error),"Diagnostics accepted a null output");
+    require(doc.parts().size()==1&&doc.canUndo()==undoBefore,"Read-only diagnostics changed scene history");
+}
+void testDensityMassProperties() {
+    cad::SceneDocument doc;QString error;
+    require(doc.addPrimitive(cad::Primitive::Box,{10,12,14},&error),"Could not create density-mass test box");
+    const QString id=doc.parts().first().id;
+    const bool undoBefore=doc.canUndo();
+    cad::DensityMassProperties result;
+    require(doc.measureMassFromDensity(id,7850,&result,&error),"Mass calculation failed");
+    closeTo(result.volume,1680);closeTo(result.densityKgPerM3,7850);closeTo(result.massKg,0.013188,1e-10);
+    closeTo(result.centerX,5);closeTo(result.centerY,6);closeTo(result.centerZ,7);
+    require(!doc.measureMassFromDensity(id,0,&result,&error),"Zero density was accepted");
+    require(!doc.measureMassFromDensity(id,std::numeric_limits<double>::infinity(),&result,&error),"Infinite density was accepted");
+    require(!doc.measureMassFromDensity(id,1000001,&result,&error),"Out-of-range density was accepted");
+    require(!doc.measureMassFromDensity("missing",7850,&result,&error),"Missing body was accepted");
+    require(!doc.measureMassFromDensity(id,7850,nullptr,&error),"Null mass-properties output was accepted");
+    require(doc.parts().size()==1&&doc.canUndo()==undoBefore,"Mass query mutated scene history");
+}
+void testPlanarSectionMeasurement() {
+    cad::SceneDocument doc;QString error;
+    require(doc.addPrimitive(cad::Primitive::Box,{40,30,20},&error),"Could not create planar-section test box");
+    const QString id=doc.parts().first().id;
+    const bool undoBefore=doc.canUndo();
+    cad::SectionMeasurement result;
+    require(doc.measurePlanarSection(id,0,20,&result,&error),"X-normal section failed");
+    require(result.edgeCount==4,"X-normal box section did not produce four unique cut edges");
+    closeTo(result.totalLength,100);
+    require(doc.measurePlanarSection(id,2,10,&result,&error),"Z-normal section failed");
+    require(result.edgeCount==4,"Z-normal box section did not produce four unique cut edges");
+    closeTo(result.totalLength,140);
+    require(doc.measurePlanarSection(id,1,50,&result,&error),"Nonintersecting plane query failed");
+    require(result.edgeCount==0,"Plane outside the body reported section edges");closeTo(result.totalLength,0);
+    require(!doc.measurePlanarSection(id,3,0,&result,&error),"Invalid section axis was accepted");
+    require(!doc.measurePlanarSection(id,0,std::numeric_limits<double>::infinity(),&result,&error),"Infinite section offset was accepted");
+    require(!doc.measurePlanarSection("missing",0,0,&result,&error),"Missing section body was accepted");
+    require(!doc.measurePlanarSection(id,0,0,nullptr,&error),"Null section output was accepted");
+    require(doc.parts().size()==1&&doc.canUndo()==undoBefore,"Section inspection mutated document history");
+}
+
+void testSurfaceTypeSummary() {
+    cad::SceneDocument doc;QString error;
+    require(doc.addPrimitive(cad::Primitive::Box,{40,30,20},&error),"Surface box setup failed");
+    const QString boxId=doc.parts().first().id;
+    const bool undoBefore=doc.canUndo();
+    cad::SurfaceTypeSummary box;
+    require(doc.summarizeSurfaceTypes(boxId,&box,&error),"Box surface summary failed");
+    require(box.planarFaces==6&&box.cylindricalFaces==0&&box.conicalFaces==0&&
+            box.sphericalFaces==0&&box.toroidalFaces==0&&box.otherFaces==0,
+            "Box should consist of six planar faces");
+    closeTo(box.planarArea,5200.0,1e-6);
+    require(doc.addPrimitive(cad::Primitive::Cylinder,{5,12},&error),"Surface cylinder setup failed");
+    const QString cylinderId=doc.parts().last().id;
+    cad::SurfaceTypeSummary cylinder;
+    require(doc.summarizeSurfaceTypes(cylinderId,&cylinder,&error),"Cylinder surface summary failed");
+    require(cylinder.planarFaces==2&&cylinder.cylindricalFaces==1&&cylinder.otherFaces==0,
+            "Cylinder should have two planar caps and one cylindrical face");
+    closeTo(cylinder.planarArea,50.0*std::numbers::pi,1e-6);
+    closeTo(cylinder.cylindricalArea,120.0*std::numbers::pi,1e-6);
+    require(doc.addPrimitive(cad::Primitive::Sphere,{4},&error),"Surface sphere setup failed");
+    cad::SurfaceTypeSummary sphere;
+    require(doc.summarizeSurfaceTypes(doc.parts().last().id,&sphere,&error),"Sphere surface summary failed");
+    require(sphere.sphericalFaces==1&&sphere.planarFaces==0,"Sphere surface was misclassified");
+    closeTo(sphere.sphericalArea,64.0*std::numbers::pi,1e-6);
+    require(doc.addPrimitive(cad::Primitive::Cone,{6,2,10},&error),"Surface cone setup failed");
+    cad::SurfaceTypeSummary cone;
+    require(doc.summarizeSurfaceTypes(doc.parts().last().id,&cone,&error),"Cone surface summary failed");
+    require(cone.conicalFaces==1&&cone.planarFaces==2,"Cone surfaces were misclassified");
+    require(doc.addPrimitive(cad::Primitive::Torus,{12,2},&error),"Surface torus setup failed");
+    cad::SurfaceTypeSummary torus;
+    require(doc.summarizeSurfaceTypes(doc.parts().last().id,&torus,&error),"Torus surface summary failed");
+    require(torus.toroidalFaces==1&&torus.planarFaces==0,"Torus surface was misclassified");
+    require(!doc.summarizeSurfaceTypes("missing",&box,&error),"Missing body was accepted");
+    require(!doc.summarizeSurfaceTypes(boxId,nullptr,&error),"Null summary output was accepted");
+    require(doc.parts().size()==5&&doc.canUndo()==undoBefore,"Surface summary query mutated document state");
+}
+void testSelectedFaceArea() {
+    cad::SceneDocument doc;QString error;
+    require(doc.addPrimitive(cad::Primitive::Box,{10,10,10},&error),"Face-area test box setup failed");
+    const cad::Part part=doc.parts().first();
+    const cad::FaceReference face{part.id,part.geometryToken,1};
+    const bool undoBefore=doc.canUndo();
+    double area=0.0;
+    require(doc.measureFaceArea(face,&area,&error),"Valid face-area measurement failed");
+    closeTo(area,100.0,1e-7);
+    require(doc.parts().size()==1&&doc.canUndo()==undoBefore,"Face-area query mutated document state");
+    require(!doc.measureFaceArea({part.id,part.geometryToken,0},&area,&error),"Zero face index was accepted");
+    require(!doc.measureFaceArea({part.id,part.geometryToken,7},&area,&error),"Out-of-range face index was accepted");
+    require(!doc.measureFaceArea({"missing",part.geometryToken,1},&area,&error),"Missing face body was accepted");
+    require(!doc.measureFaceArea(face,nullptr,&error),"Null face-area output was accepted");
+    require(doc.translate(part.id,5,0,0,&error),"Face-area stale-reference fixture could not move");
+    require(!doc.measureFaceArea(face,&area,&error),"Stale geometry face reference was accepted");
+    const cad::Part* moved=doc.find(part.id);
+    require(moved&&doc.measureFaceArea({part.id,moved->geometryToken,1},&area,&error),
+            "Fresh face reference failed after body transform");
+    closeTo(area,100.0,1e-7);
+}
+void testSelectedEdgeLength() {
+    cad::SceneDocument doc;QString error;
+    require(doc.addPrimitive(cad::Primitive::Box,{10,20,30},&error),"Edge-length test box setup failed");
+    const cad::Part part=doc.parts().first();
+    const cad::EdgeReference edge{part.id,part.geometryToken,1};
+    const bool undoBefore=doc.canUndo();
+    double length=0.0;
+    double first=0.0,second=0.0,ninth=0.0;int measured=0;
+    for(int index=1;index<=24;++index){
+        require(doc.measureEdgeLength({part.id,part.geometryToken,index},&length,&error),"Valid edge-length measurement failed");
+        ++measured;
+        if(index==1)first=length;
+        if(index==2)second=length;
+        if(index==9)ninth=length;
+    }
+    require(measured==24,"The box edge traversal was incomplete");
+    closeTo(first,30.0,1e-7);closeTo(second,20.0,1e-7);closeTo(ninth,10.0,1e-7);
+    require(doc.parts().size()==1&&doc.canUndo()==undoBefore,"Edge-length query mutated document state");
+    require(!doc.measureEdgeLength({part.id,part.geometryToken,0},&length,&error),"Zero edge index was accepted");
+    require(!doc.measureEdgeLength({part.id,part.geometryToken,99999},&length,&error),"Out-of-range edge index was accepted");
+    require(!doc.measureEdgeLength({"missing",part.geometryToken,1},&length,&error),"Missing body was accepted");
+    require(!doc.measureEdgeLength(edge,nullptr,&error),"Null edge-length output was accepted");
+    require(doc.translate(part.id,5,0,0,&error),"Edge-length stale-reference fixture could not move");
+    require(!doc.measureEdgeLength(edge,&length,&error),"Stale geometry edge reference was accepted");
+    const cad::Part* moved=doc.find(part.id);
+    require(moved&&doc.measureEdgeLength({part.id,moved->geometryToken,1},&length,&error),
+            "Fresh edge reference failed after body transform");
+    closeTo(length,30.0,1e-7);
+}
+void testSelectedVertexCoordinates() {
+    cad::SceneDocument doc;QString error;
+    require(doc.addPrimitive(cad::Primitive::Box,{10,20,30},&error),"Vertex-coordinate test box setup failed");
+    const cad::Part part=doc.parts().first();
+    bool sawOrigin=false,sawOpposite=false;
+    double x=0,y=0,z=0;
+    int measured=0;
+    for(int index=1;index<=100;++index){
+        if(!doc.measureVertexCoordinates({part.id,part.geometryToken,index},&x,&y,&z,&error))break;
+        ++measured;
+        require(x>=-1e-8&&x<=10+1e-8&&y>=-1e-8&&y<=20+1e-8&&z>=-1e-8&&z<=30+1e-8,
+                "Vertex coordinate lies outside the box bounds");
+        sawOrigin|=std::abs(x)<1e-8&&std::abs(y)<1e-8&&std::abs(z)<1e-8;
+        sawOpposite|=std::abs(x-10)<1e-8&&std::abs(y-20)<1e-8&&std::abs(z-30)<1e-8;
+    }
+    require(measured>=8&&sawOrigin&&sawOpposite,"Box corner coordinates did not match its bounds");
+    require(!doc.measureVertexCoordinates({part.id,part.geometryToken,0},&x,&y,&z,&error),"Zero vertex index was accepted");
+    require(!doc.measureVertexCoordinates({part.id,part.geometryToken,99999},&x,&y,&z,&error),"Out-of-range vertex index was accepted");
+    require(!doc.measureVertexCoordinates({"missing",part.geometryToken,1},&x,&y,&z,&error),"Missing vertex body was accepted");
+    require(!doc.measureVertexCoordinates({part.id,part.geometryToken,1},nullptr,&y,&z,&error),"Null vertex coordinate output was accepted");
+    require(doc.translate(part.id,5,0,0,&error),"Vertex stale-reference fixture could not move");
+    require(!doc.measureVertexCoordinates({part.id,part.geometryToken,1},&x,&y,&z,&error),"Stale vertex reference was accepted");
+    const cad::Part* moved=doc.find(part.id);
+    require(moved&&doc.measureVertexCoordinates({part.id,moved->geometryToken,1},&x,&y,&z,&error),"Fresh vertex reference failed after transform");
+}
+void testVertexDistance() {
+    cad::SceneDocument doc;QString error;
+    require(doc.addPrimitive(cad::Primitive::Box,{10,20,30},&error),"Vertex-distance test box setup failed");
+    const cad::Part part=doc.parts().first();
+    cad::VertexReference origin,opposite;double x=0,y=0,z=0;
+    for(int index=1;index<=100;++index){
+        if(!doc.measureVertexCoordinates({part.id,part.geometryToken,index},&x,&y,&z,&error))break;
+        if(std::abs(x)<1e-8&&std::abs(y)<1e-8&&std::abs(z)<1e-8)origin={part.id,part.geometryToken,index};
+        if(std::abs(x-10)<1e-8&&std::abs(y-20)<1e-8&&std::abs(z-30)<1e-8)opposite={part.id,part.geometryToken,index};
+    }
+    require(origin.vertexIndex>0&&opposite.vertexIndex>0,"Could not find opposite box vertices");
+    double distance=0;
+    require(doc.measureVertexDistance(origin,opposite,&distance,&error),"Valid vertex distance failed");
+    closeTo(distance,std::sqrt(1400.0),1e-8);
+    double zeroDistance=1.0;
+    require(doc.measureVertexDistance(origin,origin,&zeroDistance,&error),"Coincident vertex distance failed");
+    closeTo(zeroDistance,0.0,1e-12);
+    double reverseDistance=0.0;
+    require(doc.measureVertexDistance(opposite,origin,&reverseDistance,&error),"Reversed vertex distance failed");
+    closeTo(reverseDistance,distance,1e-12);
+    require(!doc.measureVertexDistance(origin,opposite,nullptr,&error),"Null vertex-distance output was accepted");
+    require(!doc.measureVertexDistance({"missing",part.geometryToken,origin.vertexIndex},opposite,&distance,&error),"Missing vertex body was accepted");
+    require(doc.translate(part.id,5,0,0,&error),"Vertex-distance stale-reference fixture could not move");
+    require(!doc.measureVertexDistance(origin,opposite,&distance,&error),"Stale vertex reference was accepted for distance");
+}
 void testCircularHolePattern() {
     QString error;cad::SceneDocument doc;
     require(doc.addPrimitive(cad::Primitive::Box,{80,80,20},&error),"Could not create circular-hole-pattern test body");
@@ -335,6 +996,58 @@ void testLinearKeyholeSlotPattern(){
     require(rotated.linearKeyholeSlotPattern(rotated.parts().first().id,20,9,20,6,3,8,5,90,2,0,12,&error),
             ("Rotated keyhole-slot pattern failed: "+error.toStdString()).c_str());
     validate(rotated.parts().first());
+}
+void testLinearCounterborePattern(){
+    QString error;cad::SceneDocument doc;
+    require(doc.addPrimitive(cad::Primitive::Box,{40,30,20},&error),"Linear counterbore fixture failed");
+    const QString id=doc.parts().first().id;const double original=volume(doc.parts().first().shape);
+    require(!doc.linearCounterborePattern(id,8,15,20,4,20,true,4,2,3,12,0,&error),"Linear counterbore accepted a head no wider than its drill");
+    require(!doc.linearCounterborePattern(id,8,15,20,4,6,false,8,7,3,12,0,&error),"Linear counterbore accepted a seat deeper than the blind hole");
+    require(!doc.linearCounterborePattern(id,8,15,20,4,20,true,8,2,1,12,0,&error),"Linear counterbore accepted one instance");
+    require(!doc.linearCounterborePattern(id,8,15,20,4,20,true,8,2,3,0,0,&error),"Linear counterbore accepted zero spacing");
+    require(!doc.linearCounterborePattern("missing",8,15,20,4,20,true,8,2,3,12,0,&error),"Linear counterbore accepted a missing body");
+    closeTo(volume(doc.parts().first().shape),original);
+    require(doc.linearCounterborePattern(id,8,15,20,4,20,true,8,2,3,12,0,&error),
+            ("Linear counterbore pattern failed: "+error.toStdString()).c_str());
+    validate(doc.parts().first());const double cut=original-volume(doc.parts().first().shape);
+    require(cut>900&&cut<1050,"Linear counterbore pattern removed unexpected volume");
+    require(doc.undo(),"Linear counterbore undo failed");closeTo(volume(doc.parts().first().shape),original);
+    require(doc.redo(),"Linear counterbore redo failed");closeTo(volume(doc.parts().first().shape),original-cut);
+    cad::SceneDocument blind;require(blind.addPrimitive(cad::Primitive::Box,{40,30,20},&error),"Blind counterbore fixture failed");
+    require(blind.linearCounterborePattern(blind.parts().first().id,10,15,20,4,8,false,8,2,2,20,0,&error),
+            ("Blind linear counterbore pattern failed: "+error.toStdString()).c_str());
+    validate(blind.parts().first());require(volume(blind.parts().first().shape)<24000,"Blind counterbores removed no material");
+    cad::SceneDocument rollback;require(rollback.addPrimitive(cad::Primitive::Box,{40,30,20},&error),"Rollback counterbore fixture failed");
+    const double rollbackVolume=volume(rollback.parts().first().shape);
+    require(!rollback.linearCounterborePattern(rollback.parts().first().id,8,15,20,4,20,true,8,2,2,-20,0,&error),
+            "Linear counterbore accepted a later cutter missing the body");
+    closeTo(volume(rollback.parts().first().shape),rollbackVolume);
+}
+void testLinearCountersinkPattern(){
+    QString error;cad::SceneDocument doc;
+    require(doc.addPrimitive(cad::Primitive::Box,{40,30,20},&error),"Linear countersink fixture failed");
+    const QString id=doc.parts().first().id;const double original=volume(doc.parts().first().shape);
+    require(!doc.linearCountersinkPattern(id,8,15,20,4,20,true,4,90,3,12,0,&error),"Linear countersink accepted a head no wider than its drill");
+    require(!doc.linearCountersinkPattern(id,8,15,20,4,20,true,8,1,3,12,0,&error),"Linear countersink accepted an invalid included angle");
+    require(!doc.linearCountersinkPattern(id,8,15,20,4,20,true,8,90,1,12,0,&error),"Linear countersink accepted one instance");
+    require(!doc.linearCountersinkPattern(id,8,15,20,4,20,true,8,90,3,0,0,&error),"Linear countersink accepted zero spacing");
+    require(!doc.linearCountersinkPattern("missing",8,15,20,4,20,true,8,90,3,12,0,&error),"Linear countersink accepted a missing body");
+    closeTo(volume(doc.parts().first().shape),original);
+    require(doc.linearCountersinkPattern(id,8,15,20,4,20,true,8,90,3,12,0,&error),
+            ("Linear countersink pattern failed: "+error.toStdString()).c_str());
+    validate(doc.parts().first());const double cut=original-volume(doc.parts().first().shape);
+    require(cut>850&&cut<1000,"Linear countersink pattern removed unexpected volume");
+    require(doc.undo(),"Linear countersink undo failed");closeTo(volume(doc.parts().first().shape),original);
+    require(doc.redo(),"Linear countersink redo failed");closeTo(volume(doc.parts().first().shape),original-cut);
+    cad::SceneDocument blind;require(blind.addPrimitive(cad::Primitive::Box,{40,30,20},&error),"Blind countersink fixture failed");
+    require(blind.linearCountersinkPattern(blind.parts().first().id,10,15,20,4,8,false,8,82,2,20,0,&error),
+            ("Blind linear countersink pattern failed: "+error.toStdString()).c_str());
+    validate(blind.parts().first());require(volume(blind.parts().first().shape)<24000,"Blind linear countersinks removed no material");
+    cad::SceneDocument rollback;require(rollback.addPrimitive(cad::Primitive::Box,{40,30,20},&error),"Rollback countersink fixture failed");
+    const double rollbackVolume=volume(rollback.parts().first().shape);
+    require(!rollback.linearCountersinkPattern(rollback.parts().first().id,8,15,20,4,20,true,8,90,2,-20,0,&error),
+            "Linear countersink accepted a later cutter missing the body");
+    closeTo(volume(rollback.parts().first().shape),rollbackVolume);
 }
 void testDovetailGroove() {
     QString error;
@@ -1161,7 +1874,29 @@ void execute() {
     cad::SceneDocument nonPlanarShellDoc;
     require(nonPlanarShellDoc.addPrimitive(cad::Primitive::Sphere,{10},&error),"Nonplanar shell fixture failed");
     require(!nonPlanarShellDoc.shellBody(nonPlanarShellDoc.parts().first().id,cad::Axis::Z,true,1,&error),"Shell found a nonexistent planar opening face");
-
+    cad::SceneDocument multiOpeningShellDoc;
+    require(multiOpeningShellDoc.addPrimitive(cad::Primitive::Box,{20,20,20},&error),"Multi-opening shell source creation failed");
+    const QString multiOpeningShellId=multiOpeningShellDoc.parts().first().id;
+    const double multiOpeningOriginalVolume=volume(multiOpeningShellDoc.parts().first().shape);
+    require(!multiOpeningShellDoc.shellBodyWithOpenings(multiOpeningShellId,{},2,&error),"Multi-opening shell accepted an empty opening list");
+    require(!multiOpeningShellDoc.shellBodyWithOpenings(multiOpeningShellId,{{cad::Axis::Z,true},{cad::Axis::Z,true}},2,&error),
+            "Multi-opening shell accepted a duplicate face");
+    require(std::abs(volume(multiOpeningShellDoc.parts().first().shape)-multiOpeningOriginalVolume)<1e-5,
+            "Rejected multi-opening shells changed the source body");
+    require(multiOpeningShellDoc.shellBodyWithOpenings(multiOpeningShellId,
+                {{cad::Axis::Z,false},{cad::Axis::Z,true}},2,&error),("Opposite-face shell failed: "+error.toStdString()).c_str());
+    validate(multiOpeningShellDoc.parts().first());
+    require(volume(multiOpeningShellDoc.parts().first().shape)<multiOpeningOriginalVolume,
+            "Multi-opening shell did not remove material");
+    require(multiOpeningShellDoc.undo()&&std::abs(volume(multiOpeningShellDoc.parts().first().shape)-multiOpeningOriginalVolume)<1e-5,
+            "Multi-opening shell undo failed");
+    cad::SceneDocument adjacentOpeningShellDoc;
+    require(adjacentOpeningShellDoc.addPrimitive(cad::Primitive::Box,{20,20,20},&error),"Adjacent-opening shell source creation failed");
+    const QString adjacentOpeningShellId=adjacentOpeningShellDoc.parts().first().id;
+    require(adjacentOpeningShellDoc.shellBodyWithOpenings(adjacentOpeningShellId,
+                {{cad::Axis::X,true},{cad::Axis::Z,true}},2,&error),("Adjacent-face shell failed: "+error.toStdString()).c_str());
+    validate(adjacentOpeningShellDoc.parts().first());
+    require(volume(adjacentOpeningShellDoc.parts().first().shape)<8000,"Adjacent-face shell did not remove material");
     // New profile-driven solids: regular prism, capsule, ellipsoid, tube and wedge.
     cad::SceneDocument advancedPrimitives;
     require(!advancedPrimitives.addPrimitive(cad::Primitive::RegularPrism,{5,10,2},&error),
@@ -1486,9 +2221,26 @@ int main(int argc,char** argv) {
         if(argc==2&&std::string(argv[1])=="--wing-rib") { testWingRib(); std::cout<<"PASS: "<<checks<<" Wing rib assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--modeling-tools") { testModelingTools(); std::cout<<"PASS: "<<checks<<" assertions across "<<static_cast<int>(cad::ModelingTool::Count)<<" modeling tools\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--sweeps") { testSweeps(); std::cout<<"PASS: "<<checks<<" sweep assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--elliptical-loft") { testEllipticalLoft(); std::cout<<"PASS: "<<checks<<" elliptical-loft assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--nonuniform-scale") { testNonUniformScale(); std::cout<<"PASS: "<<checks<<" nonuniform-scale assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--custom-axis-circular-pattern") { testCustomAxisCircularPattern(); std::cout<<"PASS: "<<checks<<" custom-axis-circular-pattern assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--asymmetric-chamfer") { testAsymmetricChamfer(); std::cout<<"PASS: "<<checks<<" asymmetric-chamfer assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--multi-edge-blends") { testMultiEdgeBlends(); std::cout<<"PASS: "<<checks<<" multi-edge-blend assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--oriented-extrusion") { testOrientedExtrusion(); std::cout<<"PASS: "<<checks<<" oriented-extrusion assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--tapered-helix") { testTaperedHelicalSweep(); std::cout<<"PASS: "<<checks<<" tapered-helix assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--form-features") { testFormFeatures(); std::cout<<"PASS: "<<checks<<" form-feature assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--vector-pattern") { testVectorLinearPattern(); std::cout<<"PASS: "<<checks<<" vector-pattern assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--vector-rectangular-pattern") { testVectorRectangularPattern(); std::cout<<"PASS: "<<checks<<" vector-rectangular-pattern assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--minimum-distance") { testMinimumDistanceMeasurement(); std::cout<<"PASS: "<<checks<<" minimum-distance assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--interference") { testInterferenceMeasurement(); std::cout<<"PASS: "<<checks<<" interference assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--body-diagnostics") { testBodyDiagnostics(); std::cout<<"PASS: "<<checks<<" body-diagnostics assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--density-mass-properties") { testDensityMassProperties(); std::cout<<"PASS: "<<checks<<" density-mass-properties assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--planar-section") { testPlanarSectionMeasurement(); std::cout<<"PASS: "<<checks<<" planar-section assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--surface-summary") { testSurfaceTypeSummary(); std::cout<<"PASS: "<<checks<<" surface-summary assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--face-area") { testSelectedFaceArea(); std::cout<<"PASS: "<<checks<<" face-area assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--edge-length") { testSelectedEdgeLength(); std::cout<<"PASS: "<<checks<<" edge-length assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--vertex-coordinates") { testSelectedVertexCoordinates(); std::cout<<"PASS: "<<checks<<" vertex-coordinate assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--vertex-distance") { testVertexDistance(); std::cout<<"PASS: "<<checks<<" vertex-distance assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--circular-hole-pattern") { testCircularHolePattern(); std::cout<<"PASS: "<<checks<<" circular-hole-pattern assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--helical-sweep") { testHelicalSweep(); std::cout<<"PASS: "<<checks<<" helical-sweep assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--variable-pitch-helix") { testVariablePitchHelicalSweep(); std::cout<<"PASS: "<<checks<<" variable-pitch-helix assertions\n"; return 0; }
@@ -1500,6 +2252,8 @@ int main(int argc,char** argv) {
         if(argc==2&&std::string(argv[1])=="--circular-countersink-pattern") { testCircularCountersinkPattern(); std::cout<<"PASS: "<<checks<<" circular-countersink-pattern assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--circular-counterbore-pattern") { testCircularCounterborePattern(); std::cout<<"PASS: "<<checks<<" circular-counterbore-pattern assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--linear-keyhole-slot-pattern") { testLinearKeyholeSlotPattern(); std::cout<<"PASS: "<<checks<<" linear-keyhole-slot-pattern assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--linear-counterbore-pattern") { testLinearCounterborePattern(); std::cout<<"PASS: "<<checks<<" linear-counterbore-pattern assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--linear-countersink-pattern") { testLinearCountersinkPattern(); std::cout<<"PASS: "<<checks<<" linear-countersink-pattern assertions\n"; return 0; }
         execute(); return 0;
     }
     catch (const std::exception& e) { std::cerr << "FAIL after " << checks << " checks: " << e.what() << '\n'; return 1; }

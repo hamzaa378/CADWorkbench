@@ -1,0 +1,7 @@
+# CADWorkbench v1.9 technical handoff
+
+C++20 Windows application using Qt 6 and Open CASCADE. v1.9 adds 100 ProductionPart specifications and builders in `src/core/ProductionComponents.cpp`, behind `SceneDocument::addProductionPart`, exposed in the Create menu and ribbon. The builders use nine reusable direct-solid families and validate topology and volume before undoable insertion.
+
+Windows x64 Release build passed. CTest passed 1/1; direct core regression passed 4,113 assertions. Regression coverage exercises all 405 component defaults across v1.3-v1.9, including invalid-dimension rejection, topology, positive volume, insertion, and undo. A coverage audit confirms every public `SceneDocument` operation is called by the regression suite. The source audit passed 81 checks.
+
+The packaged Windows application launched and representative workflows passed: box creation/properties, document save/open/new, undo/redo, STEP/STL export, view navigation, selection, rename/color/visibility, duplicate, move, rotation, scaling, mirror, linear/circular patterns, split, shell, holes, hole grid, selected-edge fillet/chamfer, Boolean union, mass-properties inspection, and Create-menu group visibility. Undo was verified for scale, fillet, union, and circular pattern. Every component template was core-tested, but every UI dialog was not individually clicked. Full W01-W24 manual QA, clean-VM deployment, and approver sign-off remain release blockers. See `manual_qa_results.md`, `QA_MATRIX.md`, `local_verification.json`, and `FEATURE_GAP_COMPARISON.md`.

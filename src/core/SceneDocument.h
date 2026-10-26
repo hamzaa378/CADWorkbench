@@ -5,6 +5,7 @@
 #include <QUuid>
 #include <QVector>
 #include <TopoDS_Edge.hxx>
+#include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
 
 namespace cad {
@@ -20,16 +21,89 @@ struct Part {
     QString geometryToken = QUuid::createUuid().toString(QUuid::WithoutBraces);
 };
 
+struct MinimumDistanceResult {
+    double distance = 0.0;
+    double firstX = 0.0;
+    double firstY = 0.0;
+    double firstZ = 0.0;
+    double secondX = 0.0;
+    double secondY = 0.0;
+    double secondZ = 0.0;
+};
+
+struct InterferenceResult {
+    double volume = 0.0;
+    double centroidX = 0.0;
+    double centroidY = 0.0;
+    double centroidZ = 0.0;
+};
+
+struct BodyDiagnostics {
+    bool valid = false;
+    int solids = 0;
+    int shells = 0;
+    int faces = 0;
+    int wires = 0;
+    int edges = 0;
+    int vertices = 0;
+    double volume = 0.0;
+    double surfaceArea = 0.0;
+    double minX = 0.0, minY = 0.0, minZ = 0.0;
+    double maxX = 0.0, maxY = 0.0, maxZ = 0.0;
+    double centerX = 0.0, centerY = 0.0, centerZ = 0.0;
+};
+
+struct DensityMassProperties {
+    double volume = 0.0; // mm^3
+    double densityKgPerM3 = 0.0;
+    double massKg = 0.0;
+    double centerX = 0.0, centerY = 0.0, centerZ = 0.0;
+};
+
+struct SectionMeasurement {
+    int edgeCount = 0;
+    double totalLength = 0.0; // mm
+};
+
+struct SurfaceTypeSummary {
+    int planarFaces = 0;
+    int cylindricalFaces = 0;
+    int conicalFaces = 0;
+    int sphericalFaces = 0;
+    int toroidalFaces = 0;
+    int otherFaces = 0;
+    double planarArea = 0.0; // mm^2
+    double cylindricalArea = 0.0;
+    double conicalArea = 0.0;
+    double sphericalArea = 0.0;
+    double toroidalArea = 0.0;
+    double otherArea = 0.0;
+};
+
+struct FaceReference {
+    QString partId;
+    QString geometryToken;
+    int faceIndex = 0; // 1-based TopExp face traversal index for this geometryToken.
+};
+
 struct EdgeReference {
     QString partId;
     QString geometryToken;
     int edgeIndex = 0; // 1-based TopExp edge traversal index within this geometryToken.
 };
 
+struct VertexReference {
+    QString partId;
+    QString geometryToken;
+    int vertexIndex = 0;
+};
+
 struct FilletCommand {
     EdgeReference edge;
+    QVector<EdgeReference> edges;
     TopoDS_Shape sourceShape;
     TopoDS_Edge sourceEdge;
+    QVector<TopoDS_Edge> sourceEdges;
     double radius = 0.0;
 };
 
@@ -40,9 +114,13 @@ struct FilletPreview {
 
 struct ChamferCommand {
     EdgeReference edge;
+    QVector<EdgeReference> edges;
     TopoDS_Shape sourceShape;
     TopoDS_Edge sourceEdge;
+    QVector<TopoDS_Edge> sourceEdges;
+    TopoDS_Face referenceFace;
     double distance = 0.0;
+    double secondDistance = 0.0;
 };
 
 struct ChamferPreview {
@@ -51,16 +129,21 @@ struct ChamferPreview {
 };
 
 enum class SketchProfile { Rectangle, Circle, Ellipse, Slot, Triangle, RegularPolygon, RoundedRectangle, Ring };
+enum class SketchPlane { XY, XZ, YZ };
 enum class ExtrusionMode { NewBody, Join, Cut };
 
 struct ExtrusionCommand {
     SketchProfile profile = SketchProfile::Rectangle;
+    SketchPlane sketchPlane = SketchPlane::XY;
+    bool reverseDirection = false;
+    bool throughAll = false;
     ExtrusionMode mode = ExtrusionMode::NewBody;
     QString targetPartId;
     QString targetGeometryToken;
     TopoDS_Shape targetShape;
     double originX = 0.0;
     double originY = 0.0;
+    double planeOffset = 0.0;
     double widthOrDiameter = 0.0;
     double depth = 0.0;
     double height = 0.0;
@@ -308,6 +391,7 @@ EngineeringPartSpec productionPartSpec(ProductionPart kind);
 EngineeringPartSpec modelingToolSpec(ModelingTool kind);
 enum class BooleanOp { Fuse, Cut, Common };
 enum class Axis { X, Y, Z };
+struct ShellOpeningFace { Axis axis = Axis::Z; bool positiveSide = true; };
 
 // Deliberately a direct-modeling document. A feature dependency graph is NOT present in v1.0.
 // Every geometry mutation is committed only after OCCT succeeds and validates the result.
@@ -355,14 +439,34 @@ public:
     bool loftRectangles(double bottomX,double bottomY,double bottomWidth,double bottomDepth,
                         double topX,double topY,double topWidth,double topDepth,double height,
                         QString* error = nullptr);
+    bool loftEllipticalSections(double bottomSemiAxisA,double bottomSemiAxisB,
+                                double topSemiAxisA,double topSemiAxisB,double height,
+                                double offsetX,double offsetY,QString* error = nullptr);
     bool translate(const QString& id, double x, double y, double z, QString* error = nullptr);
     bool rotate(const QString& id, Axis axis, double degrees, QString* error = nullptr);
     bool scale(const QString& id, double factor, QString* error = nullptr);
+    bool scaleNonUniform(const QString& id,double factorX,double factorY,double factorZ,QString* error = nullptr);
     bool duplicate(const QString& id, double dx, double dy, double dz, QString* error = nullptr);
     bool booleanOperation(BooleanOp op, const QString& firstId, const QString& secondId, QString* error = nullptr);
+    bool measureMinimumDistance(const QString& firstId,const QString& secondId,MinimumDistanceResult* result,
+                                QString* error = nullptr) const;
+    bool measureInterference(const QString& firstId,const QString& secondId,InterferenceResult* result,
+                             QString* error = nullptr) const;
+    bool diagnoseBody(const QString& id,BodyDiagnostics* result,QString* error = nullptr) const;
+    bool measureMassFromDensity(const QString& id,double densityKgPerM3,
+                                DensityMassProperties* result,QString* error = nullptr) const;
+    bool measurePlanarSection(const QString& id,int normalAxis,double offset,
+                              SectionMeasurement* result,QString* error = nullptr) const;
+    bool summarizeSurfaceTypes(const QString& id,SurfaceTypeSummary* result,
+                               QString* error = nullptr) const;
+    bool measureFaceArea(const FaceReference& face,double* area,QString* error = nullptr) const;
+    bool measureEdgeLength(const EdgeReference& edge,double* length,QString* error = nullptr) const;
+    bool measureVertexCoordinates(const VertexReference& vertex,double* x,double* y,double* z,QString* error = nullptr) const;
+    bool measureVertexDistance(const VertexReference& first,const VertexReference& second,double* distance,QString* error = nullptr) const;
     bool filletEdge(const EdgeReference& edge, double radius, QString* error = nullptr);
     bool filletAllEdges(const QString& id,double radius,QString* error = nullptr);
     bool prepareFillet(const EdgeReference& edge, double radius, FilletCommand* command, QString* error = nullptr) const;
+    bool prepareFillet(const QVector<EdgeReference>& edges,double radius,FilletCommand* command,QString* error = nullptr) const;
     static FilletPreview buildFilletPreview(const FilletCommand& command);
     bool commitFillet(const FilletCommand& command, const TopoDS_Shape& preview, QString* error = nullptr);
     bool chamferEdge(const EdgeReference& edge, double distance, QString* error = nullptr);
@@ -370,6 +474,10 @@ public:
     bool draftFace(const QString& id,int faceIndex,Axis pullAxis,double neutralPlaneOffset,double angleDegrees,
                    QString* error = nullptr);
     bool prepareChamfer(const EdgeReference& edge, double distance, ChamferCommand* command, QString* error = nullptr) const;
+    bool prepareChamfer(const QVector<EdgeReference>& edges,double distance,ChamferCommand* command,QString* error = nullptr) const;
+    bool prepareAsymmetricChamfer(const EdgeReference& edge,double distanceOnReferenceFace,
+                                  double distanceOnOppositeFace,ChamferCommand* command,
+                                  QString* error = nullptr) const;
     static ChamferPreview buildChamferPreview(const ChamferCommand& command);
     bool commitChamfer(const ChamferCommand& command, const TopoDS_Shape& preview, QString* error = nullptr);
     bool prepareExtrusion(SketchProfile profile, double originX, double originY,
@@ -408,6 +516,9 @@ public:
                                   int instanceCount,double spacing,QString* error = nullptr);
     bool rectangularPattern(const QString& id, Axis firstAxis, int firstCount, double firstSpacing,
                             Axis secondAxis, int secondCount, double secondSpacing, QString* error = nullptr);
+    bool rectangularPatternAlongVectors(const QString& id,double firstX,double firstY,double firstZ,
+                                        int firstCount,double firstSpacing,double secondX,double secondY,
+                                        double secondZ,int secondCount,double secondSpacing,QString* error = nullptr);
     bool prepareHole(const QString& id, double x, double y, double entryZ, double diameter,
                      double depth, bool throughAll, HoleCommand* command, QString* error = nullptr) const;
     bool prepareCounterbore(const QString& id,double x,double y,double entryZ,double diameter,double depth,
@@ -462,14 +573,25 @@ public:
     bool circularCounterborePattern(const QString& id,double centerX,double centerY,double entryZ,double boltCircleRadius,
                                     double diameter,double depth,bool throughAll,double headDiameter,double headDepth,
                                     int instanceCount,double totalAngleDegrees,QString* error = nullptr);
+    bool linearCounterborePattern(const QString& id,double centerX,double centerY,double entryZ,double diameter,
+                                  double depth,bool throughAll,double headDiameter,double headDepth,
+                                  int instanceCount,double spacingX,double spacingY,QString* error = nullptr);
+    bool linearCountersinkPattern(const QString& id,double centerX,double centerY,double entryZ,double diameter,
+                                  double depth,bool throughAll,double headDiameter,double includedAngleDegrees,
+                                  int instanceCount,double spacingX,double spacingY,QString* error = nullptr);
     bool linearKeyholeSlotPattern(const QString& id,double centerX,double centerY,double entryZ,double headDiameter,
                                   double throatWidth,double throatLength,double depth,double angleDegrees,
                                   int instanceCount,double spacingX,double spacingY,QString* error = nullptr);
     bool circularPattern(const QString& id, Axis axis, double centerU, double centerV,
                          int instanceCount, double totalAngleDegrees, QString* error = nullptr);
+    bool circularPatternAboutAxis(const QString& id,double originX,double originY,double originZ,
+                                  double axisX,double axisY,double axisZ,int instanceCount,
+                                  double totalAngleDegrees,QString* error = nullptr);
     bool splitBody(const QString& id, Axis axis, double planeOffset, QString* error = nullptr);
     bool shellBody(const QString& id, Axis openingAxis, bool positiveSide,
                    double thickness, QString* error = nullptr);
+    bool shellBodyWithOpenings(const QString& id,const QVector<ShellOpeningFace>& openings,
+                               double thickness,QString* error = nullptr);
     bool rename(const QString& id, const QString& name, QString* error = nullptr);
     bool setVisibility(const QString& id, bool visible, QString* error = nullptr);
     bool setColor(const QString& id, const QString& hexColor, QString* error = nullptr);

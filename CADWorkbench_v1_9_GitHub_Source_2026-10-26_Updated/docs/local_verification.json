@@ -1,0 +1,185 @@
+{
+  "version": "1.9.0",
+  "date": "2026-10-26",
+  "platform": "Windows x64 Visual Studio 18 2026 Release",
+  "build": "passed; CADWorkbench.exe and cadcore_tests.exe linked in build_resume/Release; Qt and Open CASCADE runtime staged",
+  "ctest": {
+    "passed": 37,
+    "failed": 0,
+    "names": [
+      "cadcore_modeling_tools",
+      "cadcore_wing_rib",
+      "cadcore_sweeps",
+      "cadcore_tapered_helix",
+      "cadcore_form_features",
+      "cadcore_vector_pattern",
+      "cadcore_vector_rectangular_pattern",
+      "cadcore_minimum_distance",
+      "cadcore_interference",
+      "cadcore_body_diagnostics",
+      "cadcore_density_mass_properties",
+      "cadcore_planar_section",
+      "cadcore_surface_summary",
+      "cadcore_face_area",
+      "cadcore_circular_hole_pattern",
+      "cadcore_helical_sweep",
+      "cadcore_variable_pitch_helix",
+      "cadcore_dovetail_groove",
+      "cadcore_t_slot_groove",
+      "cadcore_rounded_slot",
+      "cadcore_keyhole_slot",
+      "cadcore_rounded_slot_pattern",
+      "cadcore_circular_countersink_pattern",
+      "cadcore_circular_counterbore_pattern",
+      "cadcore_linear_keyhole_slot_pattern",
+      "cadcore_linear_counterbore_pattern",
+      "cadcore_linear_countersink_pattern",
+      "cadcore_elliptical_loft",
+      "cadcore_nonuniform_scale",
+      "cadcore_custom_axis_circular_pattern",
+      "cadcore_asymmetric_chamfer",
+      "cadcore_multi_edge_blends",
+      "cadcore_oriented_extrusion",
+      "cadcore_geometry_and_persistence",
+      "cadcore_edge_length",
+      "cadcore_vertex_coordinates",
+      "cadcore_vertex_distance"
+    ]
+  },
+  "direct_core_assertions": null,
+  "source_audit_checks": {
+    "passed": 136,
+    "failed": 0,
+    "public_api_operations": 112,
+    "public_api_referenced_by_regression": 112
+  },
+  "component_templates": {
+    "total": 405,
+    "core_verified": 405,
+    "groups": {
+      "mechanical_v1_3": 30,
+      "advanced_v1_4": 30,
+      "specialized_v1_5": 35,
+      "industrial_v1_6": 70,
+      "extended_v1_7": 70,
+      "precision_utility_v1_8": 70,
+      "production_v1_9": 100
+    },
+    "checks": [
+      "zero_dimension_rejected_without_mutation",
+      "valid_topology",
+      "positive_volume",
+      "document_insertion",
+      "undo"
+    ]
+  },
+  "ui": {
+    "packaged_app_launch": "passed",
+    "production_menu_commands_visible": 100,
+    "production_ribbon_buttons_visible": 100,
+    "precision_utility_group_retained": true,
+    "live_workflows": [
+      "box_creation_and_properties",
+      "save_open_new",
+      "undo_redo",
+      "STEP_export",
+      "STL_export",
+      "top_view",
+      "mouse_orbit",
+      "wheel_zoom",
+      "selection_and_properties",
+      "rename",
+      "body_color",
+      "visibility_toggle",
+      "duplicate_with_offset",
+      "move_with_offset",
+      "mass_properties_measurement",
+      "create_menu_component_group_visibility",
+      "world_origin_rotation_and_bounds",
+      "uniform_scale_and_undo",
+      "mirror_selected_body",
+      "linear_pattern",
+      "circular_pattern_and_undo",
+      "split_selected_body",
+      "shell_selected_body",
+      "through_all_hole_preview_apply_undo",
+      "hole_grid",
+      "selected_edge_fillet_preview_apply_undo",
+      "selected_edge_chamfer_preview_apply",
+      "two_body_union_and_undo",
+      "fit_all_view",
+      "planar_section_contour",
+      "surface_type_summary_box",
+      "surface_type_summary_cylinder",
+      "picked_face_area",
+      "picked_edge_length",
+      "picked_vertex_coordinates"
+    ],
+    "individually_opened_every_component_dialog": false,
+    "build_folder_executable_launch": "passed; isolated Release executable launched with Qt and Open CASCADE runtime staged",
+    "individual_dialogs_tested": [
+      "rotate_world_origin",
+      "uniform_scale",
+      "linear_pattern",
+      "circular_pattern",
+      "split",
+      "shell",
+      "through_all_hole",
+      "hole_grid",
+      "selected_edge_fillet",
+      "selected_edge_chamfer"
+    ],
+    "individual_dialogs_tested_every_command": false,
+    "boolean_union_and_circular_pattern_undo": "passed; six bodies restored after each undo"
+  },
+  "feature_gap_benchmark": {
+    "total_capability_areas": 30,
+    "implemented": 6,
+    "partial": 3,
+    "not_implemented": 21
+  },
+  "verification_status": "Windows x64 Release app and tests built; full 37-test CTest suite passed; source audit passed 136 checks with all 112 public SceneDocument operations referenced. Live UI verified planar section, surface summaries, picked face area, picked edge length, and picked vertex coordinates; the vertex-distance command is visible and its insufficient-selection guard is verified, with numeric two-point UI verification pending.",
+  "public_core_api_coverage": {
+    "declared_operations": 112,
+    "referenced_by_regression": 112,
+    "uncovered": []
+  },
+  "current_feature_verification": {
+    "planar_section": {
+      "focused_assertions": 15,
+      "core": "passed",
+      "ctest": "passed 34/34",
+      "live_ui": "passed; 40x30x20 mm box: Z=10 returned 4 edges / 140.000 mm; X=20 returned 4 / 100.000 mm"
+    },
+    "surface_type_summary": {
+      "focused_assertions": 22,
+      "core": "passed box, cylinder, sphere, cone, torus; area sums and invalid inputs",
+      "ctest": "passed 34/34",
+      "live_ui": "passed; box: six planar faces / 5200.000 mm2; r10 h35 cylinder: two planar caps / 628.319 mm2 and one cylindrical face / 2199.115 mm2"
+    },
+    "face_area": {
+      "focused_assertions": 12,
+      "core": "passed exact area, bad indexes, missing body, null output, stale token rejection, fresh token after transform",
+      "ctest": "passed 34/34",
+      "live_ui": "passed; picked top face of 40x30x20 mm box; reported 1200.000 mm2"
+    },
+    "edge_length": {
+      "focused_assertions": 38,
+      "core": "passed; all box edges measurable; bad index, missing body, null output and stale reference rejected; query nonmutating",
+      "ctest": "passed 37/37",
+      "live_ui": "passed; selected edge 5 on 40x30x20 mm box reported 20.000 mm, matching the Z extent"
+    },
+    "vertex_coordinates": {
+      "focused_assertions": 57,
+      "core": "passed; full box vertex traversal, bounds and corners, invalid indices, missing body, null output, stale token rejection",
+      "ctest": "passed 37/37",
+      "live_ui": "passed; picked box corner reported X=0.000, Y=0.000, Z=20.000 mm"
+    },
+    "vertex_distance": {
+      "focused_assertions": 12,
+      "core": "passed; opposite box-corner diagonal, null output, missing body, stale reference",
+      "ctest": "passed 37/37",
+      "live_ui": "command visible; insufficient-selection prompt verified and instructs holding Ctrl; numeric two-point result pending because desktop automation cannot hold Ctrl during a viewport click"
+    }
+  }
+}

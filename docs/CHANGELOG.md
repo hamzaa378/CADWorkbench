@@ -1,3 +1,62 @@
+## Distance between selected vertices - 2026-10-26
+
+- Added a read-only straight-line distance query and an Inspect menu/ribbon action for two picked vertices.
+- Focused regression passed 12 assertions; Windows x64 Release app and tests built; full CTest passed 37/37; source audit passed 136 checks with all 112 public scene operations referenced.
+- Live UI confirmed command availability and the insufficient-selection guard. Numeric two-point UI verification remains pending because the desktop input interface cannot Ctrl-click to keep two vertices selected. See `VERTEX_DISTANCE.md`.
+
+## Selected vertex coordinates - 2026-10-26
+
+- Added viewport vertex picking and X/Y/Z coordinate reporting in Inspect, with geometry-token validation that rejects stale vertex references after body edits.
+- Focused regression passed 57 assertions; Windows x64 Release app and test targets built; full CTest passed 36/36; source audit passed 136 checks with all 111 public scene operations referenced.
+- Live UI picked a box corner and reported X 0.000, Y 0.000, Z 20.000 mm. See `VERTEX_COORDINATES.md`.
+
+## Selected edge length - 2026-10-26
+
+- Added viewport-picked edge length measurement to the Inspect menu and ribbon, with geometry-token validation that rejects stale edge references after body edits.
+- Focused regression passed 38 assertions; Windows x64 Release app and test targets built; full CTest passed 36/36; source audit passed 136 checks with all 111 public scene operations referenced.
+- Live UI picked edge 5 on a 40 × 30 × 20 mm box and reported 20.000 mm, matching the box's Z extent. See `EDGE_LENGTH.md`.
+
+## Selected face area - 2026-10-26
+
+- Added a viewport-picked face area measurement to Inspect, with geometry-token validation that rejects stale face references after a body edit.
+- Focused regression passed 12 assertions; Windows x64 Release build passed; full CTest passed 34/34; source audit passed 136 checks with all 109 public scene operations referenced.
+- Live UI picked the top face of a 40 × 30 × 20 mm box and reported 1,200.000 mm². See `FACE_AREA.md`.
+
+## Interference volume inspection - 2026-10-26
+
+- Added a read-only core query and Inspect menu/ribbon command that computes the shared solid volume of two selected bodies.
+- Focused Windows regression passed 27 assertions, including overlap centroid and contained-solid volume; isolated Windows Release build and Qt runtime staging passed; full CTest passed 29/29. Source audit passed 136 checks, with all 104 public `SceneDocument` operations referenced. Live UI verification is pending. See `INTERFERENCE_VOLUME.md`.
+
+## Minimum distance inspection - 2026-10-26
+
+- Added a read-only core measurement and Inspect menu/ribbon command for the minimum clearance between two selected bodies, including one closest-point pair.
+- Focused Windows regression passed 23 assertions, including face-touching bodies; full CTest passed 29/29. Source audit passed 136 checks, with all 104 public `SceneDocument` operations referenced by regressions. Live UI verification is pending. See `MINIMUM_DISTANCE.md`.
+
+## Two-vector rectangular pattern - 2026-10-26
+
+- Added two-direction rectangular body arrays with arbitrary nonparallel vectors, normalized directions, independent counts/spacings, a 1,000-body limit, and atomic undo.
+- Focused regression passed 44 assertions; Windows build passed; full CTest passed 27/27. Source audit passed 136 checks with all 102 public scene operations referenced. Live UI created six bodies from a box, verified translated bounds/volume/topology, and Undo restored the single source body. See `VECTOR_RECTANGULAR_PATTERN.md`.
+
+## Multi-face shell - 2026-10-26
+
+- Extended Shell to remove one or more unique planar outside faces in one operation; the existing one-face command remains available.
+- Windows Release app and regression targets built. Regression covers empty/duplicate rejection, no mutation on rejection, opposing and adjacent face shell validity/material removal, and undo. Full CTest passed 26/26; source audit passed 136 checks with all 101 public scene operations referenced. Live UI verified opposing Z faces at 2 mm (24,000 → 5,280 mm³) and adjacent +X/+Z faces at 2 mm (24,000 → 6,216 mm³), with undo restoring the original in both cases.
+- Live UI shell on a 40 × 30 × 20 mm box with both Z faces open and 2 mm walls produced 5,280 mm³ (10 faces/48 edges); Undo restored 24,000 mm³ (6/24). See `MULTI_FACE_SHELL.md`.
+
+## Through-all extrusion Cut - 2026-10-26
+
+- Added a Through all (Cut) end condition for one-sided sketch cuts. It adapts cutter length to the selected target and supports forward/reverse direction on XY, XZ, and YZ planes.
+- Focused regression covers six plane/direction combinations, volume and topology, commit/undo, and invalid operation/direction handling. Live UI verified a 500 mm³ cut and Undo restoration on a 40 × 30 × 20 mm box.
+- Windows Release app and tests built; full CTest passed 26/26.
+
+## Oriented sketch-plane extrusion - 2026-10-26
+
+- Added XY, XZ, and YZ plane selection, signed W offset along the chosen normal, and reverse-direction control to sketch extrusion. Profile coordinates use local U/V; symmetric mode disables reverse direction.
+- Windows Release build passed; focused regression passed 202 assertions, including symmetric extrusion at nonzero plane offsets and reverse circular/tapered geometry; full CTest passed 26/26; source audit passed 136 checks with all 100 public scene operations referenced by regression.
+- Live UI verified XY, XZ, and YZ orientations, nonzero offsets and reverse directions, XZ at W=0 and W=7 in both directions, and symmetric-mode disabling reverse. See `ORIENTED_SKETCH_EXTRUSION.md`.
+- Live reverse Cut also passed: volume changed from 24,000 to 23,600 mm³, and Undo restored the initial volume and 6-face/24-edge topology.
+- Live XY and YZ reverse extrusions at nonzero plane offsets passed with expected volume and X/Y/Z bounds; all three sketch-plane orientations now have live UI coverage.
+
 ## Elliptical sweep and tapered spring - 2026-10-25
 
 - Added solid sweeps with an elliptical profile, including validation and undo coverage.
@@ -22,9 +81,44 @@
 
 # Changelog
 
+## Multi-edge fillet and chamfer - 2026-10-26
+
+- Symmetric selected-edge fillet and chamfer now accept multiple edges on one body, with Ctrl+click selection, a shared parameter dialog, preview, apply, and undo support. Duplicate, empty, stale, or mixed-body selections are rejected.
+- Windows Release build passed; focused regression passed 31 assertions and full CTest passed 25/25. Live multi-edge viewport selection is pending. See `MULTI_EDGE_BLENDS.md`.
+
+## Asymmetric edge chamfer - 2026-10-26
+
+- Added a selected-edge chamfer with separate distances on the two adjacent faces, with preview and undoable apply in the Modify menu and ribbon.
+- Windows Release build passed; focused regression passed 27 assertions and full CTest passed 25/25. Live UI verified preview, apply, undo, and redo; Properties reported volume changing from 24,000 to 23,960 mm³. See `ASYMMETRIC_CHAMFER.md`.
+
+## Custom-axis circular pattern - 2026-10-26
+
+- Added body copies rotated around a user-defined 3D axis, with a configurable axis origin, direction, instance count, and sweep angle.
+- Added the command to the Modify menu and ribbon Pattern group. Windows Release build, 48 focused regression assertions, full CTest 23/23, source audit, and live UI creation plus undo/redo passed. See `CUSTOM_AXIS_CIRCULAR_PATTERN.md`.
+
+## Nonuniform scale - 2026-10-26
+
+- Added per-axis X/Y/Z scale factors about the world origin for a selected body, with identity no-op and one-step undo support.
+- Added the operation to the Modify menu and ribbon Transform group.
+- Windows Release build passed; focused regression passed 23 assertions and full CTest passed 22/22. Live UI verified the X=2, Y=0.5, Z=3 transform and undo/redo.
+
+## Elliptical loft - 2026-10-26
+
+- Added a two-section solid loft with independently controlled elliptical semi-axes, height, and top-section XY offset.
+- Added the operation to the Create menu and Create ribbon Profiles group.
+- Windows Release build passed; focused regression passed 19 assertions, and full CTest passed 21/21. Live UI created the default loft with volume 17,886.131 mm³ and verified menu/ribbon access plus undo/redo.
+
+## Linear counterbore and countersink patterns - 2026-10-26
+
+- Added linear arrays of through-all or blind counterbored and countersunk holes, using an editable XY spacing vector and a one-step undoable body operation.
+- Added Modify menu and ribbon controls for both patterns.
+- Each operation passed a 23-assertion focused regression for parameter validation, through/blind cuts, material removal, undo/redo, and rollback after a later cutter misses the body.
+- Full Windows CTest passed 20/20 and the source audit passed 136 checks with 96/96 public operations referenced by regressions.
+- Live UI verified both operations on a 40 x 30 x 20 mm box. The three counterbores changed volume to 23,111.418 mm^3; the three countersinks changed volume to 23,315.987 mm^3. Undo/redo passed for both. See their feature notes and `QA_MATRIX.md`.
+
 ## Verification and source package refresh - 2026-10-26
 
-- Refreshed the Windows verification snapshot to CTest 18/18 and the source audit to 136 checks, covering all 94 public `SceneDocument` operations with regression references.
+- Refreshed the Windows verification snapshot to CTest 20/20 and the source audit to 136 checks, covering all 96 public `SceneDocument` operations with regression references.
 - Strengthened the countersink-pattern regression to 28 assertions, including blind-pattern undo/redo and rollback when a later cutter misses the body. Added live UI evidence for a three-hole blind 180° pattern.
 - Strengthened the linear keyhole-pattern regression to 22 assertions, including rollback when a later slot misses the body.
 - Representative live feature workflows and measured geometry are recorded in `QA_MATRIX.md` and the per-feature notes. The full command-dialog and clean-machine release checklists remain open.
@@ -172,4 +266,19 @@
 - Added profile extrusion New Body, Join and Cut with asynchronous previews and atomic undo.
 - Fixed B-rep preview aliasing that could corrupt undo/redo snapshots.
 
+
+- Added read-only geometry health and topology inspection to the Inspect menu and ribbon. Windows Release build passed, focused regression passed 20 assertions, full CTest passed 30/30, and live UI verified a 40 × 30 × 20 mm box (1 solid, 1 shell, 6 faces, 6 wires, 12 unique edges, 8 unique vertices; 24,000 mm³ volume; 5,200 mm² area; center (20, 15, 10) mm). See `GEOMETRY_DIAGNOSTICS.md`.
+- Live UI verification passed for minimum distance (5.0000 mm clearance between separated boxes, with closest-point coordinates displayed) and interference volume (840.0000 mm³ overlap with centroid (7.5, 6, 7) mm; face contact returned zero). Full CTest passed 30/30. See `MINIMUM_DISTANCE.md` and `INTERFERENCE_VOLUME.md`.
+- Added density-based mass calculation to the Inspect Mass Properties workflow. Users can enter material density in kg/m³; the read-only report returns estimated mass in kg with volume and center of mass. Focused regression passed 14 assertions, source audit covers all 106 public scene operations, Windows Release build passed, full CTest passed 31/31, and live UI reported 0.188400 kg for a 40 × 30 × 20 mm box at 7,850 kg/m³. See `MASS_FROM_DENSITY.md`.
+# Planar section contour measurement - 2026-10-26
+
+- Added a read-only Inspect command that measures unique section edges and total contour length for an axis-aligned plane through one selected body.
+- Focused regression passed 15 assertions; Windows x64 Release build passed; full CTest passed 34/34; source audit passed 136 checks with all 109 public scene operations covered.
+- Live UI verified a Z-normal section through a 40 × 30 × 20 mm box at 10 mm: 4 edges and 140.000 mm contour length. See `PLANAR_SECTION.md`.
+
+# Surface type summary - 2026-10-26
+
+- Added a read-only Inspect report that classifies unique B-rep faces as planar, cylindrical, conical, spherical, toroidal, or other and totals area by type.
+- Focused regression passed 22 assertions across box, cylinder, sphere, cone, and torus surfaces. Windows x64 Release build passed; full CTest passed 34/34; source audit passed 136 checks with all 109 public scene operations covered.
+- Live UI verified a box's 5,200 mm² planar area and a cylinder's cap and curved areas (628.319 and 2,199.115 mm²). See `SURFACE_TYPE_SUMMARY.md`.
 

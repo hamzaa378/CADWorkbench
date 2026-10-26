@@ -1,6 +1,8 @@
 ﻿#include "SceneDocument.h"
 
 #include <BRepAlgoAPI_Common.hxx>
+#include <BRepAlgoAPI_Section.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <Bnd_Box.hxx>
@@ -21,6 +23,7 @@
 #include <BRepBuilderAPI_GTransform.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepGProp.hxx>
+#include <BRep_Tool.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCone.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
@@ -43,6 +46,9 @@
 #include <StlAPI_Writer.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopExp.hxx>
+#include <NCollection_IndexedMap.hxx>
+#include <TopTools_ShapeMapHasher.hxx>
 #include <NCollection_List.hxx>
 #include <GeomAbs_SurfaceType.hxx>
 #include <TopoDS_Compound.hxx>
@@ -68,6 +74,7 @@
 
 #include <QColor>
 #include <QFile>
+#include <QSet>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -358,6 +365,36 @@ bool SceneDocument::loftRectangles(double bottomX,double bottomY,double bottomWi
         const QString name=uniqueName(QStringLiteral("Lofted Rectangle"));
         checkpoint();parts_.append({generatedId(),name,result});return true;
     }catch(const Standard_Failure& e){setError(error,QStringLiteral("CAD kernel error: %1").arg(e.what()));}
+     catch(const std::exception& e){setError(error,QString::fromUtf8(e.what()));}
+    return false;
+}
+
+bool SceneDocument::loftEllipticalSections(double bottomSemiAxisA,double bottomSemiAxisB,
+                                           double topSemiAxisA,double topSemiAxisB,double height,
+                                           double offsetX,double offsetY,QString* error) {
+    if(!finitePositive(bottomSemiAxisA)||!finitePositive(bottomSemiAxisB)||
+       !finitePositive(topSemiAxisA)||!finitePositive(topSemiAxisB)||!finitePositive(height)||
+       !finiteOffset(offsetX)||!finiteOffset(offsetY)){
+        setError(error,"Elliptical loft semi-axes and height must be positive; top offsets must be finite.");return false;
+    }
+    if(parts_.size()>=kMaxObjects){setError(error,"Scene object limit reached.");return false;}
+    try{
+        const auto ellipseWire=[](double centerX,double centerY,double axisA,double axisB,double z){
+            const double major=std::max(axisA,axisB),minor=std::min(axisA,axisB);
+            const gp_Dir majorDirection=axisA>=axisB?gp_Dir(1,0,0):gp_Dir(0,1,0);
+            const gp_Ax2 frame(gp_Pnt(centerX,centerY,z),gp_Dir(0,0,1),majorDirection);
+            return BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(gp_Elips(frame,major,minor)).Edge()).Wire();
+        };
+        BRepOffsetAPI_ThruSections loft(true,true);
+        loft.AddWire(ellipseWire(0,0,bottomSemiAxisA,bottomSemiAxisB,0));
+        loft.AddWire(ellipseWire(offsetX,offsetY,topSemiAxisA,topSemiAxisB,height));
+        loft.Build();
+        if(!loft.IsDone()){setError(error,"The kernel could not loft between the elliptical sections.");return false;}
+        const TopoDS_Shape result=loft.Shape();
+        if(!validShape(result,error))return false;
+        const QString name=uniqueName(QStringLiteral("Lofted Ellipse"));
+        checkpoint();parts_.append({generatedId(),name,result});return true;
+    }catch(const Standard_Failure& e){setError(error,QStringLiteral("Elliptical loft kernel error: %1").arg(e.what()));}
      catch(const std::exception& e){setError(error,QString::fromUtf8(e.what()));}
     return false;
 }
@@ -665,6 +702,27 @@ bool SceneDocument::scale(const QString& id, double factor, QString* error) {
     return false;
 }
 
+bool SceneDocument::scaleNonUniform(const QString& id,double factorX,double factorY,double factorZ,QString* error) {
+    constexpr double minimumFactor=1e-4,maximumFactor=1e4;
+    const auto validFactor=[=](double factor){return std::isfinite(factor)&&factor>=minimumFactor&&factor<=maximumFactor;};
+    if(!validFactor(factorX)||!validFactor(factorY)||!validFactor(factorZ)){
+        setError(error,"Nonuniform scale factors must be finite and between 0.0001 and 10,000.");return false;
+    }
+    const Part* part=find(id);
+    if(!part){setError(error,"Object not found.");return false;}
+    if(factorX==1.0&&factorY==1.0&&factorZ==1.0)return true;
+    try{
+        const gp_GTrsf transform(gp_Mat(factorX,0,0,0,factorY,0,0,0,factorZ),gp_XYZ(0,0,0));
+        const TopoDS_Shape result=BRepBuilderAPI_GTransform(part->shape,transform,true).Shape();
+        if(!validShape(result,error))return false;
+        checkpoint();
+        for(auto& target:parts_)if(target.id==id){target.shape=result;target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);break;}
+        return true;
+    }catch(const Standard_Failure& e){setError(error,QStringLiteral("CAD kernel error: %1").arg(e.what()));}
+     catch(const std::exception& e){setError(error,QString::fromUtf8(e.what()));}
+    return false;
+}
+
 bool SceneDocument::duplicate(const QString& id, double dx, double dy, double dz, QString* error) {
     const Part* part = find(id);
     if (!part) { setError(error, "Object not found."); return false; }
@@ -722,6 +780,299 @@ bool SceneDocument::booleanOperation(BooleanOp op, const QString& firstId, const
     return false;
 }
 
+bool SceneDocument::measureMinimumDistance(const QString& firstId,const QString& secondId,
+                                           MinimumDistanceResult* result,QString* error) const {
+    if (!result) { setError(error,"A distance result is required."); return false; }
+    if (firstId==secondId) { setError(error,"Choose two different solids."); return false; }
+    const Part* first=find(firstId);
+    const Part* second=find(secondId);
+    if (!first||!second) { setError(error,"Both solids must exist."); return false; }
+    if (first->shape.IsNull()||second->shape.IsNull()) { setError(error,"Both solids must contain geometry."); return false; }
+    try {
+        BRepExtrema_DistShapeShape measurement(first->shape,second->shape);
+        measurement.Perform();
+        if (!measurement.IsDone()||measurement.NbSolution()<1) {
+            setError(error,"The CAD kernel could not find a closest-point solution.");
+            return false;
+        }
+        const gp_Pnt a=measurement.PointOnShape1(1);
+        const gp_Pnt b=measurement.PointOnShape2(1);
+        MinimumDistanceResult candidate;
+        candidate.distance=measurement.Value();
+        candidate.firstX=a.X(); candidate.firstY=a.Y(); candidate.firstZ=a.Z();
+        candidate.secondX=b.X(); candidate.secondY=b.Y(); candidate.secondZ=b.Z();
+        *result=candidate;
+        return true;
+    } catch (const Standard_Failure& e) {
+        setError(error,QStringLiteral("CAD kernel error: %1").arg(e.what()));
+    } catch (const std::exception& e) {
+        setError(error,QString::fromUtf8(e.what()));
+    }
+    return false;
+}
+
+bool SceneDocument::measureInterference(const QString& firstId,const QString& secondId,
+                                        InterferenceResult* result,QString* error) const {
+    if(!result){setError(error,"An interference result is required.");return false;}
+    if(firstId==secondId){setError(error,"Choose two different solids.");return false;}
+    const Part* first=find(firstId);const Part* second=find(secondId);
+    if(!first||!second){setError(error,"Both solids must exist.");return false;}
+    if(first->shape.IsNull()||second->shape.IsNull()){setError(error,"Both solids must contain geometry.");return false;}
+    try {
+        BRepAlgoAPI_Common common(first->shape,second->shape);
+        common.Build();
+        if(!common.IsDone()||common.Shape().IsNull()){
+            setError(error,"The CAD kernel could not compute the shared volume.");return false;
+        }
+        GProp_GProps properties;
+        BRepGProp::VolumeProperties(common.Shape(),properties);
+        InterferenceResult candidate;
+        candidate.volume=std::max(0.0,properties.Mass());
+        const gp_Pnt center=properties.CentreOfMass();
+        candidate.centroidX=center.X();candidate.centroidY=center.Y();candidate.centroidZ=center.Z();
+        *result=candidate;
+        return true;
+    } catch(const Standard_Failure& e){setError(error,QStringLiteral("CAD kernel error: %1").arg(e.what()));}
+      catch(const std::exception& e){setError(error,QString::fromUtf8(e.what()));}
+    return false;
+}
+
+bool SceneDocument::diagnoseBody(const QString& id,BodyDiagnostics* result,QString* error) const {
+    if(!result){setError(error,"Body diagnostics output is null.");return false;}
+    const Part* part=find(id);
+    if(!part||part->shape.IsNull()){setError(error,"The selected body does not exist or has no geometry.");return false;}
+    try {
+        BodyDiagnostics candidate;
+        candidate.valid=BRepCheck_Analyzer(part->shape).IsValid();
+        const auto count=[&](TopAbs_ShapeEnum type){
+            NCollection_IndexedMap<TopoDS_Shape,TopTools_ShapeMapHasher> uniqueShapes;
+            TopExp::MapShapes(part->shape,type,uniqueShapes);
+            return uniqueShapes.Extent();
+        };
+        candidate.solids=count(TopAbs_SOLID);candidate.shells=count(TopAbs_SHELL);
+        candidate.faces=count(TopAbs_FACE);candidate.wires=count(TopAbs_WIRE);
+        candidate.edges=count(TopAbs_EDGE);candidate.vertices=count(TopAbs_VERTEX);
+        GProp_GProps volumeProperties,areaProperties;
+        BRepGProp::VolumeProperties(part->shape,volumeProperties);
+        BRepGProp::SurfaceProperties(part->shape,areaProperties);
+        candidate.volume=volumeProperties.Mass();
+        candidate.surfaceArea=areaProperties.Mass();
+        const gp_Pnt center=volumeProperties.CentreOfMass();
+        candidate.centerX=center.X();candidate.centerY=center.Y();candidate.centerZ=center.Z();
+        Bnd_Box bounds;
+        BRepBndLib::AddOptimal(part->shape,bounds,false,false);
+        if(bounds.IsVoid()){setError(error,"The selected body has no measurable bounds.");return false;}
+        bounds.Get(candidate.minX,candidate.minY,candidate.minZ,
+                   candidate.maxX,candidate.maxY,candidate.maxZ);
+        candidate.valid=candidate.valid&&candidate.solids>0&&candidate.volume>1e-9&&
+            std::isfinite(candidate.volume)&&std::isfinite(candidate.surfaceArea);
+        *result=candidate;
+        return true;
+    } catch(const Standard_Failure& failure){
+        setError(error,QStringLiteral("Geometry diagnostics failed: %1").arg(failure.what()));
+    } catch(const std::exception& failure){
+        setError(error,QString("Geometry diagnostics failed: %1").arg(failure.what()));
+    }
+    return false;
+}
+
+bool SceneDocument::measureMassFromDensity(const QString& id,double densityKgPerM3,
+                                            DensityMassProperties* result,QString* error) const {
+    if(!result){setError(error,"Mass-properties output is null.");return false;}
+    if(!finitePositive(densityKgPerM3)){setError(error,"Density must be finite, positive, and no greater than 1,000,000 kg/m^3.");return false;}
+    const Part* part=find(id);
+    if(!part||part->shape.IsNull()){setError(error,"The selected body does not exist or has no geometry.");return false;}
+    try{
+        if(!BRepCheck_Analyzer(part->shape).IsValid()){
+            setError(error,"Mass properties require valid solid geometry.");return false;
+        }
+        GProp_GProps volumeProperties;
+        BRepGProp::VolumeProperties(part->shape,volumeProperties);
+        const double volume=volumeProperties.Mass();
+        const double mass=volume*densityKgPerM3/1e9; // mm^3 to m^3
+        const gp_Pnt center=volumeProperties.CentreOfMass();
+        if(!std::isfinite(volume)||volume<=1e-9||!std::isfinite(mass)){
+            setError(error,"The selected body has no measurable positive volume.");return false;
+        }
+        DensityMassProperties candidate;
+        candidate.volume=volume;candidate.densityKgPerM3=densityKgPerM3;candidate.massKg=mass;
+        candidate.centerX=center.X();candidate.centerY=center.Y();candidate.centerZ=center.Z();
+        *result=candidate;
+        return true;
+    }catch(const Standard_Failure& failure){
+        setError(error,QStringLiteral("Mass-property calculation failed: %1").arg(failure.what()));
+    }catch(const std::exception& failure){
+        setError(error,QString("Mass-property calculation failed: %1").arg(failure.what()));
+    }
+    return false;
+}
+
+bool SceneDocument::measurePlanarSection(const QString& id,int normalAxis,double offset,
+                                         SectionMeasurement* result,QString* error) const {
+    if(!result){setError(error,"Section-measurement output is null.");return false;}
+    if(normalAxis<0||normalAxis>2||!std::isfinite(offset)||std::abs(offset)>1e6){
+        setError(error,"Section axis must be X, Y, or Z and offset must be finite and within ±1,000,000 mm.");return false;
+    }
+    const Part* part=find(id);
+    if(!part||part->shape.IsNull()){setError(error,"The selected body does not exist or has no geometry.");return false;}
+    try{
+        const gp_Pnt origin(normalAxis==0?offset:0.0,normalAxis==1?offset:0.0,normalAxis==2?offset:0.0);
+        const gp_Dir normal(normalAxis==0?1.0:0.0,normalAxis==1?1.0:0.0,normalAxis==2?1.0:0.0);
+        BRepAlgoAPI_Section section(part->shape,gp_Pln(origin,normal),false);
+        section.Build();
+        if(!section.IsDone()||section.HasErrors()){setError(error,"The kernel could not calculate the planar section.");return false;}
+        NCollection_IndexedMap<TopoDS_Shape,TopTools_ShapeMapHasher> edges;
+        TopExp::MapShapes(section.Shape(),TopAbs_EDGE,edges);
+        SectionMeasurement candidate;
+        candidate.edgeCount=edges.Extent();
+        for(int i=1;i<=edges.Extent();++i){
+            GProp_GProps properties;
+            BRepGProp::LinearProperties(edges(i),properties);
+            candidate.totalLength+=properties.Mass();
+        }
+        if(!std::isfinite(candidate.totalLength)){setError(error,"Section contour length is not finite.");return false;}
+        *result=candidate;
+        return true;
+    }catch(const Standard_Failure& failure){
+        setError(error,QStringLiteral("Planar section calculation failed: %1").arg(failure.what()));
+    }catch(const std::exception& failure){
+        setError(error,QString("Planar section calculation failed: %1").arg(failure.what()));
+    }
+    return false;
+}
+
+bool SceneDocument::summarizeSurfaceTypes(const QString& id,SurfaceTypeSummary* result,
+                                          QString* error) const {
+    if(!result){setError(error,"Surface-summary output is null.");return false;}
+    const Part* part=find(id);
+    if(!part||part->shape.IsNull()){setError(error,"The selected body does not exist or has no geometry.");return false;}
+    try {
+        SurfaceTypeSummary candidate;
+        NCollection_IndexedMap<TopoDS_Shape,TopTools_ShapeMapHasher> uniqueFaces;
+        TopExp::MapShapes(part->shape,TopAbs_FACE,uniqueFaces);
+        for(int faceIndex=1;faceIndex<=uniqueFaces.Extent();++faceIndex){
+            const TopoDS_Face face=TopoDS::Face(uniqueFaces(faceIndex));
+            const GeomAbs_SurfaceType type=BRepAdaptor_Surface(face,true).GetType();
+            GProp_GProps properties;
+            BRepGProp::SurfaceProperties(face,properties);
+            const double area=properties.Mass();
+            if(!std::isfinite(area)||area<0.0){setError(error,"A face has a non-finite surface area.");return false;}
+            int* count=&candidate.otherFaces;
+            double* totalArea=&candidate.otherArea;
+            switch(type){
+            case GeomAbs_Plane: count=&candidate.planarFaces;totalArea=&candidate.planarArea;break;
+            case GeomAbs_Cylinder: count=&candidate.cylindricalFaces;totalArea=&candidate.cylindricalArea;break;
+            case GeomAbs_Cone: count=&candidate.conicalFaces;totalArea=&candidate.conicalArea;break;
+            case GeomAbs_Sphere: count=&candidate.sphericalFaces;totalArea=&candidate.sphericalArea;break;
+            case GeomAbs_Torus: count=&candidate.toroidalFaces;totalArea=&candidate.toroidalArea;break;
+            default: break;
+            }
+            ++*count;
+            *totalArea+=area;
+        }
+        *result=candidate;
+        return true;
+    } catch(const Standard_Failure& failure){
+        setError(error,QStringLiteral("Surface classification failed: %1").arg(failure.what()));
+    } catch(const std::exception& failure){
+        setError(error,QString("Surface classification failed: %1").arg(failure.what()));
+    }
+    return false;
+}
+
+bool SceneDocument::measureFaceArea(const FaceReference& reference,double* area,QString* error) const {
+    if(!area){setError(error,"Face-area output is null.");return false;}
+    const Part* part=find(reference.partId);
+    if(!part||part->shape.IsNull()){setError(error,"The selected face's body does not exist or has no geometry.");return false;}
+    if(reference.geometryToken.isEmpty()||reference.geometryToken!=part->geometryToken){
+        setError(error,"The selected face reference is stale because the body geometry changed.");return false;
+    }
+    if(reference.faceIndex<1){setError(error,"Face index must be a positive one-based index.");return false;}
+    try {
+        int index=0;
+        for(TopExp_Explorer explorer(part->shape,TopAbs_FACE);explorer.More();explorer.Next()){
+            if(++index!=reference.faceIndex)continue;
+            GProp_GProps properties;
+            BRepGProp::SurfaceProperties(TopoDS::Face(explorer.Current()),properties);
+            const double candidate=properties.Mass();
+            if(!std::isfinite(candidate)||candidate<=0.0){setError(error,"The selected face has no measurable positive area.");return false;}
+            *area=candidate;
+            return true;
+        }
+        setError(error,"The selected face index is outside the body's topology.");
+    } catch(const Standard_Failure& failure){
+        setError(error,QStringLiteral("Face-area measurement failed: %1").arg(failure.what()));
+    } catch(const std::exception& failure){
+        setError(error,QString("Face-area measurement failed: %1").arg(failure.what()));
+    }
+    return false;
+}
+
+bool SceneDocument::measureEdgeLength(const EdgeReference& reference,double* length,QString* error) const {
+    if(!length){setError(error,"Edge-length output is null.");return false;}
+    const Part* part=find(reference.partId);
+    if(!part||part->shape.IsNull()){setError(error,"The selected edge's body does not exist or has no geometry.");return false;}
+    if(reference.geometryToken.isEmpty()||reference.geometryToken!=part->geometryToken){
+        setError(error,"The selected edge reference is stale because the body geometry changed.");return false;
+    }
+    if(reference.edgeIndex<1){setError(error,"Edge index must be a positive one-based index.");return false;}
+    try {
+        int index=0;
+        for(TopExp_Explorer explorer(part->shape,TopAbs_EDGE);explorer.More();explorer.Next()){
+            if(++index!=reference.edgeIndex)continue;
+            GProp_GProps properties;
+            BRepGProp::LinearProperties(TopoDS::Edge(explorer.Current()),properties);
+            const double candidate=properties.Mass();
+            if(!std::isfinite(candidate)||candidate<=0.0){setError(error,"The selected edge has no measurable positive length.");return false;}
+            *length=candidate;
+            return true;
+        }
+        setError(error,"The selected edge index is outside the body's topology.");
+    } catch(const Standard_Failure& failure){
+        setError(error,QStringLiteral("Edge-length measurement failed: %1").arg(failure.what()));
+    } catch(const std::exception& failure){
+        setError(error,QString("Edge-length measurement failed: %1").arg(failure.what()));
+    }
+    return false;
+}
+
+bool SceneDocument::measureVertexCoordinates(const VertexReference& reference,double* x,double* y,double* z,QString* error) const {
+    if(!x||!y||!z){setError(error,"Vertex-coordinate output is null.");return false;}
+    const Part* part=find(reference.partId);
+    if(!part||part->shape.IsNull()){setError(error,"The selected vertex's body does not exist or has no geometry.");return false;}
+    if(reference.geometryToken.isEmpty()||reference.geometryToken!=part->geometryToken){
+        setError(error,"The selected vertex reference is stale because the body geometry changed.");return false;
+    }
+    if(reference.vertexIndex<1){setError(error,"Vertex index must be a positive one-based index.");return false;}
+    try {
+        int index=0;
+        for(TopExp_Explorer explorer(part->shape,TopAbs_VERTEX);explorer.More();explorer.Next()){
+            if(++index!=reference.vertexIndex)continue;
+            const gp_Pnt point=BRep_Tool::Pnt(TopoDS::Vertex(explorer.Current()));
+            if(!std::isfinite(point.X())||!std::isfinite(point.Y())||!std::isfinite(point.Z())){
+                setError(error,"The selected vertex has non-finite coordinates.");return false;
+            }
+            *x=point.X();*y=point.Y();*z=point.Z();return true;
+        }
+        setError(error,"The selected vertex index is outside the body's topology.");
+    } catch(const Standard_Failure& failure){
+        setError(error,QStringLiteral("Vertex-coordinate measurement failed: %1").arg(failure.what()));
+    } catch(const std::exception& failure){
+        setError(error,QString("Vertex-coordinate measurement failed: %1").arg(failure.what()));
+    }
+    return false;
+}
+
+bool SceneDocument::measureVertexDistance(const VertexReference& first,const VertexReference& second,double* distance,QString* error) const {
+    if(!distance){setError(error,"Vertex-distance output is null.");return false;}
+    double ax=0,ay=0,az=0,bx=0,by=0,bz=0;
+    if(!measureVertexCoordinates(first,&ax,&ay,&az,error)||!measureVertexCoordinates(second,&bx,&by,&bz,error))return false;
+    const double result=std::hypot(bx-ax,by-ay,bz-az);
+    if(!std::isfinite(result)){setError(error,"The selected vertices have an invalid separation.");return false;}
+    *distance=result;
+    return true;
+}
+
 bool SceneDocument::filletEdge(const EdgeReference& reference, double radius, QString* error) {
     FilletCommand command;
     if (!prepareFillet(reference, radius, &command, error)) return false;
@@ -751,28 +1102,41 @@ bool SceneDocument::filletAllEdges(const QString& id,double radius,QString* erro
 }
 
 bool SceneDocument::prepareFillet(const EdgeReference& reference, double radius, FilletCommand* command, QString* error) const {
+    return prepareFillet(QVector<EdgeReference>{reference},radius,command,error);
+}
+
+bool SceneDocument::prepareFillet(const QVector<EdgeReference>& references,double radius,FilletCommand* command,QString* error) const {
     if (!command) { setError(error, "Fillet command output is unavailable."); return false; }
     if (!std::isfinite(radius) || radius < 0.00001 || radius > 1e6) {
         setError(error, "Fillet radius must be finite and between 0.00001 and 1,000,000 mm.");
         return false;
     }
+    if (references.isEmpty()) { setError(error,"Select at least one edge to fillet."); return false; }
+    const EdgeReference& reference=references.first();
     const Part* part = find(reference.partId);
     if (!part) { setError(error, "The selected body no longer exists."); return false; }
-    if (reference.geometryToken.isEmpty() || part->geometryToken != reference.geometryToken) {
-        setError(error, "The selected edge is stale because its body geometry has changed. Select the edge again.");
-        return false;
+    QVector<TopoDS_Edge> resolved;
+    QSet<int> uniqueIndices;
+    for (const EdgeReference& selected:references) {
+        if (selected.partId!=reference.partId) { setError(error,"Selected fillet edges must belong to one body."); return false; }
+        if (selected.geometryToken.isEmpty()||part->geometryToken!=selected.geometryToken) {
+            setError(error,"A selected edge is stale because its body geometry has changed. Select the edges again."); return false;
+        }
+        if (selected.edgeIndex<1||uniqueIndices.contains(selected.edgeIndex)) {
+            setError(error,"A selected edge reference is invalid or duplicated."); return false;
+        }
+        uniqueIndices.insert(selected.edgeIndex);
+        TopoDS_Edge edge;int index=0;
+        for (TopExp_Explorer explorer(part->shape,TopAbs_EDGE);explorer.More();explorer.Next())
+            if (++index==selected.edgeIndex) { edge=TopoDS::Edge(explorer.Current());break; }
+        if (edge.IsNull()) { setError(error,"A selected edge could not be resolved. Select the edges again."); return false; }
+        resolved.append(edge);
     }
-    if (reference.edgeIndex < 1) { setError(error, "The selected edge reference is invalid."); return false; }
-
-    TopoDS_Edge edge;
-    int index = 0;
-    for (TopExp_Explorer explorer(part->shape, TopAbs_EDGE); explorer.More(); explorer.Next()) {
-        if (++index == reference.edgeIndex) { edge = TopoDS::Edge(explorer.Current()); break; }
-    }
-    if (edge.IsNull()) { setError(error, "The selected edge could not be resolved. Select it again."); return false; }
     command->edge = reference;
+    command->edges=references;
     command->sourceShape = part->shape;
-    command->sourceEdge = edge;
+    command->sourceEdge = resolved.first();
+    command->sourceEdges=resolved;
     command->radius = radius;
     return true;
 }
@@ -780,12 +1144,13 @@ bool SceneDocument::prepareFillet(const EdgeReference& reference, double radius,
 FilletPreview SceneDocument::buildFilletPreview(const FilletCommand& command) {
     FilletPreview preview;
     try {
-        if (command.sourceShape.IsNull() || command.sourceEdge.IsNull()) {
+        if (command.sourceShape.IsNull() || (command.sourceEdges.isEmpty()&&command.sourceEdge.IsNull())) {
             preview.error = "The fillet preview command is incomplete.";
             return preview;
         }
         BRepFilletAPI_MakeFillet operation(command.sourceShape);
-        operation.Add(command.radius, command.sourceEdge);
+        if(command.sourceEdges.isEmpty()) operation.Add(command.radius,command.sourceEdge);
+        else for(const TopoDS_Edge& edge:command.sourceEdges) operation.Add(command.radius,edge);
         operation.Build();
         if (!operation.IsDone()) { preview.error = "The kernel could not build a fillet for this edge and radius."; return preview; }
         preview.shape = operation.Shape();
@@ -874,41 +1239,85 @@ bool SceneDocument::draftFace(const QString& id,int faceIndex,Axis pullAxis,doub
 }
 
 bool SceneDocument::prepareChamfer(const EdgeReference& reference, double distance, ChamferCommand* command, QString* error) const {
+    return prepareChamfer(QVector<EdgeReference>{reference},distance,command,error);
+}
+
+bool SceneDocument::prepareChamfer(const QVector<EdgeReference>& references,double distance,ChamferCommand* command,QString* error) const {
     if (!command) { setError(error, "Chamfer command output is unavailable."); return false; }
     if (!std::isfinite(distance) || distance < 0.00001 || distance > 1e6) {
         setError(error, "Chamfer distance must be finite and between 0.00001 and 1,000,000 mm.");
         return false;
     }
+    if(references.isEmpty()){setError(error,"Select at least one edge to chamfer.");return false;}
+    const EdgeReference& reference=references.first();
     const Part* part = find(reference.partId);
     if (!part) { setError(error, "The selected body no longer exists."); return false; }
-    if (reference.geometryToken.isEmpty() || part->geometryToken != reference.geometryToken) {
-        setError(error, "The selected edge is stale because its body geometry has changed. Select the edge again.");
-        return false;
+    QVector<TopoDS_Edge> resolved;QSet<int> uniqueIndices;
+    for(const EdgeReference& selected:references){
+        if(selected.partId!=reference.partId){setError(error,"Selected chamfer edges must belong to one body.");return false;}
+        if(selected.geometryToken.isEmpty()||part->geometryToken!=selected.geometryToken){
+            setError(error,"A selected edge is stale because its body geometry has changed. Select the edges again.");return false;
+        }
+        if(selected.edgeIndex<1||uniqueIndices.contains(selected.edgeIndex)){
+            setError(error,"A selected edge reference is invalid or duplicated.");return false;
+        }
+        uniqueIndices.insert(selected.edgeIndex);TopoDS_Edge edge;int index=0;
+        for(TopExp_Explorer explorer(part->shape,TopAbs_EDGE);explorer.More();explorer.Next())
+            if(++index==selected.edgeIndex){edge=TopoDS::Edge(explorer.Current());break;}
+        if(edge.IsNull()){setError(error,"A selected edge could not be resolved. Select the edges again.");return false;}
+        resolved.append(edge);
     }
-    if (reference.edgeIndex < 1) { setError(error, "The selected edge reference is invalid."); return false; }
-
-    TopoDS_Edge edge;
-    int index = 0;
-    for (TopExp_Explorer explorer(part->shape, TopAbs_EDGE); explorer.More(); explorer.Next()) {
-        if (++index == reference.edgeIndex) { edge = TopoDS::Edge(explorer.Current()); break; }
-    }
-    if (edge.IsNull()) { setError(error, "The selected edge could not be resolved. Select it again."); return false; }
     command->edge = reference;
+    command->edges=references;
     command->sourceShape = part->shape;
-    command->sourceEdge = edge;
+    command->sourceEdge = resolved.first();
+    command->sourceEdges=resolved;
     command->distance = distance;
+    return true;
+}
+
+bool SceneDocument::prepareAsymmetricChamfer(const EdgeReference& reference,double firstDistance,
+                                              double secondDistance,ChamferCommand* command,QString* error) const {
+    if (!command) { setError(error,"Chamfer command output is unavailable."); return false; }
+    if (!std::isfinite(firstDistance)||!std::isfinite(secondDistance)||firstDistance<0.00001||
+        secondDistance<0.00001||firstDistance>1e6||secondDistance>1e6) {
+        setError(error,"Both chamfer distances must be finite and between 0.00001 and 1,000,000 mm."); return false;
+    }
+    const Part* part=find(reference.partId);
+    if (!part) { setError(error,"The selected body no longer exists."); return false; }
+    if (reference.geometryToken.isEmpty()||part->geometryToken!=reference.geometryToken) {
+        setError(error,"The selected edge is stale because its body geometry has changed. Select the edge again."); return false;
+    }
+    if (reference.edgeIndex<1) { setError(error,"The selected edge reference is invalid."); return false; }
+    TopoDS_Edge edge;int index=0;
+    for (TopExp_Explorer explorer(part->shape,TopAbs_EDGE);explorer.More();explorer.Next())
+        if (++index==reference.edgeIndex) { edge=TopoDS::Edge(explorer.Current());break; }
+    if (edge.IsNull()) { setError(error,"The selected edge could not be resolved. Select it again."); return false; }
+    TopoDS_Face referenceFace;
+    for (TopExp_Explorer faces(part->shape,TopAbs_FACE);faces.More()&&referenceFace.IsNull();faces.Next()) {
+        const TopoDS_Face face=TopoDS::Face(faces.Current());
+        for (TopExp_Explorer faceEdges(face,TopAbs_EDGE);faceEdges.More();faceEdges.Next())
+            if (edge.IsSame(faceEdges.Current())) { referenceFace=face;break; }
+    }
+    if (referenceFace.IsNull()) { setError(error,"The selected edge does not belong to a planarizable body face."); return false; }
+    command->edge=reference;command->sourceShape=part->shape;command->sourceEdge=edge;
+    command->referenceFace=referenceFace;command->distance=firstDistance;command->secondDistance=secondDistance;
     return true;
 }
 
 ChamferPreview SceneDocument::buildChamferPreview(const ChamferCommand& command) {
     ChamferPreview preview;
     try {
-        if (command.sourceShape.IsNull() || command.sourceEdge.IsNull()) {
+        if (command.sourceShape.IsNull() || (command.sourceEdges.isEmpty()&&command.sourceEdge.IsNull())) {
             preview.error = "The chamfer preview command is incomplete.";
             return preview;
         }
         BRepFilletAPI_MakeChamfer operation(command.sourceShape);
-        operation.Add(command.distance, command.sourceEdge);
+        if (command.secondDistance>0.0) {
+            if (command.referenceFace.IsNull()) { preview.error="The asymmetric chamfer reference face is missing.";return preview; }
+            operation.Add(command.distance,command.secondDistance,command.sourceEdge,command.referenceFace);
+        } else if(command.sourceEdges.isEmpty()) operation.Add(command.distance,command.sourceEdge);
+        else for(const TopoDS_Edge& edge:command.sourceEdges) operation.Add(command.distance,edge);
         operation.Build();
         if (!operation.IsDone()) { preview.error = "The kernel could not build a chamfer for this edge and distance."; return preview; }
         preview.shape = operation.Shape();
@@ -979,6 +1388,7 @@ bool SceneDocument::prepareExtrusion(SketchProfile profile, double originX, doub
         setError(error, "The extrusion operation is not supported."); return false;
     }
     command->profile = profile;
+    command->sketchPlane = SketchPlane::XY;
     command->mode = mode;
     command->targetPartId = target ? target->id : QString();
     command->targetGeometryToken = target ? target->geometryToken : QString();
@@ -991,6 +1401,7 @@ bool SceneDocument::prepareExtrusion(SketchProfile profile, double originX, doub
     command->depth = depth;
     command->height = height;
     command->symmetric = false;
+    command->throughAll = false;
     command->taperDegrees = 0.0;
     command->cornerRadius = 0.0;
     command->sourceRevision = revision_;
@@ -1038,7 +1449,7 @@ bool SceneDocument::prepareRoundedRectangleExtrusion(double originX,double origi
 ExtrusionPreview SceneDocument::buildExtrusionPreview(const ExtrusionCommand& command) {
     ExtrusionPreview preview;
     try {
-        if (!finiteOffset(command.originX) || !finiteOffset(command.originY) ||
+        if (!finiteOffset(command.originX) || !finiteOffset(command.originY) || !finiteOffset(command.planeOffset) ||
             !finitePositive(command.widthOrDiameter) || !finitePositive(command.height) ||
             ((command.profile == SketchProfile::Rectangle || command.profile == SketchProfile::Ellipse ||
               command.profile == SketchProfile::Slot || command.profile == SketchProfile::RoundedRectangle ||
@@ -1052,9 +1463,35 @@ ExtrusionPreview SceneDocument::buildExtrusionPreview(const ExtrusionCommand& co
              (!std::isfinite(command.depth) || command.depth < 3 || command.depth > 64 ||
               std::floor(command.depth) != command.depth)) ||
             !std::isfinite(command.taperDegrees)||std::abs(command.taperDegrees)>45.0||
-            (command.symmetric&&command.taperDegrees!=0.0)) {
+            (command.symmetric&&command.taperDegrees!=0.0)||
+            (command.sketchPlane!=SketchPlane::XY&&command.sketchPlane!=SketchPlane::XZ&&command.sketchPlane!=SketchPlane::YZ)) {
             preview.error = "The sketch extrusion parameters are invalid.";
             return preview;
+        }
+
+        double extrusionHeight=command.height;
+        if(command.throughAll){
+            if(command.mode!=ExtrusionMode::Cut||command.symmetric||command.taperDegrees!=0.0||command.targetShape.IsNull()){
+                preview.error="Through-all extrusion requires an untapered, one-sided Cut with a valid target body.";
+                return preview;
+            }
+            Bnd_Box targetBounds;
+            BRepBndLib::AddOptimal(command.targetShape,targetBounds,false,false);
+            if(targetBounds.IsVoid()) { preview.error="The through-all target body has no measurable bounds.";return preview; }
+            double xmin=0,ymin=0,zmin=0,xmax=0,ymax=0,zmax=0;
+            targetBounds.Get(xmin,ymin,zmin,xmax,ymax,zmax);
+            double low=0,high=0,start=0,worldDirection=0;
+            if(command.sketchPlane==SketchPlane::XY){low=zmin;high=zmax;start=command.planeOffset;worldDirection=1;}
+            else if(command.sketchPlane==SketchPlane::XZ){low=ymin;high=ymax;start=-command.planeOffset;worldDirection=-1;}
+            else {low=xmin;high=xmax;start=command.planeOffset;worldDirection=1;}
+            worldDirection*=command.reverseDirection?-1.0:1.0;
+            const double distance=worldDirection>0?high-start:start-low;
+            const double clearance=std::max(1e-3,(high-low)*1e-6);
+            if(!std::isfinite(distance)||distance<=0||distance+clearance>1e6){
+                preview.error="The through-all direction does not cross the target body or exceeds the modeling limit.";
+                return preview;
+            }
+            extrusionHeight=distance+clearance;
         }
 
         TopoDS_Face profileFace;
@@ -1153,14 +1590,15 @@ ExtrusionPreview SceneDocument::buildExtrusionPreview(const ExtrusionCommand& co
                 bottomPolygon.Add(gp_Pnt(command.originX+command.widthOrDiameter,command.originY,0));
                 bottomPolygon.Add(gp_Pnt(command.originX+command.widthOrDiameter,command.originY+command.depth,0));
                 bottomPolygon.Add(gp_Pnt(command.originX,command.originY+command.depth,0));bottomPolygon.Close();
-                topPolygon.Add(gp_Pnt(command.originX+offsetX,command.originY+offsetY,command.height));
-                topPolygon.Add(gp_Pnt(command.originX+offsetX+topWidth,command.originY+offsetY,command.height));
-                topPolygon.Add(gp_Pnt(command.originX+offsetX+topWidth,command.originY+offsetY+topDepth,command.height));
-                topPolygon.Add(gp_Pnt(command.originX+offsetX,command.originY+offsetY+topDepth,command.height));topPolygon.Close();
+                const double endZ=command.reverseDirection?-command.height:command.height;
+                topPolygon.Add(gp_Pnt(command.originX+offsetX,command.originY+offsetY,endZ));
+                topPolygon.Add(gp_Pnt(command.originX+offsetX+topWidth,command.originY+offsetY,endZ));
+                topPolygon.Add(gp_Pnt(command.originX+offsetX+topWidth,command.originY+offsetY+topDepth,endZ));
+                topPolygon.Add(gp_Pnt(command.originX+offsetX,command.originY+offsetY+topDepth,endZ));topPolygon.Close();
                 bottom.Add(bottomPolygon.Wire());top.Add(topPolygon.Wire());
             }else{
                 const gp_Circ bottomCircle(gp_Ax2(gp_Pnt(command.originX,command.originY,0),gp_Dir(0,0,1)),command.widthOrDiameter/2.0);
-                const gp_Circ topCircle(gp_Ax2(gp_Pnt(command.originX,command.originY,command.height),gp_Dir(0,0,1)),command.widthOrDiameter/2.0-inset);
+                const gp_Circ topCircle(gp_Ax2(gp_Pnt(command.originX,command.originY,command.reverseDirection?-command.height:command.height),gp_Dir(0,0,1)),command.widthOrDiameter/2.0-inset);
                 bottom.Add(BRepBuilderAPI_MakeEdge(bottomCircle).Edge());top.Add(BRepBuilderAPI_MakeEdge(topCircle).Edge());
             }
             BRepOffsetAPI_ThruSections loft(true,true);
@@ -1168,14 +1606,28 @@ ExtrusionPreview SceneDocument::buildExtrusionPreview(const ExtrusionCommand& co
             if(!loft.IsDone()){preview.error="The kernel could not build the tapered extrusion.";return preview;}
             tool=loft.Shape();
         }else{
-            BRepPrimAPI_MakePrism prism(profileFace,gp_Vec(0,0,command.height),true);
+            const double direction=command.reverseDirection?-1.0:1.0;
+            BRepPrimAPI_MakePrism prism(profileFace,gp_Vec(0,0,direction*extrusionHeight),true);
             prism.Build();
             if(!prism.IsDone()){preview.error="The kernel could not extrude the sketch profile.";return preview;}
             tool=prism.Shape();
             if(command.symmetric){
-                gp_Trsf shift;shift.SetTranslation(gp_Vec(0,0,-command.height/2.0));
+                gp_Trsf shift;shift.SetTranslation(gp_Vec(0,0,-direction*command.height/2.0));
                 tool=BRepBuilderAPI_Transform(tool,shift,true).Shape();
             }
+        }
+        if(command.planeOffset!=0.0){
+            gp_Trsf offsetTransform;
+            offsetTransform.SetTranslation(gp_Vec(0,0,command.planeOffset));
+            tool=BRepBuilderAPI_Transform(tool,offsetTransform,true).Shape();
+        }
+        if(command.sketchPlane!=SketchPlane::XY){
+            gp_Trsf planeTransform;
+            if(command.sketchPlane==SketchPlane::XZ)
+                planeTransform.SetRotation(gp_Ax1(gp_Pnt(0,0,0),gp_Dir(1,0,0)),std::numbers::pi/2.0);
+            else
+                planeTransform.SetRotation(gp_Ax1(gp_Pnt(0,0,0),gp_Dir(1,1,1)),2.0*std::numbers::pi/3.0);
+            tool=BRepBuilderAPI_Transform(tool,planeTransform,true).Shape();
         }
         if (command.mode == ExtrusionMode::NewBody) {
             preview.shape = tool;
@@ -1546,6 +1998,66 @@ bool SceneDocument::rectangularPattern(const QString& id,Axis firstAxis,int firs
         checkpoint(); for(const Part& copy:copies) parts_.append(copy); return true;
     } catch(const Standard_Failure& e) { setError(error,QStringLiteral("CAD kernel error: %1").arg(e.what())); }
       catch(const std::exception& e) { setError(error,QString::fromUtf8(e.what())); }
+    return false;
+}
+
+bool SceneDocument::rectangularPatternAlongVectors(const QString& id,double firstX,double firstY,double firstZ,
+                                                    int firstCount,double firstSpacing,double secondX,double secondY,
+                                                    double secondZ,int secondCount,double secondSpacing,QString* error) {
+    if(firstCount<1||secondCount<1||firstCount>1000||secondCount>1000||firstCount>1000/secondCount){
+        setError(error,"Choose a two-direction pattern with 2 to 1,000 total instances.");return false;
+    }
+    const int total=firstCount*secondCount;
+    if(total<2||total>1000){setError(error,"Choose a pattern with 2 to 1,000 total instances.");return false;}
+    auto vectorValid=[](double x,double y,double z){
+        return std::isfinite(x)&&std::isfinite(y)&&std::isfinite(z)&&
+               std::max({std::abs(x),std::abs(y),std::abs(z)})<=1e6;
+    };
+    if(!vectorValid(firstX,firstY,firstZ)||!vectorValid(secondX,secondY,secondZ)){
+        setError(error,"Pattern direction components must be finite and within ±1,000,000.");return false;
+    }
+    const double firstMagnitude=std::hypot(firstX,firstY,firstZ);
+    const double secondMagnitude=std::hypot(secondX,secondY,secondZ);
+    if(!std::isfinite(firstMagnitude)||!std::isfinite(secondMagnitude)||firstMagnitude<=1e-12||secondMagnitude<=1e-12){
+        setError(error,"Both pattern direction vectors must be nonzero.");return false;
+    }
+    const gp_Vec firstDirection(firstX/firstMagnitude,firstY/firstMagnitude,firstZ/firstMagnitude);
+    const gp_Vec secondDirection(secondX/secondMagnitude,secondY/secondMagnitude,secondZ/secondMagnitude);
+    if(firstDirection.Crossed(secondDirection).Magnitude()<=1e-8){
+        setError(error,"Pattern direction vectors must not be parallel.");return false;
+    }
+    auto spacingValid=[](int count,double spacing){
+        return std::isfinite(spacing)&&std::abs(spacing)<=1e6&&
+               (count==1||(std::abs(spacing)>=1e-5&&std::abs(spacing)*(count-1)<=1e6));
+    };
+    if(!spacingValid(firstCount,firstSpacing)||!spacingValid(secondCount,secondSpacing)){
+        setError(error,"Pattern spacings and total offsets must be within 1,000,000 mm.");return false;
+    }
+    if(parts_.size()+total-1>kMaxObjects){setError(error,"Scene object limit reached.");return false;}
+    const Part* source=find(id);
+    if(!source){setError(error,"Object not found.");return false;}
+    const TopoDS_Shape sourceShape=source->shape;
+    const QString sourceName=source->name;
+    const bool visible=source->visible;
+    const QString color=source->color;
+    QVector<Part> copies;
+    QSet<QString> reservedNames;
+    try{
+        for(int i=0;i<firstCount;++i)for(int j=0;j<secondCount;++j){
+            if(i==0&&j==0)continue;
+            gp_Trsf transform;
+            transform.SetTranslation(firstDirection*(firstSpacing*i)+secondDirection*(secondSpacing*j));
+            const TopoDS_Shape result=BRepBuilderAPI_Transform(sourceShape,transform,true).Shape();
+            if(!validShape(result,error))return false;
+            const QString baseName=sourceName+QStringLiteral(" Vector Rect Pattern %1-%2").arg(i+1).arg(j+1);
+            QString name=uniqueName(baseName);int suffix=2;
+            while(reservedNames.contains(name.toCaseFolded()))name=uniqueName(baseName+QStringLiteral(" %1").arg(suffix++));
+            reservedNames.insert(name.toCaseFolded());
+            copies.append({generatedId(),name,result,visible,color});
+        }
+        checkpoint();for(const Part& copy:copies)parts_.append(copy);return true;
+    }catch(const Standard_Failure& e){setError(error,QStringLiteral("CAD kernel error: %1").arg(e.what()));}
+     catch(const std::exception& e){setError(error,QString::fromUtf8(e.what()));}
     return false;
 }
 
@@ -2195,6 +2707,70 @@ bool SceneDocument::circularCounterborePattern(const QString& id,double centerX,
     return true;
 }
 
+bool SceneDocument::linearCounterborePattern(const QString& id,double centerX,double centerY,double entryZ,double diameter,
+                                             double depth,bool throughAll,double headDiameter,double headDepth,
+                                             int instanceCount,double spacingX,double spacingY,
+                                             QString* error){
+    if(!finiteOffset(centerX)||!finiteOffset(centerY)||!finiteOffset(entryZ)||!finitePositive(diameter)||
+       !finitePositive(headDiameter)||headDiameter<=diameter||!finitePositive(headDepth)||
+       (!throughAll&&(!finitePositive(depth)||headDepth>depth))||instanceCount<2||instanceCount>100||
+       !std::isfinite(spacingX)||!std::isfinite(spacingY)||(std::abs(spacingX)<1e-5&&std::abs(spacingY)<1e-5)||
+       std::max(std::abs(spacingX),std::abs(spacingY))*(instanceCount-1)>1e6||
+       std::abs(centerX)+std::abs(spacingX)*(instanceCount-1)+headDiameter>1e6||
+       std::abs(centerY)+std::abs(spacingY)*(instanceCount-1)+headDiameter>1e6||std::abs(entryZ-depth)>1e6){
+        setError(error,"Counterbore pattern dimensions are invalid. Use 2 to 100 instances and nonzero spacing.");return false;
+    }
+    const Part* source=find(id);if(!source){setError(error,"Object not found.");return false;}
+    const QString token=source->geometryToken;TopoDS_Shape working=BRepBuilderAPI_Copy(source->shape).Shape();
+    for(int index=0;index<instanceCount;++index){
+        HoleCommand command;command.partId=id;command.geometryToken=token;command.sourceShape=working;
+        command.x=centerX+spacingX*index;command.y=centerY+spacingY*index;command.entryZ=entryZ;
+        command.diameter=diameter;command.depth=depth;command.throughAll=throughAll;
+        command.style=HoleStyle::Counterbore;command.headDiameter=headDiameter;command.headDepth=headDepth;
+        const HolePreview preview=buildHolePreview(command);
+        if(preview.shape.IsNull()){
+            setError(error,QStringLiteral("Counterbore %1 of %2 failed: %3").arg(index+1).arg(instanceCount).arg(preview.error));return false;
+        }
+        working=preview.shape;
+    }
+    if(!validShape(working,error))return false;
+    checkpoint();
+    for(Part& target:parts_)if(target.id==id){target.shape=working;target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);break;}
+    return true;
+}
+
+bool SceneDocument::linearCountersinkPattern(const QString& id,double centerX,double centerY,double entryZ,double diameter,
+                                             double depth,bool throughAll,double headDiameter,double includedAngleDegrees,
+                                             int instanceCount,double spacingX,double spacingY,QString* error){
+    if(!finiteOffset(centerX)||!finiteOffset(centerY)||!finiteOffset(entryZ)||!finitePositive(diameter)||
+       !finitePositive(headDiameter)||headDiameter<=diameter||(!throughAll&&!finitePositive(depth))||
+       !std::isfinite(includedAngleDegrees)||includedAngleDegrees<=1||includedAngleDegrees>=179||
+       instanceCount<2||instanceCount>100||!std::isfinite(spacingX)||!std::isfinite(spacingY)||
+       (std::abs(spacingX)<1e-5&&std::abs(spacingY)<1e-5)||
+       std::max(std::abs(spacingX),std::abs(spacingY))*(instanceCount-1)>1e6||
+       std::abs(centerX)+std::abs(spacingX)*(instanceCount-1)+headDiameter>1e6||
+       std::abs(centerY)+std::abs(spacingY)*(instanceCount-1)+headDiameter>1e6||std::abs(entryZ-depth)>1e6){
+        setError(error,"Countersink pattern dimensions are invalid. Use 2 to 100 instances and nonzero spacing.");return false;
+    }
+    const Part* source=find(id);if(!source){setError(error,"Object not found.");return false;}
+    const QString token=source->geometryToken;TopoDS_Shape working=BRepBuilderAPI_Copy(source->shape).Shape();
+    for(int index=0;index<instanceCount;++index){
+        HoleCommand command;command.partId=id;command.geometryToken=token;command.sourceShape=working;
+        command.x=centerX+spacingX*index;command.y=centerY+spacingY*index;command.entryZ=entryZ;
+        command.diameter=diameter;command.depth=depth;command.throughAll=throughAll;
+        command.style=HoleStyle::Countersink;command.headDiameter=headDiameter;command.sinkAngleDegrees=includedAngleDegrees;
+        const HolePreview preview=buildHolePreview(command);
+        if(preview.shape.IsNull()){
+            setError(error,QStringLiteral("Countersink %1 of %2 failed: %3").arg(index+1).arg(instanceCount).arg(preview.error));return false;
+        }
+        working=preview.shape;
+    }
+    if(!validShape(working,error))return false;
+    checkpoint();
+    for(Part& target:parts_)if(target.id==id){target.shape=working;target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);break;}
+    return true;
+}
+
 bool SceneDocument::linearKeyholeSlotPattern(const QString& id,double centerX,double centerY,double entryZ,double headDiameter,
                                               double throatWidth,double throatLength,double depth,double angleDegrees,
                                               int instanceCount,double spacingX,double spacingY,QString* error){
@@ -2273,6 +2849,44 @@ bool SceneDocument::circularPattern(const QString& id, Axis axis, double centerU
     return false;
 }
 
+bool SceneDocument::circularPatternAboutAxis(const QString& id,double originX,double originY,double originZ,
+                                             double axisX,double axisY,double axisZ,int instanceCount,
+                                             double totalAngleDegrees,QString* error) {
+    if(instanceCount<2||instanceCount>1000){setError(error,"Circular pattern count must be between 2 and 1,000.");return false;}
+    const double axisMagnitude=std::hypot(axisX,axisY,axisZ);
+    if(!finiteOffset(originX)||!finiteOffset(originY)||!finiteOffset(originZ)||
+       !std::isfinite(axisX)||!std::isfinite(axisY)||!std::isfinite(axisZ)||
+       !std::isfinite(axisMagnitude)||axisMagnitude<1e-8||axisMagnitude>1e6){
+        setError(error,"Enter a finite axis origin and a finite non-zero axis direction.");return false;
+    }
+    if(!std::isfinite(totalAngleDegrees)||totalAngleDegrees<1||totalAngleDegrees>360){
+        setError(error,"Circular pattern angle must be between 1 and 360 degrees.");return false;
+    }
+    if(parts_.size()+instanceCount-1>kMaxObjects){setError(error,"Scene object limit reached.");return false;}
+    const Part* source=find(id);if(!source){setError(error,"Object not found.");return false;}
+    const TopoDS_Shape sourceShape=source->shape;const QString sourceName=source->name;
+    const bool visible=source->visible;const QString color=source->color;
+    const gp_Ax1 axis(gp_Pnt(originX,originY,originZ),gp_Dir(axisX,axisY,axisZ));
+    const bool fullCircle=std::abs(totalAngleDegrees-360.0)<1e-9;
+    const double denominator=fullCircle?instanceCount:instanceCount-1;
+    QVector<Part> copies;QSet<QString> reservedNames;
+    try{
+        for(int index=1;index<instanceCount;++index){
+            gp_Trsf transform;
+            transform.SetRotation(axis,totalAngleDegrees*index/denominator*std::numbers::pi/180.0);
+            const TopoDS_Shape result=BRepBuilderAPI_Transform(sourceShape,transform,true).Shape();
+            if(!validShape(result,error))return false;
+            const QString baseName=sourceName+QStringLiteral(" Axis Pattern %1").arg(index+1);
+            QString name=uniqueName(baseName);int suffix=2;
+            while(reservedNames.contains(name.toCaseFolded()))name=uniqueName(baseName+QStringLiteral(" %1").arg(suffix++));
+            reservedNames.insert(name.toCaseFolded());copies.append({generatedId(),name,result,visible,color});
+        }
+        checkpoint();for(const Part& copy:copies)parts_.append(copy);return true;
+    }catch(const Standard_Failure& e){setError(error,QStringLiteral("CAD kernel error: %1").arg(e.what()));}
+     catch(const std::exception& e){setError(error,QString::fromUtf8(e.what()));}
+    return false;
+}
+
 bool SceneDocument::splitBody(const QString& id, Axis axis, double planeOffset, QString* error) {
     const Part* source=find(id);
     if (!source) { setError(error,"Object not found."); return false; }
@@ -2322,40 +2936,67 @@ bool SceneDocument::splitBody(const QString& id, Axis axis, double planeOffset, 
 
 bool SceneDocument::shellBody(const QString& id, Axis openingAxis, bool positiveSide,
                               double thickness, QString* error) {
+    return shellBodyWithOpenings(id,{{openingAxis,positiveSide}},thickness,error);
+}
+
+bool SceneDocument::shellBodyWithOpenings(const QString& id,const QVector<ShellOpeningFace>& requestedOpenings,
+                                          double thickness,QString* error) {
     const Part* source=find(id);
     if (!source) { setError(error,"Object not found."); return false; }
-    if ((openingAxis!=Axis::X && openingAxis!=Axis::Y && openingAxis!=Axis::Z) || !finitePositive(thickness)) {
-        setError(error,"Choose a valid opening direction and a positive shell thickness."); return false;
+    if (requestedOpenings.isEmpty() || requestedOpenings.size()>6 || !finitePositive(thickness)) {
+        setError(error,"Choose one to six unique planar opening faces and a positive shell thickness."); return false;
+    }
+    int requestedSideMask=0;
+    for(const ShellOpeningFace& item:requestedOpenings){
+        if(item.axis!=Axis::X&&item.axis!=Axis::Y&&item.axis!=Axis::Z){
+            setError(error,"Choose a valid opening direction.");return false;
+        }
+        const int side=static_cast<int>(item.axis)*2+(item.positiveSide?1:0);
+        const int sideBit=1<<side;
+        if(requestedSideMask&sideBit){setError(error,"An opening face may only be selected once.");return false;}
+        requestedSideMask|=sideBit;
     }
     Bnd_Box bounds;
     BRepBndLib::Add(source->shape,bounds);
     double xmin=0,ymin=0,zmin=0,xmax=0,ymax=0,zmax=0;
     bounds.Get(xmin,ymin,zmin,xmax,ymax,zmax);
-    const double target=openingAxis==Axis::X ? (positiveSide?xmax:xmin) :
-                        openingAxis==Axis::Y ? (positiveSide?ymax:ymin) : (positiveSide?zmax:zmin);
     const double scale=std::max({xmax-xmin,ymax-ymin,zmax-zmin,1.0});
-    TopoDS_Face opening;
-    double best=std::numeric_limits<double>::infinity();
-    for (TopExp_Explorer explorer(source->shape,TopAbs_FACE); explorer.More(); explorer.Next()) {
-        const TopoDS_Face face=TopoDS::Face(explorer.Current());
-        BRepAdaptor_Surface surface(face,true);
-        if (surface.GetType()!=GeomAbs_Plane) continue;
-        const gp_Dir normal=surface.Plane().Axis().Direction();
-        const gp_Dir requestedAxis=openingAxis==Axis::X?gp_Dir(1,0,0):openingAxis==Axis::Y?gp_Dir(0,1,0):gp_Dir(0,0,1);
-        if (std::abs(normal.Dot(requestedAxis))<1.0-1e-7) continue;
-        GProp_GProps properties;
-        BRepGProp::SurfaceProperties(face,properties);
-        const gp_Pnt center=properties.CentreOfMass();
-        const double coordinate=openingAxis==Axis::X?center.X():openingAxis==Axis::Y?center.Y():center.Z();
-        const double distance=std::abs(coordinate-target);
-        if (distance<best && distance<scale*1e-5+1e-7) { best=distance; opening=face; }
+    QVector<TopoDS_Face> openings;
+    for(int side=0;side<6;++side){
+        if(!(requestedSideMask&(1<<side)))continue;
+        const Axis axis=static_cast<Axis>(side/2);
+        const bool positive=(side%2)==1;
+        const double target=axis==Axis::X?(positive?xmax:xmin):
+                            axis==Axis::Y?(positive?ymax:ymin):(positive?zmax:zmin);
+        const gp_Dir requestedAxis=axis==Axis::X?gp_Dir(1,0,0):axis==Axis::Y?gp_Dir(0,1,0):gp_Dir(0,0,1);
+        TopoDS_Face opening;
+        double best=std::numeric_limits<double>::infinity();
+        for(TopExp_Explorer explorer(source->shape,TopAbs_FACE);explorer.More();explorer.Next()){
+            const TopoDS_Face face=TopoDS::Face(explorer.Current());
+            BRepAdaptor_Surface surface(face,true);
+            if(surface.GetType()!=GeomAbs_Plane)continue;
+            const gp_Dir normal=surface.Plane().Axis().Direction();
+            if(std::abs(normal.Dot(requestedAxis))<1.0-1e-7)continue;
+            GProp_GProps properties;
+            BRepGProp::SurfaceProperties(face,properties);
+            const gp_Pnt center=properties.CentreOfMass();
+            const double coordinate=axis==Axis::X?center.X():axis==Axis::Y?center.Y():center.Z();
+            const double distance=std::abs(coordinate-target);
+            if(distance<best&&distance<scale*1e-5+1e-7){best=distance;opening=face;}
+        }
+        if(opening.IsNull()){
+            setError(error,QStringLiteral("No planar face was found on the %1%2 side of the selected body.")
+                     .arg(positive?QStringLiteral("+"):QStringLiteral("-"))
+                     .arg(axis==Axis::X?QStringLiteral("X"):axis==Axis::Y?QStringLiteral("Y"):QStringLiteral("Z")));
+            return false;
+        }
+        openings.append(opening);
     }
-    if (opening.IsNull()) { setError(error,"No planar face was found on that side of the selected body."); return false; }
     try {
-        NCollection_List<TopoDS_Shape> openings;
-        openings.Append(opening);
+        NCollection_List<TopoDS_Shape> openingList;
+        for(const TopoDS_Face& opening:openings)openingList.Append(opening);
         BRepOffsetAPI_MakeThickSolid operation;
-        operation.MakeThickSolidByJoin(source->shape,openings,-thickness,1e-3,BRepOffset_Skin);
+        operation.MakeThickSolidByJoin(source->shape,openingList,-thickness,1e-3,BRepOffset_Skin);
         if (!operation.IsDone()) { setError(error,"OCCT could not shell the body. Try a smaller thickness or another opening face."); return false; }
         TopoDS_Shape result=operation.Shape();
         if (!validShape(result,error)) return false;

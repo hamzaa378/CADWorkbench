@@ -176,6 +176,53 @@ QVector<cad::EdgeReference> CadViewport::selectedEdgeReferences() const {
     }
     return references;
 }
+QVector<cad::FaceReference> CadViewport::selectedFaceReferences() const {
+    QVector<cad::FaceReference> references;
+    if (!initialized_ || selectionMode_ != SelectionMode::Face) return references;
+    for (context_->InitSelected(); context_->MoreSelected(); context_->NextSelected()) {
+        const Handle(AIS_InteractiveObject) selected = context_->SelectedInteractive();
+        QString partId;
+        for (auto it = presentations_.cbegin(); it != presentations_.cend(); ++it) {
+            if (it.value() == selected) { partId = it.key(); break; }
+        }
+        if (partId.isEmpty()) continue;
+        const auto part = std::find_if(parts_.cbegin(), parts_.cend(), [&](const cad::Part& candidate) {
+            return candidate.id == partId;
+        });
+        if (part == parts_.cend()) continue;
+        const TopoDS_Shape selectedShape = context_->SelectedShape();
+        if (selectedShape.IsNull() || selectedShape.ShapeType() != TopAbs_FACE) continue;
+        int faceIndex = 0;
+        for (TopExp_Explorer explorer(part->shape, TopAbs_FACE); explorer.More(); explorer.Next()) {
+            if (explorer.Current().IsSame(selectedShape)) {
+                references.append({partId, part->geometryToken, faceIndex + 1});
+                break;
+            }
+            ++faceIndex;
+        }
+    }
+    return references;
+}
+QVector<cad::VertexReference> CadViewport::selectedVertexReferences() const {
+    QVector<cad::VertexReference> references;
+    if (!initialized_ || selectionMode_ != SelectionMode::Vertex) return references;
+    for (context_->InitSelected(); context_->MoreSelected(); context_->NextSelected()) {
+        const Handle(AIS_InteractiveObject) selected=context_->SelectedInteractive();
+        QString partId;
+        for(auto it=presentations_.cbegin();it!=presentations_.cend();++it) if(it.value()==selected){partId=it.key();break;}
+        if(partId.isEmpty())continue;
+        const auto part=std::find_if(parts_.cbegin(),parts_.cend(),[&](const cad::Part& candidate){return candidate.id==partId;});
+        if(part==parts_.cend())continue;
+        const TopoDS_Shape selectedShape=context_->SelectedShape();
+        if(selectedShape.IsNull()||selectedShape.ShapeType()!=TopAbs_VERTEX)continue;
+        int index=0;
+        for(TopExp_Explorer explorer(part->shape,TopAbs_VERTEX);explorer.More();explorer.Next()){
+            if(explorer.Current().IsSame(selectedShape)){references.append({partId,part->geometryToken,index+1});break;}
+            ++index;
+        }
+    }
+    return references;
+}
 void CadViewport::selectIds(const QStringList& ids) {
     if (!initialized_) return;
     // An external browser selection chooses whole bodies. In face/edge mode it
@@ -254,7 +301,8 @@ void CadViewport::setSelectionMode(SelectionMode mode) {
 void CadViewport::applySelectionMode() {
     if (!initialized_) return;
     const int mode = selectionMode_ == SelectionMode::Body ? 0 :
-                     AIS_Shape::SelectionMode(selectionMode_ == SelectionMode::Face ? TopAbs_FACE : TopAbs_EDGE);
+                     AIS_Shape::SelectionMode(selectionMode_ == SelectionMode::Face ? TopAbs_FACE :
+                        selectionMode_ == SelectionMode::Edge ? TopAbs_EDGE : TopAbs_VERTEX);
     for (auto it = presentations_.cbegin(); it != presentations_.cend(); ++it) {
         context_->Deactivate(it.value());
         context_->Activate(it.value(), mode, false);

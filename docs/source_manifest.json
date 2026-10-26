@@ -3,14 +3,19 @@
   "algorithm": "SHA-256",
   "files": [
     {
+      "path": ".github/workflows/windows-ci.yml",
+      "sha256": "9f2ca58a0d4e1c4cae4152be68ffd40209a5313d60a42a3f652862dd16582385",
+      "size_bytes": 890
+    },
+    {
       "path": ".gitignore",
       "sha256": "2451f9908b4d4d6c9595c1ee23cf839143fb710f1c5eaa86b2432c3b8e0cfcfb",
       "size_bytes": 162
     },
     {
       "path": "CMakeLists.txt",
-      "sha256": "103454a3c2e88106481275831a28bc71bdfffd484f194aca27548627e7d1b883",
-      "size_bytes": 3681
+      "sha256": "a1547e715a1783a8b393423c84f65312605a5520731754a5018022175c1012be",
+      "size_bytes": 5366
     },
     {
       "path": "LICENSE",
@@ -19,23 +24,13 @@
     },
     {
       "path": "README.md",
-      "sha256": "71a339556ecdcda9b3f11ad044ddc63fa7f273b68cef435acf0b74f892f16f5e",
-      "size_bytes": 12727
-    },
-    {
-      "path": "vcpkg.json",
-      "sha256": "b3380ca80acbd65d20a26c4a3414882aaf93da609dafb8d72e4d3de6ae7aef6f",
-      "size_bytes": 201
-    },
-    {
-      "path": ".github/workflows/windows-ci.yml",
-      "sha256": "9f2ca58a0d4e1c4cae4152be68ffd40209a5313d60a42a3f652862dd16582385",
-      "size_bytes": 890
+      "sha256": "13c8b327ea2e8a270147900af7e66336b637b6b4dc2ac1a97a96d43c8945f4e3",
+      "size_bytes": 18025
     },
     {
       "path": "docs/CHANGELOG.md",
-      "sha256": "60040855c4fce847b18bae4fe3c47e59759086d1dfd1404965a340c791dc57d0",
-      "size_bytes": 15409
+      "sha256": "4a86b49dfd625d64f8313c5cb87a0b3d150a23240f80d958d1e93375a3d3bcee",
+      "size_bytes": 26821
     },
     {
       "path": "docs/CIRCULAR_COUNTERBORE_PATTERN.md",
@@ -58,14 +53,19 @@
       "size_bytes": 1623
     },
     {
+      "path": "docs/EDGE_LENGTH.md",
+      "sha256": "5b23e52613eb22df77ba06b1dbec5e5a01d30141c1fc05503dfa25a7ba799c20",
+      "size_bytes": 904
+    },
+    {
       "path": "docs/ELLIPTICAL_SWEEP.md",
       "sha256": "2f2359a913f8499fbc7011f5d25759e69d881d68aa26fbcdea821f20917b5e79",
       "size_bytes": 1247
     },
     {
-      "path": "docs/FEATURE_GAP_COMPARISON.md",
-      "sha256": "f29c4e37f5b38f0283ab6a849cb5d13f879a84d63fcc4fc77a2611f468efd375",
-      "size_bytes": 5651
+      "path": "docs/FACE_AREA.md",
+      "sha256": "c5dd6c5371ab0bfdc65deecc7400a1dbce083669895e2ee6699bcd7fe2fcde7c",
+      "size_bytes": 954
     },
     {
       "path": "docs/FEATURES_V1_2.md",
@@ -108,9 +108,19 @@
       "size_bytes": 3939
     },
     {
+      "path": "docs/FEATURE_GAP_COMPARISON.md",
+      "sha256": "f29c4e37f5b38f0283ab6a849cb5d13f879a84d63fcc4fc77a2611f468efd375",
+      "size_bytes": 5651
+    },
+    {
       "path": "docs/FORM_FEATURES.md",
       "sha256": "b2452c4a4ce63d9aec427900457add02b1e05987c8b946a435656ff059c7abd4",
       "size_bytes": 1533
+    },
+    {
+      "path": "docs/GEOMETRY_DIAGNOSTICS.md",
+      "sha256": "a9c9253cabcab7ad4420a5af78a43b7e8d2420f42b5b82bba2532e25f9e0c600",
+      "size_bytes": 1138
     },
     {
       "path": "docs/HELICAL_SWEEP.md",
@@ -118,9 +128,9 @@
       "size_bytes": 1657
     },
     {
-      "path": "docs/kernel_reference_v02.json",
-      "sha256": "4c63d473500580e3efe551b26a00021e2c2da197af90d67e1b0f5c513eada72d",
-      "size_bytes": 476
+      "path": "docs/INTERFERENCE_VOLUME.md",
+      "sha256": "964fbe38e3cad9c967757a549a9a84086fb8343bbf020ea643dd7d58da70ae9f",
+      "size_bytes": 2435
     },
     {
       "path": "docs/KEYHOLE_SLOT.md",
@@ -128,24 +138,44 @@
       "size_bytes": 1519
     },
     {
+      "path": "docs/LINEAR_COUNTERBORE_PATTERN.md",
+      "sha256": "c0ad93df2b6b740f2e54976fdc2e6f882841ba9c8a7996ad4690e17fd3260a97",
+      "size_bytes": 1379
+    },
+    {
+      "path": "docs/LINEAR_COUNTERSINK_PATTERN.md",
+      "sha256": "be3148dfdb75cc9a0d97c7b04d59121bd02453b12effa006d45243aa53436fa1",
+      "size_bytes": 1629
+    },
+    {
       "path": "docs/LINEAR_KEYHOLE_PATTERN.md",
       "sha256": "2fea231408f6c20405b5ba241260e68a33eb41d00fcc3a39d91610f0198edda8",
       "size_bytes": 1153
     },
     {
-      "path": "docs/local_verification.json",
-      "sha256": "b6f621fb80184353082cb824d709684ddbfd5528e53d3c85a64a273d5363da8a",
-      "size_bytes": 11224
-    },
-    {
-      "path": "docs/manual_qa_results.md",
-      "sha256": "126cff2e98fa1f0505adc77b60bb975b3e281d223a468d33c384085250cef83f",
-      "size_bytes": 8698
+      "path": "docs/MASS_FROM_DENSITY.md",
+      "sha256": "c7d1147173b515e5b3238bd9ac8e7187f46937406115804f9487ad8e5eb5924d",
+      "size_bytes": 1126
     },
     {
       "path": "docs/MODELING_TOOLS.md",
       "sha256": "53f740a6de08d9c47294142de18faf1eef80c6bad6bd0a770c10a4730ab9d871",
       "size_bytes": 6059
+    },
+    {
+      "path": "docs/MULTI_FACE_SHELL.md",
+      "sha256": "5b39d67641d053cf52a3c8006cea1b68fc9a1e48298c103e63a591cd8548b3cc",
+      "size_bytes": 1715
+    },
+    {
+      "path": "docs/ORIENTED_SKETCH_EXTRUSION.md",
+      "sha256": "e79f285637bd2ccaa9ede7dec3b3ef4830b04709de133942183151335e744ed0",
+      "size_bytes": 3040
+    },
+    {
+      "path": "docs/PLANAR_SECTION.md",
+      "sha256": "089c6e617b9c8fc09f382348a8c5c0c39dcf8dc329188f210a567f7a5c7ccd87",
+      "size_bytes": 1476
     },
     {
       "path": "docs/PROFILE_SWEEP.md",
@@ -154,13 +184,8 @@
     },
     {
       "path": "docs/QA_MATRIX.md",
-      "sha256": "79086784c6aeb0f72033692f6ad029d28d8609ebc2828841cbb5257ef679cbd5",
-      "size_bytes": 18372
-    },
-    {
-      "path": "docs/ROUNDED_SLOT_PATTERN.md",
-      "sha256": "2d65725338508d6825a73e2b8fa80c4e2364db830484e3f6f090aa30f9526ff1",
-      "size_bytes": 1480
+      "sha256": "e592be91c9e75c83fb8feef4c7db1369344df27977e5f1f7283a4d16d87d51cd",
+      "size_bytes": 35155
     },
     {
       "path": "docs/ROUNDED_SLOT.md",
@@ -168,14 +193,14 @@
       "size_bytes": 1472
     },
     {
+      "path": "docs/ROUNDED_SLOT_PATTERN.md",
+      "sha256": "2d65725338508d6825a73e2b8fa80c4e2364db830484e3f6f090aa30f9526ff1",
+      "size_bytes": 1480
+    },
+    {
       "path": "docs/STEP_IMPORT.md",
       "sha256": "2f59019a46f1b9e82ddcb146fd6dda1caa8f5fa65787b5d1232c28f98ecf53e5",
       "size_bytes": 1614
-    },
-    {
-      "path": "docs/T_SLOT_GROOVE.md",
-      "sha256": "9214cf30baa6b099ab8914531608bf626077a5e8241d2e375004b81a09c54970",
-      "size_bytes": 1446
     },
     {
       "path": "docs/TAPERED_HELIX.md",
@@ -188,6 +213,11 @@
       "size_bytes": 1557
     },
     {
+      "path": "docs/T_SLOT_GROOVE.md",
+      "sha256": "9214cf30baa6b099ab8914531608bf626077a5e8241d2e375004b81a09c54970",
+      "size_bytes": 1446
+    },
+    {
       "path": "docs/VARIABLE_PITCH_HELIX.md",
       "sha256": "f43763f65a5394f6d9a10828fbc6e6ea9f291176bea021a04284b819e720c516",
       "size_bytes": 1532
@@ -196,6 +226,36 @@
       "path": "docs/VECTOR_PATTERN.md",
       "sha256": "56c34a3a255b002cd7ba3356a9f4b7141ee72d684f1c8082710fb62c3e301a66",
       "size_bytes": 1211
+    },
+    {
+      "path": "docs/VECTOR_RECTANGULAR_PATTERN.md",
+      "sha256": "988de1ced778992d7b2ad9a288593c7997600f572971ffb965998a4230cf69ce",
+      "size_bytes": 1741
+    },
+    {
+      "path": "docs/VERTEX_COORDINATES.md",
+      "sha256": "08a672bfd55f3eebf12b90a06645fc1265191acc9a12f6c158cd6551b23ded68",
+      "size_bytes": 851
+    },
+    {
+      "path": "docs/VERTEX_DISTANCE.md",
+      "sha256": "41fecae3f4a229357d0ff83af4428033be6d28f2d98d9e111a554f3189d766ff",
+      "size_bytes": 1169
+    },
+    {
+      "path": "docs/kernel_reference_v02.json",
+      "sha256": "4c63d473500580e3efe551b26a00021e2c2da197af90d67e1b0f5c513eada72d",
+      "size_bytes": 476
+    },
+    {
+      "path": "docs/local_verification.json",
+      "sha256": "8d2890728e751bd117bf2b9562a6283444d2e9349c936361e4a618cc72358c5c",
+      "size_bytes": 6991
+    },
+    {
+      "path": "docs/manual_qa_results.md",
+      "sha256": "126cff2e98fa1f0505adc77b60bb975b3e281d223a468d33c384085250cef83f",
+      "size_bytes": 8698
     },
     {
       "path": "docs/windows_verification.example.json",
@@ -221,11 +281,6 @@
       "path": "scripts/source_audit.py",
       "sha256": "c602ff3d3b840d6ef0ee3e4271713b200bcf220598465ec734ef4016e53f6f29",
       "size_bytes": 13705
-    },
-    {
-      "path": "src/main.cpp",
-      "sha256": "188b3b4b6ec09ca3f8c59c67f6f9bea5f81d22d930842833fdbb22d4979799f7",
-      "size_bytes": 673
     },
     {
       "path": "src/core/AdvancedComponents.cpp",
@@ -269,13 +324,13 @@
     },
     {
       "path": "src/core/SceneDocument.cpp",
-      "sha256": "0958165074ee1ca208dcf16c0294112efcdd81165b5a5822ea4927664999a826",
-      "size_bytes": 158489
+      "sha256": "6b5c6d86e4cb9f77a3325dd94c8e8ad281a5b7cba133284f5aac1199f7624941",
+      "size_bytes": 201937
     },
     {
       "path": "src/core/SceneDocument.h",
-      "sha256": "290b4f8475a04731db207fa4d98a3b20ffd7c94d55fe5d35704ac259035f6042",
-      "size_bytes": 30212
+      "sha256": "a6c4c92b35bf78428fbe5aaa0bfd5bca9bd0813fb80523c9743c7c626aa55cb8",
+      "size_bytes": 36044
     },
     {
       "path": "src/core/SpecializedComponents.cpp",
@@ -283,34 +338,44 @@
       "size_bytes": 22800
     },
     {
+      "path": "src/main.cpp",
+      "sha256": "188b3b4b6ec09ca3f8c59c67f6f9bea5f81d22d930842833fdbb22d4979799f7",
+      "size_bytes": 673
+    },
+    {
       "path": "src/ui/CadViewport.cpp",
-      "sha256": "816837686437f2a459c05df6f0a5fe9d18fe02c624546e3cc395708316a54fce",
-      "size_bytes": 12735
+      "sha256": "cd6f6fffea8ec1bfb9d8ff71f9954ad31ccd112df16a5ff94b0207aa1349897c",
+      "size_bytes": 15358
     },
     {
       "path": "src/ui/CadViewport.h",
-      "sha256": "8c3bdc77a1eacd87af54ffeb92e8fb3495061e00496bd99f2c9af321c52f5c70",
-      "size_bytes": 2431
+      "sha256": "bde07f661b54fdca3a2946cea35a66ef84681d6e91c27e85653e686ec8313992",
+      "size_bytes": 2571
     },
     {
       "path": "src/ui/MainWindow.cpp",
-      "sha256": "44046472e0e9ab0a87aa05b6acc5aff2dbea6d61a69e1c279d76b2f24133f524",
-      "size_bytes": 114866
+      "sha256": "257b45775226710353d8f8542e6f8caa5dff1378e06cba78a853f74b49d847ef",
+      "size_bytes": 143947
     },
     {
       "path": "src/ui/MainWindow.h",
-      "sha256": "e57c6184415c8a071ed3d334a9bb46f17ec31e1532c4ee002cbc2ea480e642f7",
-      "size_bytes": 3429
+      "sha256": "1e22af0507d27a846ec7ccc99347e9ea0926c5e2fe0f9ef71662605cded98cc8",
+      "size_bytes": 4104
     },
     {
       "path": "tests/cadcore_tests.cpp",
-      "sha256": "9da608e6211fa9071ac474a6f156d6d18673be84f601005e9d68c927e30806fd",
-      "size_bytes": 114078
+      "sha256": "1115129e8ecacf7f04fb0abf8a32151130613d5bf71616ddf7fbafd997258347",
+      "size_bytes": 172182
     },
     {
       "path": "tests/kernel_contract_smoke.py",
       "sha256": "c7b3ffe132fb7ae575c902953c41825a2d5e4f088be6e0960376d07f1f564c67",
       "size_bytes": 2844
+    },
+    {
+      "path": "vcpkg.json",
+      "sha256": "b3380ca80acbd65d20a26c4a3414882aaf93da609dafb8d72e4d3de6ae7aef6f",
+      "size_bytes": 201
     }
   ]
 }

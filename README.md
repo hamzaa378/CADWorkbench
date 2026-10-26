@@ -5,7 +5,14 @@ CADWorkbench is a native Windows 3D CAD application built with C++20, Qt 6, and 
 ## Current capabilities
 
 - Create and inspect solids, profiles, and dimensioned component templates.
-- Edit models with Boolean operations, holes, patterns, mirror, shell, split, draft, fillet, chamfer, and transforms.
+- Extrude a sketch profile on the XY, XZ, or YZ plane with local U/V positioning, signed plane offset W, and reversible direction.
+- Edit models with Boolean operations, holes, patterns, mirror, single- or multi-face shell, split, draft, fillet, chamfer, and transforms.
+- Scale selected bodies independently along X, Y, and Z, or use uniform scaling.
+- Pattern selected bodies around an arbitrary 3D axis with an editable origin, direction, instance count, and sweep angle.
+- Inspect the minimum clearance between two selected bodies and read a closest-point pair.
+- Measure the shared solid volume and centroid of two selected bodies to inspect geometric interference.
+- Inspect selected face area, selected edge length, and picked vertex coordinates in the viewport.
+- Measure straight-line distance between two vertex references; the core test passes, while numeric live UI verification awaits a Ctrl-click capable desktop input path.
 - Navigate with mouse orbit, pan, zoom, and standard camera views.
 - Save and reopen native `.cadscene` documents; use undo and redo.
 - Import and export multi-body STEP files; export STL.
@@ -17,6 +24,7 @@ CADWorkbench is a native Windows 3D CAD application built with C++20, Qt 6, and 
 - Create tapered springs with a coil radius that changes along the spring.
 - Create elliptical prisms and hollow elliptical tubes, plus circular and rectangle-to-circle loft transitions.
 - Create hollow offset reducers from lofted inner and outer circular sections.
+- Loft two offset elliptical sections into a tapered or eccentric solid.
 - Pattern a body along any normalized 3D direction vector, with one-step undo/redo.
 - Cut repeated through-all or blind holes around a bolt circle in one validated, undoable operation.
 - Cut a rotated dovetail groove with separately controlled mouth and undercut widths, depth, and length.
@@ -26,9 +34,15 @@ CADWorkbench is a native Windows 3D CAD application built with C++20, Qt 6, and 
 - Cut a linear array of rounded slots in one validated, undoable operation.
 - Cut circular bolt-circle arrays of countersunk through or blind holes with an editable included angle.
 - Cut circular bolt-circle arrays of stepped counterbore holes.
+- Cut linear arrays of through or blind counterbores along an editable 2D spacing vector.
+- Cut linear arrays of through or blind countersinks with adjustable included angle.
 - Cut a linear array of keyhole slots with adjustable head and throat dimensions.
 
 Component templates are editable direct solids, not feature timelines or certified manufacturing designs. CADWorkbench does not claim feature parity with AutoCAD or Fusion 360. See [`docs/FEATURE_GAP_COMPARISON.md`](docs/FEATURE_GAP_COMPARISON.md) for the current scope and known gaps.
+
+## Selected geometry inspection
+
+Use **Faces (inspection)** to measure one picked face area, **Edges (inspection)** to measure one picked edge length, or **Vertices (inspection)** to read a picked vertex's X/Y/Z coordinates. The Inspect ribbon includes a distance-between-two-vertices command. These queries are read-only and reject stale references after body geometry edits. Windows regressions cover all four tools. Live UI verified face area, edge length, and vertex coordinates; the distance command and its insufficient-selection guard are visible and verified, while the numeric two-pick result remains pending because the current desktop input cannot Ctrl-click a second subshape; manually Ctrl-click two opposite corners of the test box to verify the expected 53.852 mm diagonal. See [`docs/FACE_AREA.md`](docs/FACE_AREA.md), [`docs/EDGE_LENGTH.md`](docs/EDGE_LENGTH.md), [`docs/VERTEX_COORDINATES.md`](docs/VERTEX_COORDINATES.md), and [`docs/VERTEX_DISTANCE.md`](docs/VERTEX_DISTANCE.md).
 
 ## STEP import
 
@@ -53,6 +67,24 @@ Sweep an elliptical profile along the generated 3D path, or make a conical sprin
 ## Five profile and transition tools
 
 Create elliptical prisms and tubes, circular lofts, rectangular-to-circular transitions, and hollow loft reducers. These direct solids are available from Create > Profiles. Windows build, 30 focused geometry/history assertions, full CTest, and live UI creation for all five tools are verified. See [`docs/FORM_FEATURES.md`](docs/FORM_FEATURES.md).
+
+## Elliptical loft
+
+Connect two elliptical sections with independently sized semi-axes, height, and top-section XY offset. Available from Create > Profiles in the menu and ribbon. The focused Windows geometry regression checks dimensions, bounds, volume, invalid-input rejection, and undo/redo. See [`docs/ELLIPTICAL_LOFT.md`](docs/ELLIPTICAL_LOFT.md) for current verification status.
+
+## Nonuniform scale
+
+Scale one selected body by independent X, Y, and Z multipliers about the world origin. The Modify menu and ribbon expose the operation; focused regression covers invalid factors, resulting bounds and volume, and undo/redo. See [`docs/NON_UNIFORM_SCALE.md`](docs/NON_UNIFORM_SCALE.md).
+
+## Custom-axis circular pattern
+
+Create rotated copies around an arbitrary 3D axis by entering an axis origin, direction, instance count, and total angle. The complete pattern is committed as one undoable operation. See [`docs/CUSTOM_AXIS_CIRCULAR_PATTERN.md`](docs/CUSTOM_AXIS_CIRCULAR_PATTERN.md) for validation and test status.
+
+## Oriented sketch extrusion
+
+Create supported sketch profiles on the XY, XZ, or YZ plane. Profile dimensions and origin use local U/V coordinates; signed W offsets the plane along its normal, and extrusion follows that normal or its reverse. Windows Release regression covers bounds and volume for every orientation, offset, and direction, plus topology, preview, commit, undo/redo, and invalid inputs. Live UI checks cover all three planes, including offset and reverse direction; XZ was also checked forward and reverse at W=0 and W=7 mm. See [`docs/ORIENTED_SKETCH_EXTRUSION.md`](docs/ORIENTED_SKETCH_EXTRUSION.md).
+
+Sketch cuts can now use a Through All end condition, computed against the target body's bounds in the chosen orientation. The focused Windows regression covers both directions on all three planes. A live UI Cut through a 40 × 30 × 20 mm body reduced volume by 500 mm³ and passed Undo. See [`docs/THROUGH_ALL_EXTRUSION_CUT.md`](docs/THROUGH_ALL_EXTRUSION_CUT.md).
 
 ## Vector linear pattern
 
@@ -89,6 +121,14 @@ Cut a bolt-circle array of countersunk holes with configurable drill and head di
 ## Circular counterbore pattern
 
 Cut a bolt-circle array of stepped holes with independent drill depth, counterbore diameter and counterbore depth, plus count and arc controls. Focused Windows regression passed 21 assertions. Live UI verification created four recesses and a separate three-hole blind partial-arc pattern, with undo/redo confirmed. See [`docs/CIRCULAR_COUNTERBORE_PATTERN.md`](docs/CIRCULAR_COUNTERBORE_PATTERN.md).
+
+## Linear counterbore pattern
+
+Cut 2–100 counterbored holes along a 2D spacing vector. Choose through-all or blind drill depth and independently set the counterbore diameter and depth. Windows Release focused regression passed 23 assertions, including rollback on a missed later cutter. Live UI showed three stepped seats on a 40 × 30 × 20 mm box and verified undo/redo. See [`docs/LINEAR_COUNTERBORE_PATTERN.md`](docs/LINEAR_COUNTERBORE_PATTERN.md).
+
+## Linear countersink pattern
+
+Cut 2–100 countersunk holes along a 2D spacing vector, with configurable drill/head diameter, included angle, and through or blind depth. Windows Release focused regression passed 23 assertions. Live UI showed three tapered seats on a 40 × 30 × 20 mm box and verified undo/redo. See [`docs/LINEAR_COUNTERSINK_PATTERN.md`](docs/LINEAR_COUNTERSINK_PATTERN.md).
 
 ## Linear keyhole-slot pattern
 
@@ -152,7 +192,7 @@ ctest --test-dir build -C Release --output-on-failure
 
 The app uses Open CASCADE for solid construction and validity checks. A passing build or core test suite does not by itself confirm every menu workflow or a clean-machine installation. See [`docs/QA_MATRIX.md`](docs/QA_MATRIX.md) and [`docs/manual_qa_results.md`](docs/manual_qa_results.md) for tested workflows and remaining release checks.
 
-Current Windows verification snapshot (2026-10-26): Release build succeeded and CTest passed 18/18. Focused results for the recent pattern updates are recorded per feature. The source audit passed 136 checks and found regression references for all 94 public `SceneDocument` operations. Live UI workflows are sampled and documented with measured geometry, undo, and redo evidence; every command dialog has not been individually exercised. The W01-W24 release checklist, clean-VM deployment, and approver sign-off remain outstanding. See [`docs/local_verification.json`](docs/local_verification.json) for the structured summary and [`docs/QA_MATRIX.md`](docs/QA_MATRIX.md) for detailed results.
+Current Windows verification snapshot (2026-10-26): the Windows x64 Release app and test targets built in `build_resume/Release`; full CTest passed 37/37; the source audit passed 136 checks and all 112 public `SceneDocument` operations have regression references. Live UI verified planar section contour, surface summaries, selected face area, selected edge length, and selected vertex coordinates. The vertex-distance core regression passed, and its Inspect command and insufficient-selection guard were verified; numeric two-vertex UI verification is pending because the desktop input path cannot Ctrl-click a second subshape. Earlier live XY, XZ, and YZ extrusion workflows, Through All Cut, multi-face Shell, and two-vector rectangular pattern were verified. The W01-W24 release checklist, clean-VM deployment, and approver sign-off remain outstanding. See [`docs/local_verification.json`](docs/local_verification.json) for the structured snapshot and [`docs/QA_MATRIX.md`](docs/QA_MATRIX.md) for feature details.
 
 ## Upload the source to GitHub
 

@@ -20,12 +20,14 @@ class QWheelEvent;
 class CadViewport final : public QWidget {
     Q_OBJECT
 public:
-    enum class SelectionMode { Body, Face, Edge };
+    enum class SelectionMode { Body, Face, Edge, Vertex };
     explicit CadViewport(QWidget* parent = nullptr);
     void updateScene(const QVector<cad::Part>& parts, bool fit = false);
     void selectIds(const QStringList& ids);
     QStringList selectedIds() const;
     QVector<cad::EdgeReference> selectedEdgeReferences() const;
+    QVector<cad::FaceReference> selectedFaceReferences() const;
+    QVector<cad::VertexReference> selectedVertexReferences() const;
     void showPreviewShape(const TopoDS_Shape& shape);
     void clearPreviewShape();
     void fitAll();

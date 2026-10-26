@@ -1,4 +1,261 @@
+## Distance between selected vertices (2026-10-26)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | Updated `CADWorkbench.exe` and `cadcore_tests.exe` built in `build_resume/Release` |
+| Focused core regression | PASS (12 assertions) | Box diagonal, null output, missing body, stale references |
+| Full CTest | PASS (37/37) | Includes `cadcore_vertex_distance` |
+| Source audit | PASS | 136 checks; all 112 public `SceneDocument` operations referenced by regression |
+| Live UI | PARTIAL | Inspect command visible; fewer-than-two selection rejected; numeric two-point pick pending because desktop input cannot Ctrl-click a second subshape |
+
+See `VERTEX_DISTANCE.md` for behavior and the live UI limit.
+
+## Selected vertex coordinates (2026-10-26)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | Updated `CADWorkbench.exe` and `cadcore_tests.exe` built in `build_resume/Release` |
+| Focused core regression | PASS (57 assertions) | Box vertex coordinates, bounds and corners; invalid/missing/stale references; null output |
+| Full CTest | PASS (37/37) | Includes `cadcore_vertex_coordinates` |
+| Source audit | PASS | 136 checks; all 112 public `SceneDocument` operations referenced by regression |
+| Live UI | PASS | Picked box corner reported X 0.000, Y 0.000, Z 20.000 mm |
+
+See `VERTEX_COORDINATES.md` for usage and reference lifetime.
+
+## Selected edge length (2026-10-26)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | Updated `CADWorkbench.exe` and `cadcore_tests.exe` built in `build_resume/Release` |
+| Focused core regression | PASS (38 assertions) | Edge lengths, invalid/missing/stale references, unchanged document state |
+| Full CTest | PASS (37/37) | Includes `cadcore_edge_length`, `cadcore_vertex_coordinates`, and `cadcore_vertex_distance` |
+| Source audit | PASS | 136 checks; all 112 public `SceneDocument` operations referenced by regression |
+| Live UI | PASS | Picked edge 5 on a 40 × 30 × 20 mm box; reported 20.000 mm, matching its Z extent |
+
+See `EDGE_LENGTH.md` for usage and reference lifetime.
+
+## Two-vector rectangular pattern (2026-10-26)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows Release build | PASS | Application and regression targets compiled |
+| Focused core regression | PASS (44 assertions) | Validation, positions, topology/volume, unique names, undo/redo, count edge case |
+| Full CTest | PASS (27/27) | Includes `cadcore_vector_rectangular_pattern` |
+| Source audit | PASS | 136 checks; all 102 public `SceneDocument` operations referenced by regression |
+| Live UI | PASS | Two vectors `(1,1,0)` and `(0,0,1)`, counts 2 × 3; browser showed six bodies; selected copy bounds and 24,000 mm³ volume matched expected translation |
+| Live Undo | PASS | Returned to the original one-body box |
+
+See `VECTOR_RECTANGULAR_PATTERN.md` for details.
+
+## Multi-face shell (2026-10-26)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows Release build | PASS | `CADWorkbench.exe` and `cadcore_tests.exe` built successfully |
+| Core regression | PASS | Empty and duplicate openings rejected without mutation; opposing Z faces shell to a valid solid; material removed; undo restores original |
+| Full CTest | PASS | Windows Release CTest passed 26/26 |
+| Source audit | PASS | 136 source checks; regression references for all 101 public `SceneDocument` operations |
+| Live UI shell | PASS | Opposing Z faces at 2 mm: 5,280 mm³; adjacent +X/+Z faces at 2 mm: 6,216 mm³; both results 10 faces/48 edges |
+| Live Undo | PASS | Both cases restored 24,000 mm³; 6 faces/24 edges |
+
+See `MULTI_FACE_SHELL.md` for details.
+
 # CADWorkbench v1.9 validation matrix
+
+## Selected face area (2026-10-26)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | `CADWorkbench.exe` and `cadcore_tests.exe` built in `build_resume/Release` |
+| Focused core regression | PASS (12 assertions) | Exact face area, invalid/missing/stale references, unchanged state, fresh reference after transform |
+| Full CTest | PASS (34/34) | Includes `cadcore_face_area` |
+| Source audit | PASS | 136 checks; all 109 public `SceneDocument` operations referenced by regression |
+| Live UI | PASS | Picked the top of a 40 × 30 × 20 mm box; reported 1,200.000 mm² |
+
+See `FACE_AREA.md` for usage and reference lifetime.
+
+## Surface type summary (2026-10-26)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | Updated `CADWorkbench.exe` and `cadcore_tests.exe` built in `build_resume/Release` |
+| Focused core regression | PASS (22 assertions) | Box, cylinder, sphere, cone, and torus classifications and area sums; invalid inputs; read-only behavior |
+| Full CTest | PASS (34/34) | Includes `cadcore_surface_summary` |
+| Source audit | PASS | 136 checks; all 109 public `SceneDocument` operations referenced by regression |
+| Live UI | PASS | Box: 6 planar faces / 5,200 mm²; cylinder: 2 caps / 628.319 mm² and 1 cylindrical side / 2,199.115 mm² |
+
+See `SURFACE_TYPE_SUMMARY.md` for scope.
+
+## Planar section contour measurement (2026-10-26)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | `CADWorkbench.exe` and `cadcore_tests.exe` linked in `build_resume/Release` |
+| Focused core regression | PASS (15 assertions) | X/Z section perimeter, nonintersecting plane, invalid inputs, unchanged history |
+| Full CTest | PASS (34/34) | Includes `cadcore_planar_section` |
+| Source audit | PASS | 136 checks; all 109 public `SceneDocument` operations referenced by regression |
+| Live UI | PASS | 40 × 30 × 20 mm box; Z-normal plane at 10 mm reported 4 edges and 140.000 mm perimeter |
+
+See `PLANAR_SECTION.md` for usage and scope.
+
+## Geometry health and topology (2026-10-26)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows Release build | PASS | Updated `CADWorkbench.exe` and `cadcore_tests.exe` linked in `build_resume/Release` |
+| Focused core regression | PASS (20 assertions) | Unique solid topology, volume, area, bounds, centroid; invalid IDs/null output rejected; history unchanged |
+| Full CTest | PASS (34/34) | Includes `cadcore_body_diagnostics` and density-based mass regression |
+| Live UI | PASS | 40 × 30 × 20 mm box reported a valid closed solid; 1 solid, 1 shell, 6 faces, 6 wires, 12 edges, 8 vertices; volume 24,000 mm³; area 5,200 mm²; center (20, 15, 10) mm |
+
+See `GEOMETRY_DIAGNOSTICS.md` for scope and limits.
+
+## Density-based mass properties (2026-10-26)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows Release build | PASS | Updated application and core-test targets linked in `build_resume/Release` |
+| Focused core regression | PASS (14 assertions) | Density conversion, exact box mass and centroid, invalid density/body/output rejected, no history mutation |
+| Full CTest | PASS (34/34) | Includes `cadcore_density_mass_properties` |
+| Source audit | PASS | 136 checks; all 109 public `SceneDocument` operations referenced by regression |
+| Live UI | PASS | 40 × 30 × 20 mm box at 7,850 kg/m³ reported 0.188400 kg, volume 24,000 mm³, center (20, 15, 10) mm |
+
+See `MASS_FROM_DENSITY.md` for units and calculation details.
+
+## Interference volume inspection (2026-10-26)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows Release build | PASS | Isolated Release output folder avoided the running app's file lock |
+| Qt runtime staging | PASS | Qt and Open CASCADE DLL/plugins staged; optional translations unavailable |
+| Focused core regression | PASS (27 assertions) | Exact overlap and centroid, contained volume and centroid, disjoint and face-touching pairs, invalid inputs, no history mutation |
+| Full CTest | PASS (34/34) | Includes interference and minimum-distance regressions |
+| Source audit | PASS | 136 checks; all 109 public `SceneDocument` operations referenced by regression |
+| Live UI | PASS | 840 mm³ overlap at centroid (7.5, 6, 7) mm; face contact returned zero |
+
+Deferred UI cases and expected numeric results are listed in `INTERFERENCE_VOLUME.md`.
+
+See `INTERFERENCE_VOLUME.md` for scope and limitations.
+
+## Minimum distance inspection (2026-10-26)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows Release build | PASS | Updated app and regression target built in isolated `build_resume` output |
+| Focused core regression | PASS (23 assertions) | Separated, intersecting, face-touching, and vertically separated bodies; closest-point consistency; invalid inputs; no history mutation |
+| Full CTest | PASS (34/34) | Includes `cadcore_minimum_distance` and interference regression |
+| Source audit | PASS | 136 checks; all 109 public `SceneDocument` operations referenced by regression |
+| Live UI | PASS | 5.0000 mm clearance; points (10, 0, 14) and (15, 0, 14) mm |
+
+See `MINIMUM_DISTANCE.md` for scope and limitations.
+
+## Through-all extrusion Cut (2026-10-26)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows Release build | PASS | `CADWorkbench.exe` and `cadcore_tests.exe` built successfully |
+| Focused core regression | PASS | `cadcore_tests --oriented-extrusion`: six plane/direction cases, exact volume change, valid topology, commit/undo, invalid New Body and away-direction rejection |
+| Live UI Cut | PASS | 5 × 5 mm XY profile through 40 × 30 × 20 mm box: volume 24,000 → 23,500 mm³; faces/edges 6/24 → 10/48 |
+| Live Undo | PASS | Restored 24,000 mm³ and 6 faces/24 edges |
+| Dialog behavior | PASS | Through All disables fixed extrusion height and is unavailable for New Body, symmetric, or tapered extrusion |
+| Full CTest | PASS | Windows Release CTest passed 26/26 after adding forward/reverse cases on all three planes |
+
+See `THROUGH_ALL_EXTRUSION_CUT.md` for usage and verification details.
+
+## Oriented sketch-plane extrusion (2026-10-26)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows Release core and UI build | PASS | `CADWorkbench.exe` and `cadcore_tests.exe` built successfully |
+| Focused geometry regression | PASS (249 assertions) | `cadcore_tests --oriented-extrusion`: XY/XZ/YZ at W=0 and W=7 mm in forward/reverse directions, symmetric extrusion at W=7 mm, reverse circle/taper geometry, through-all cuts in both directions on all planes, bounds/volume, topology, preview non-mutation, commit, undo/redo, invalid-plane/offset rejection |
+| CTest | PASS | `cadcore_oriented_extrusion`; full suite 26/26 |
+| Source audit | PASS | 136 checks; regression references for all 101 public `SceneDocument` operations |
+| Live UI workflow | PASS for XZ at W=0 and W=7, forward/reverse | Preview/apply; Properties reported 24,000 mm³; W=7 forward bounds X 5…45, Y −27…−7, Z −4…26 mm; reverse Y −7…13 mm |
+| Reverse Cut and Undo | PASS | Live 10 × 10 mm profile, 5 mm reverse cut: 24,000 → 23,600 mm³, 6/24 → 11/48 faces/edges; Undo restored the original volume and topology |
+| YZ plane offset and reverse | PASS | Live 10 × 8 × 12 mm extrusion at U=10, V=−5, W=3 mm: 960 mm³; bounds X −9…3, Y 10…20, Z −5…3 mm; 6 faces/24 edges |
+| XY plane offset and reverse | PASS | Live 8 × 6 × 4 mm extrusion at U=−3, V=7, W=−2 mm: 192 mm³; bounds X −3…5, Y 7…13, Z −6…−2 mm; 6 faces/24 edges |
+| Symmetric-mode control behavior | PASS | Checking Symmetric about sketch plane disables Reverse extrusion direction in the live dialog |
+
+See `ORIENTED_SKETCH_EXTRUSION.md` for controls and behavior.
+
+## Multi-edge fillet and chamfer (2026-10-26)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows Release core and UI build | PASS | `CADWorkbench.exe` and `cadcore_tests.exe` built successfully |
+| Focused geometry regression | PASS (31 assertions) | `cadcore_tests --multi-edge-blends`: validates two selected edges on one body, rejects empty/duplicate/mixed-body/stale/missing references, and checks valid geometry plus undo/redo for both tools |
+| CTest | PASS | `cadcore_multi_edge_blends`; full suite 25/25 |
+| Live UI workflow | Pending | Core preview, apply, undo, and redo pass; viewport Ctrl+click multi-edge selection remains to be verified live |
+
+Select edges with Ctrl+click in Select → Edges mode, then use Fillet selected edges or Chamfer selected edges. See `MULTI_EDGE_BLENDS.md`.
+
+## Asymmetric edge chamfer (2026-10-26)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows Release core and UI build | PASS | `CADWorkbench.exe` and `cadcore_tests.exe` built successfully |
+| Focused geometry regression | PASS (27 assertions) | `cadcore_tests --asymmetric-chamfer`: validation, asymmetric/symmetric geometry comparison, invalidation, and undo/redo |
+| CTest | PASS | `cadcore_asymmetric_chamfer`; full suite 25/25 |
+| Live UI workflow | PASS | Preview and apply shown; Properties reported volume 24,000 to 23,960 mm³, 7 faces, 30 edges; undo and redo visually restored each state |
+
+The reference side is selected deterministically from the edge's adjacent faces. See `ASYMMETRIC_CHAMFER.md` for behavior and limits.
+
+## Custom-axis circular pattern (2026-10-26)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows Release core and UI build | PASS | `CADWorkbench.exe` and `cadcore_tests.exe` built successfully |
+| Focused geometry regression | PASS (48 assertions) | `cadcore_tests --custom-axis-circular-pattern`: invalid-input rejection, full-circle geometry/bounds/volume, and undo/redo |
+| CTest | PASS | `cadcore_custom_axis_circular_pattern`; full suite 23/23 |
+| Source audit | PASS | 136 source checks; regression references found for all 99 public `SceneDocument` operations |
+| Live UI workflow | PASS | Modify menu command created four visible 40 × 30 × 20 mm boxes around the world Z axis; undo restored one body and redo restored four |
+
+See `CUSTOM_AXIS_CIRCULAR_PATTERN.md` for controls and scope.
+
+## Nonuniform scale (2026-10-26)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows Release core and UI build | PASS | `CADWorkbench.exe` and `cadcore_tests.exe` built successfully |
+| Focused geometry regression | PASS (23 assertions) | Invalid/missing factors, bounds and volume, identity no-op, undo/redo |
+| CTest | PASS | `cadcore_nonuniform_scale`; full suite 22/22 |
+| Live UI workflow | PASS | Modify menu command created scale X=2, Y=0.5, Z=3; volume 24,000 to 72,000 mm³; bounds 40×30×20 to 80×15×60 mm; undo/redo passed |
+
+See `NON_UNIFORM_SCALE.md` for control limits and operation behavior.
+
+## Elliptical loft (2026-10-26)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows Release core and UI build | PASS | `CADWorkbench.exe` and `cadcore_tests.exe` built successfully |
+| Focused geometry regression | PASS (19 assertions) | Invalid dimensions, topology, expected bounds and analytical volume, undo/redo |
+| CTest | PASS | `cadcore_elliptical_loft`; full suite 21/21 |
+| Live UI workflow | PASS | Menu and ribbon commands found; default offset loft created; volume 17,886.131 mm³; bounds X −20…20, Y −12…12, Z 0…35 mm; 3 faces / 6 edges; undo/redo passed |
+
+See `ELLIPTICAL_LOFT.md` for control definitions and limits.
+
+## Linear countersink pattern (2026-10-26)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows Release core and UI build | PASS | `CADWorkbench.exe` and `cadcore_tests.exe` built successfully |
+| Focused geometry regression | PASS (23 assertions) | `cadcore_tests --linear-countersink-pattern`: invalid inputs, through/blind cuts, valid shape, volume, undo/redo, and later-cutter rollback |
+| CTest | PASS | `cadcore_linear_countersink_pattern`; full suite 20/20 |
+| Live UI workflow | PASS | Three countersinks visible on 40 × 30 × 20 mm box; volume 24,000 to 23,315.987 mm³; topology 6/24 to 12/54; undo/redo passed |
+
+Additional live blind-depth variant passed: three countersinks at 8 mm depth changed volume to 23,682.423 mm³ and topology to 15 faces / 54 edges; undo/redo passed.
+
+See `LINEAR_COUNTERSINK_PATTERN.md` for dimensions and scope.
+
+## Linear counterbore pattern (2026-10-26)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows Release core and UI build | PASS | `CADWorkbench.exe` and `cadcore_tests.exe` built successfully |
+| Focused geometry regression | PASS (23 assertions) | `cadcore_tests --linear-counterbore-pattern`: invalid inputs, through/blind cuts, valid shape, volume, undo/redo, and later-cutter rollback |
+| CTest | PASS | `cadcore_linear_counterbore_pattern`; full suite 20/20 |
+| Live UI workflow | PASS | Three counterbores visible on 40 × 30 × 20 mm box; volume 24,000 to 23,111.418 mm³; topology 6/24 to 15/60; undo/redo passed |
+
+See `LINEAR_COUNTERBORE_PATTERN.md` for dimensions and scope.
 
 ## Linear keyhole-slot pattern (2026-10-26)
 
@@ -102,10 +359,10 @@ Latest circular-hole-pattern update and live UI coverage are recorded below. Old
 | Check | Result | Evidence |
 |---|---|---|
 | Windows x64 Release build | PASS | `CADWorkbench` and `cadcore_tests` targets built |
-| CTest | PASS (18/18) | Modeling tools, Wing rib, sweeps, form features, vector pattern, circular hole patterns, dovetail groove, T-slot groove, rounded slot, keyhole slot, rounded-slot pattern, countersink/counterbore patterns, keyhole-slot pattern, geometry/persistence |
+| CTest | PASS (20/20) | Modeling tools, Wing rib, sweeps, form features, vector pattern, circular hole patterns, dovetail groove, T-slot groove, rounded slot, keyhole slot, rounded-slot pattern, circular and linear countersink/counterbore patterns, keyhole-slot pattern, geometry/persistence |
 | Direct core regression | PASS (4,155 default-suite assertions; circular-hole focused test adds 15) | `cadcore_tests` and `cadcore_tests --circular-hole-pattern` |
 | Component template defaults | PASS (405/405) | Invalid dimensions, topology, positive volume, insertion, and undo per template |
-| Public core API coverage | PASS (94/94) | Every public `SceneDocument` operation appears in the regression suite |
+| Public core API coverage | PASS (96/96) | Every public `SceneDocument` operation appears in the regression suite |
 | Source audit | PASS (136 checks) | `scripts/source_audit.py` |
 
 Component catalog breakdown: 30 Mechanical, 30 Advanced, 35 Specialized, 70 Industrial, 70 Extended, 70 Precision & Utility, and 100 Production templates.

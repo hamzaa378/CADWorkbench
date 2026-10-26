@@ -31,6 +31,7 @@
 #include <QLineEdit>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QInputDialog>
 #include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSpinBox>
@@ -196,6 +197,7 @@ void MainWindow::buildUi() {
     auto* circularLoftAction=create->addAction("Circular loft...",this,&MainWindow::makeCircularLoft);
     auto* rectToCircleLoftAction=create->addAction("Rectangular to circular transition...",this,&MainWindow::makeRectangularToCircularLoft);
     auto* hollowReducerAction=create->addAction("Hollow loft reducer...",this,&MainWindow::makeHollowLoftReducer);
+    auto* ellipticalLoftAction=create->addAction("Elliptical loft...",this,&MainWindow::makeEllipticalLoft);
     auto* extrusionAction = create->addAction("Sketch and extrude profile...",this,&MainWindow::sketchExtrusion);
     auto* loftAction = create->addAction("Loft between rectangles...",this,&MainWindow::loftRectangles);
     auto* revolveAction = create->addAction("Revolve rectangle profile...",this,&MainWindow::revolveRectangleProfile);
@@ -280,6 +282,7 @@ void MainWindow::buildUi() {
     auto* moveAction = modify->addAction("Move (offset)...",this,&MainWindow::moveObject);
     auto* rotateAction = modify->addAction("Rotate (world origin)...",this,&MainWindow::rotateObject);
     auto* scaleAction = modify->addAction("Uniform scale (world origin)...",this,&MainWindow::scaleObject);
+    auto* nonUniformScaleAction = modify->addAction("Nonuniform scale (world origin)...",this,&MainWindow::scaleNonUniformSelectedBody);
     auto* copyAction = modify->addAction("Duplicate with offset...",this,&MainWindow::duplicateObject,QKeySequence("Ctrl+D"));
     modify->addSeparator();
     auto* fuseAction = modify->addAction("Union two bodies",this,[this]{runBoolean(cad::BooleanOp::Fuse);});
@@ -291,12 +294,16 @@ void MainWindow::buildUi() {
     auto* patternAction = modify->addAction("Linear pattern selected body...",this,&MainWindow::linearPatternSelectedBody);
     auto* vectorPatternAction = modify->addAction("Linear pattern along vector...",this,&MainWindow::linearPatternAlongVectorSelectedBody);
     auto* rectangularPatternAction = modify->addAction("Rectangular pattern selected body...",this,&MainWindow::rectangularPatternSelectedBody);
+    auto* vectorRectangularPatternAction = modify->addAction("Rectangular pattern along vectors...",this,&MainWindow::rectangularPatternAlongVectorsSelectedBody);
     auto* circularPatternAction = modify->addAction("Circular pattern selected body...",this,&MainWindow::circularPatternSelectedBody);
+    auto* axisPatternAction = modify->addAction("Circular pattern about custom axis...",this,&MainWindow::circularPatternAboutAxisSelectedBody);
     auto* holeAction = modify->addAction("Hole selected body...",this,&MainWindow::holeSelectedBody);
     auto* holeGridAction = modify->addAction("Hole grid on selected body...",this,&MainWindow::holeGridSelectedBody);
     auto* circularHolePatternAction = modify->addAction("Circular hole pattern...",this,&MainWindow::circularHolePatternSelectedBody);
     auto* circularCountersinkPatternAction = modify->addAction("Circular countersink pattern...",this,&MainWindow::circularCountersinkPatternSelectedBody);
     auto* circularCounterborePatternAction = modify->addAction("Circular counterbore pattern...",this,&MainWindow::circularCounterborePatternSelectedBody);
+    auto* linearCounterborePatternAction = modify->addAction("Linear counterbore pattern...",this,&MainWindow::linearCounterborePatternSelectedBody);
+    auto* linearCountersinkPatternAction = modify->addAction("Linear countersink pattern...",this,&MainWindow::linearCountersinkPatternSelectedBody);
     auto* linearKeyholePatternAction = modify->addAction("Linear keyhole-slot pattern...",this,&MainWindow::linearKeyholeSlotPatternSelectedBody);
     auto* dovetailGrooveAction = modify->addAction("Dovetail groove...",this,&MainWindow::dovetailGrooveSelectedBody);
     auto* tSlotGrooveAction = modify->addAction("T-slot groove...",this,&MainWindow::tSlotGrooveSelectedBody);
@@ -307,8 +314,9 @@ void MainWindow::buildUi() {
     auto* shellAction = modify->addAction("Shell selected body...",this,&MainWindow::shellSelectedBody);
     auto* draftAction = modify->addAction("Draft planar face...",this,&MainWindow::draftSelectedFace);
     modify->addSeparator();
-    auto* filletAction = modify->addAction("Fillet selected edge...",this,&MainWindow::filletSelectedEdge);
-    auto* chamferAction = modify->addAction("Chamfer selected edge...",this,&MainWindow::chamferSelectedEdge);
+    auto* filletAction = modify->addAction("Fillet selected edges...",this,&MainWindow::filletSelectedEdge);
+    auto* chamferAction = modify->addAction("Chamfer selected edges...",this,&MainWindow::chamferSelectedEdge);
+    auto* asymmetricChamferAction = modify->addAction("Asymmetric chamfer selected edge...",this,&MainWindow::asymmetricChamferSelectedEdge);
     auto* filletAllAction = modify->addAction("Fillet all body edges...",this,&MainWindow::filletAllBodyEdges);
     auto* chamferAllAction = modify->addAction("Chamfer all body edges...",this,&MainWindow::chamferAllBodyEdges);
 
@@ -328,6 +336,15 @@ void MainWindow::buildUi() {
 
     auto* inspect = menuBar()->addMenu("&Inspect");
     auto* massPropertiesAction = inspect->addAction("Mass properties / measure body...",this,&MainWindow::showMassProperties);
+    auto* clearanceAction = inspect->addAction("Minimum distance between bodies...",this,&MainWindow::measureSelectedBodyClearance);
+    auto* interferenceAction = inspect->addAction("Interference volume between bodies...",this,&MainWindow::measureSelectedBodyInterference);
+    auto* diagnosticsAction = inspect->addAction("Geometry health and topology...",this,&MainWindow::diagnoseSelectedBody);
+    auto* sectionAction = inspect->addAction("Planar section contour...",this,&MainWindow::measureSelectedBodySection);
+    auto* surfaceSummaryAction = inspect->addAction("Surface type summary...",this,&MainWindow::summarizeSelectedBodySurfaces);
+    auto* faceAreaAction = inspect->addAction("Measure selected face area...",this,&MainWindow::measureSelectedFaceArea);
+    auto* edgeLengthAction = inspect->addAction("Measure selected edge length...",this,&MainWindow::measureSelectedEdgeLength);
+    auto* vertexCoordinatesAction = inspect->addAction("Measure selected vertex coordinates...",this,&MainWindow::measureSelectedVertexCoordinates);
+    auto* vertexDistanceAction = inspect->addAction("Measure distance between vertices...",this,&MainWindow::measureSelectedVertexDistance);
 
     auto* select = menuBar()->addMenu("&Select");
     auto* group = new QActionGroup(this);
@@ -343,6 +360,7 @@ void MainWindow::buildUi() {
     bodyAction_->setChecked(true);
     auto* faceAction = addMode("Faces (inspection)",CadViewport::SelectionMode::Face);
     auto* edgeAction = addMode("Edges (inspection)",CadViewport::SelectionMode::Edge);
+    auto* vertexAction = addMode("Vertices (inspection)",CadViewport::SelectionMode::Vertex);
 
     // Tabbed CAD ribbon reuses the same QActions as menus so every command behaves identically.
     auto* ribbon = new QTabWidget(this);
@@ -403,7 +421,7 @@ void MainWindow::buildUi() {
     });
     addRibbonTab("Create",{
         {"Primitives",{boxAction,cylAction,sphereAction,coneAction,torusAction,prismAction,capsuleAction,ellipsoidAction,tubeAction,wedgeAction,frustumAction,nutAction,orientedCylinderAction,orientedConeAction,torusSegmentAction}},
-        {"Profiles",{extrusionAction,loftAction,revolveAction,axisRevolveAction,sweepCircleAction,sweepRectangleAction,sweepEllipseAction,helicalSweepAction,variablePitchHelixAction,taperedHelixAction,ellipticalPrismAction,ellipticalTubeAction,circularLoftAction,rectToCircleLoftAction,hollowReducerAction}},
+        {"Profiles",{extrusionAction,loftAction,revolveAction,axisRevolveAction,sweepCircleAction,sweepRectangleAction,sweepEllipseAction,helicalSweepAction,variablePitchHelixAction,taperedHelixAction,ellipticalPrismAction,ellipticalTubeAction,circularLoftAction,rectToCircleLoftAction,hollowReducerAction,ellipticalLoftAction}},
         {"Mechanical",mechanicalActions},
         {"Advanced",advancedActions}
         ,{"Specialized",specializedActions},
@@ -414,15 +432,15 @@ void MainWindow::buildUi() {
         {"Modeling Tools",modelingToolActions}
     });
     addRibbonTab("Modify",{
-        {"Transform",{moveAction,rotateAction,axisRotateAction,scaleAction,copyAction,mirrorAction,planeMirrorAction}},
+        {"Transform",{moveAction,rotateAction,axisRotateAction,scaleAction,nonUniformScaleAction,copyAction,mirrorAction,planeMirrorAction}},
         {"Combine",{fuseAction,cutAction,commonAction}},
-        {"Pattern",{patternAction,vectorPatternAction,rectangularPatternAction,circularPatternAction}},
-        {"Features",{holeAction,holeGridAction,circularHolePatternAction,circularCountersinkPatternAction,circularCounterborePatternAction,dovetailGrooveAction,tSlotGrooveAction,roundedSlotAction,keyholeSlotAction,roundedSlotPatternAction,linearKeyholePatternAction,splitAction,shellAction,draftAction,filletAction,chamferAction,filletAllAction,chamferAllAction}},
+        {"Pattern",{patternAction,vectorPatternAction,rectangularPatternAction,vectorRectangularPatternAction,circularPatternAction,axisPatternAction}},
+        {"Features",{holeAction,holeGridAction,circularHolePatternAction,circularCountersinkPatternAction,circularCounterborePatternAction,linearCountersinkPatternAction,linearCounterborePatternAction,dovetailGrooveAction,tSlotGrooveAction,roundedSlotAction,keyholeSlotAction,roundedSlotPatternAction,linearKeyholePatternAction,splitAction,shellAction,draftAction,filletAction,chamferAction,asymmetricChamferAction,filletAllAction,chamferAllAction}},
         {"Manage",{renameAction,colorAction,deleteAction}}
     });
     addRibbonTab("Inspect",{
-        {"Measure",{massPropertiesAction}},
-        {"Selection",{bodyAction_,faceAction,edgeAction}}
+        {"Measure",{massPropertiesAction,clearanceAction,interferenceAction,diagnosticsAction,sectionAction,surfaceSummaryAction,faceAreaAction,edgeLengthAction,vertexCoordinatesAction,vertexDistanceAction}},
+        {"Selection",{bodyAction_,faceAction,edgeAction,vertexAction}}
     });
     addRibbonTab("View",{
         {"Camera",{fitAction,fitSelectionAction,isoAction,topAction,frontAction,rightAction}},
@@ -496,6 +514,13 @@ void MainWindow::showMassProperties() {
     if (ids.size()!=1) { reportError("Measure body","Select exactly one body."); return; }
     const cad::Part* part=document_.find(ids.first());
     if (!part) return;
+    bool accepted=false;
+    const double density=QInputDialog::getDouble(this,"Mass properties","Material density (kg/m^3)",7850.0,0.00001,1000000.0,3,&accepted);
+    if(!accepted)return;
+    cad::DensityMassProperties massProperties;QString error;
+    if(!document_.measureMassFromDensity(part->id,density,&massProperties,&error)){
+        reportError("Mass properties",error);return;
+    }
     GProp_GProps volumeProperties,areaProperties;
     BRepGProp::VolumeProperties(part->shape,volumeProperties);
     BRepGProp::SurfaceProperties(part->shape,areaProperties);
@@ -503,16 +528,174 @@ void MainWindow::showMassProperties() {
     BRepBndLib::AddOptimal(part->shape,box,false,false);
     double xmin=0,ymin=0,zmin=0,xmax=0,ymax=0,zmax=0;
     if (!box.IsVoid()) box.Get(xmin,ymin,zmin,xmax,ymax,zmax);
-    const gp_Pnt center=volumeProperties.CentreOfMass();
     const QString report=QString(
         "%1\n\nBounding size\nX: %2 mm\nY: %3 mm\nZ: %4 mm\n\n"
-        "Volume: %5 mm^3\nSurface area: %6 mm^2\n"
-        "Center of mass\nX: %7 mm\nY: %8 mm\nZ: %9 mm")
+        "Volume: %5 mm^3\nSurface area: %6 mm^2\nDensity: %7 kg/m^3\nMass: %8 kg\n"
+        "Center of mass\nX: %9 mm\nY: %10 mm\nZ: %11 mm")
         .arg(part->name)
         .arg(xmax-xmin,0,'f',3).arg(ymax-ymin,0,'f',3).arg(zmax-zmin,0,'f',3)
         .arg(volumeProperties.Mass(),0,'f',3).arg(areaProperties.Mass(),0,'f',3)
-        .arg(center.X(),0,'f',3).arg(center.Y(),0,'f',3).arg(center.Z(),0,'f',3);
+        .arg(massProperties.densityKgPerM3,0,'f',3).arg(massProperties.massKg,0,'f',6)
+        .arg(massProperties.centerX,0,'f',3).arg(massProperties.centerY,0,'f',3).arg(massProperties.centerZ,0,'f',3);
     QMessageBox::information(this,"Mass properties",report);
+}
+
+void MainWindow::diagnoseSelectedBody() {
+    if(!requireBodyMode("Geometry diagnostics"))return;
+    const QStringList ids=selectedIds();
+    if(ids.size()!=1){reportError("Geometry diagnostics","Select exactly one body in the model browser.");return;}
+    cad::BodyDiagnostics result;QString error;
+    if(!document_.diagnoseBody(ids.first(),&result,&error)){
+        reportError("Geometry diagnostics",error);return;
+    }
+    const QString report=QString(
+        "%1\n\nGeometry: %2\n\nTopology\nSolids: %3\nShells: %4\nFaces: %5\nWires: %6\nEdges: %7\nVertices: %8\n\n"
+        "Volume: %9 mm^3\nSurface area: %10 mm^2\nBounds: X %11 to %12, Y %13 to %14, Z %15 to %16 mm\n"
+        "Center of mass: (%17, %18, %19) mm")
+        .arg(document_.find(ids.first())->name)
+        .arg(result.valid?"Valid closed solid":"Invalid or non-solid geometry")
+        .arg(result.solids).arg(result.shells).arg(result.faces).arg(result.wires).arg(result.edges).arg(result.vertices)
+        .arg(result.volume,0,'f',3).arg(result.surfaceArea,0,'f',3)
+        .arg(result.minX,0,'f',3).arg(result.maxX,0,'f',3)
+        .arg(result.minY,0,'f',3).arg(result.maxY,0,'f',3)
+        .arg(result.minZ,0,'f',3).arg(result.maxZ,0,'f',3)
+        .arg(result.centerX,0,'f',3).arg(result.centerY,0,'f',3).arg(result.centerZ,0,'f',3);
+    QMessageBox::information(this,"Geometry diagnostics",report);
+}
+
+void MainWindow::measureSelectedBodySection() {
+    if(!requireBodyMode("Planar section"))return;
+    const QStringList ids=selectedIds();
+    if(ids.size()!=1){reportError("Planar section","Select exactly one body.");return;}
+    bool accepted=false;
+    const QString axisName=QInputDialog::getItem(this,"Planar section","Plane normal axis",{"X","Y","Z"},2,false,&accepted);
+    if(!accepted)return;
+    const double offset=QInputDialog::getDouble(this,"Planar section",QString("Plane offset along %1 (mm)").arg(axisName),0.0,-1000000.0,1000000.0,3,&accepted);
+    if(!accepted)return;
+    cad::SectionMeasurement result;QString error;
+    const int axis=axisName=="X"?0:axisName=="Y"?1:2;
+    if(!document_.measurePlanarSection(ids.first(),axis,offset,&result,&error)){
+        reportError("Planar section",error);return;
+    }
+    const QString report=QString("%1\n\nPlane normal: %2\nOffset: %3 mm\nSection edges: %4\nTotal contour length: %5 mm")
+        .arg(document_.find(ids.first())->name).arg(axisName).arg(offset,0,'f',3)
+        .arg(result.edgeCount).arg(result.totalLength,0,'f',3);
+    QMessageBox::information(this,"Planar section contour",report);
+}
+
+void MainWindow::summarizeSelectedBodySurfaces() {
+    if(!requireBodyMode("Surface type summary"))return;
+    const QStringList ids=selectedIds();
+    if(ids.size()!=1){reportError("Surface type summary","Select exactly one body.");return;}
+    cad::SurfaceTypeSummary result;QString error;
+    if(!document_.summarizeSurfaceTypes(ids.first(),&result,&error)){
+        reportError("Surface type summary",error);return;
+    }
+    const QString report=QString(
+        "%1\n\nPlanar: %2 faces, %3 mm^2\nCylindrical: %4 faces, %5 mm^2\n"
+        "Conical: %6 faces, %7 mm^2\nSpherical: %8 faces, %9 mm^2\n"
+        "Toroidal: %10 faces, %11 mm^2\nOther: %12 faces, %13 mm^2")
+        .arg(document_.find(ids.first())->name)
+        .arg(result.planarFaces).arg(result.planarArea,0,'f',3)
+        .arg(result.cylindricalFaces).arg(result.cylindricalArea,0,'f',3)
+        .arg(result.conicalFaces).arg(result.conicalArea,0,'f',3)
+        .arg(result.sphericalFaces).arg(result.sphericalArea,0,'f',3)
+        .arg(result.toroidalFaces).arg(result.toroidalArea,0,'f',3)
+        .arg(result.otherFaces).arg(result.otherArea,0,'f',3);
+    QMessageBox::information(this,"Surface type summary",report);
+}
+
+void MainWindow::measureSelectedFaceArea() {
+    if(viewport_->selectionMode()!=CadViewport::SelectionMode::Face){
+        reportError("Face area","Choose Faces (inspection), then select exactly one face in the viewport.");return;
+    }
+    const QVector<cad::FaceReference> faces=viewport_->selectedFaceReferences();
+    if(faces.size()!=1){reportError("Face area","Select exactly one face in the viewport.");return;}
+    double area=0.0;QString error;
+    if(!document_.measureFaceArea(faces.first(),&area,&error)){
+        reportError("Face area",error);return;
+    }
+    QMessageBox::information(this,"Face area",
+        QString("Selected face %1\n\nArea: %2 mm^2")
+            .arg(faces.first().faceIndex).arg(area,0,'f',3));
+}
+
+void MainWindow::measureSelectedEdgeLength() {
+    if(viewport_->selectionMode()!=CadViewport::SelectionMode::Edge){
+        reportError("Edge length","Choose Edges (inspection), then select exactly one edge in the viewport.");return;
+    }
+    const QVector<cad::EdgeReference> edges=viewport_->selectedEdgeReferences();
+    if(edges.size()!=1){reportError("Edge length","Select exactly one edge in the viewport.");return;}
+    double length=0.0;QString error;
+    if(!document_.measureEdgeLength(edges.first(),&length,&error)){
+        reportError("Edge length",error);return;
+    }
+    QMessageBox::information(this,"Edge length",
+        QString("Selected edge %1\n\nLength: %2 mm")
+            .arg(edges.first().edgeIndex).arg(length,0,'f',3));
+}
+
+void MainWindow::measureSelectedVertexCoordinates() {
+    if(viewport_->selectionMode()!=CadViewport::SelectionMode::Vertex){
+        reportError("Vertex coordinates","Choose Vertices (inspection), then select exactly one vertex in the viewport.");return;
+    }
+    const auto vertices=viewport_->selectedVertexReferences();
+    if(vertices.size()!=1){reportError("Vertex coordinates","Select exactly one vertex in the viewport.");return;}
+    double x=0.0,y=0.0,z=0.0;QString error;
+    if(!document_.measureVertexCoordinates(vertices.first(),&x,&y,&z,&error)){
+        reportError("Vertex coordinates",error);return;
+    }
+    QMessageBox::information(this,"Vertex coordinates",
+        QString("Selected vertex %1\n\nX: %2 mm\nY: %3 mm\nZ: %4 mm")
+            .arg(vertices.first().vertexIndex).arg(x,0,'f',3).arg(y,0,'f',3).arg(z,0,'f',3));
+}
+
+void MainWindow::measureSelectedVertexDistance() {
+    if(viewport_->selectionMode()!=CadViewport::SelectionMode::Vertex){
+        reportError("Vertex distance","Choose Vertices (inspection), then select exactly two vertices in the viewport.");return;
+    }
+    const auto vertices=viewport_->selectedVertexReferences();
+    if(vertices.size()!=2){reportError("Vertex distance","Hold Ctrl while selecting; choose exactly two vertices in the viewport.");return;}
+    double distance=0.0;QString error;
+    if(!document_.measureVertexDistance(vertices[0],vertices[1],&distance,&error)){
+        reportError("Vertex distance",error);return;
+    }
+    QMessageBox::information(this,"Vertex distance",
+        QString("Distance between selected vertices: %1 mm").arg(distance,0,'f',3));
+}
+
+void MainWindow::measureSelectedBodyClearance() {
+    if(!requireBodyMode("Minimum distance"))return;
+    const QStringList ids=selectedIds();
+    if(ids.size()!=2){reportError("Minimum distance","Select exactly two bodies in the model browser.");return;}
+    cad::MinimumDistanceResult measurement;
+    QString error;
+    if(!document_.measureMinimumDistance(ids[0],ids[1],&measurement,&error)){
+        reportError("Minimum distance",error);return;
+    }
+    const QString report=QStringLiteral("Minimum distance: %1 mm\n\nClosest point on %2: (%3, %4, %5) mm\nClosest point on %6: (%7, %8, %9) mm")
+        .arg(measurement.distance,0,'f',4)
+        .arg(document_.find(ids[0])->name)
+        .arg(measurement.firstX,0,'f',4).arg(measurement.firstY,0,'f',4).arg(measurement.firstZ,0,'f',4)
+        .arg(document_.find(ids[1])->name)
+        .arg(measurement.secondX,0,'f',4).arg(measurement.secondY,0,'f',4).arg(measurement.secondZ,0,'f',4);
+    QMessageBox::information(this,"Minimum distance",report);
+}
+
+void MainWindow::measureSelectedBodyInterference() {
+    if(!requireBodyMode("Interference volume"))return;
+    const QStringList ids=selectedIds();
+    if(ids.size()!=2){reportError("Interference volume","Select exactly two bodies in the model browser.");return;}
+    cad::InterferenceResult result;QString error;
+    if(!document_.measureInterference(ids[0],ids[1],&result,&error)){
+        reportError("Interference volume",error);return;
+    }
+    QString report=QString("Shared volume of %1 and %2: %3 mm^3")
+        .arg(document_.find(ids[0])->name,document_.find(ids[1])->name)
+        .arg(result.volume,0,'f',4);
+    if(result.volume>0.0)report+=QString("\n\nOverlap centroid: (%1, %2, %3) mm")
+        .arg(result.centroidX,0,'f',4).arg(result.centroidY,0,'f',4).arg(result.centroidZ,0,'f',4);
+    QMessageBox::information(this,"Interference volume",report);
 }
 void MainWindow::refresh(bool fit) {
     const auto ids = selectedIds();
@@ -760,6 +943,17 @@ void MainWindow::makeHollowLoftReducer() {
     if(!document_.loftHollowReducer((*v)[0],(*v)[1],(*v)[2],(*v)[3],(*v)[4],(*v)[5],(*v)[6],&error))reportError("Hollow loft reducer",error);else refresh(true);
 }
 
+void MainWindow::makeEllipticalLoft() {
+    const auto v=valuesDialog(this,"Create elliptical loft",
+        {"Bottom semi-axis A (mm)","Bottom semi-axis B (mm)","Top semi-axis A (mm)",
+         "Top semi-axis B (mm)","Height (mm)","Top offset X (mm)","Top offset Y (mm)"},
+        {20,12,12,8,35,5,0},0,1e6);
+    if(!v)return;QString error;
+    if(!document_.loftEllipticalSections((*v)[0],(*v)[1],(*v)[2],(*v)[3],(*v)[4],(*v)[5],(*v)[6],&error))
+        reportError("Elliptical loft",error);
+    else refresh(true);
+}
+
 void MainWindow::sketchExtrusion() {
     const QStringList currentSelection = selectedIds();
     QDialog dialog(this);
@@ -770,6 +964,10 @@ void MainWindow::sketchExtrusion() {
     auto* profile = new QComboBox(&dialog);
     profile->addItems({"Rectangle", "Circle", "Ellipse", "Slot", "Triangle", "Regular polygon", "Rounded rectangle", "Ring"});
     form->addRow("Profile", profile);
+
+    auto* sketchPlane=new QComboBox(&dialog);
+    sketchPlane->addItems({"XY plane","XZ plane","YZ plane"});
+    form->addRow("Sketch plane",sketchPlane);
 
     auto* operation = new QComboBox(&dialog);
     operation->addItem("New Body", static_cast<int>(cad::ExtrusionMode::NewBody));
@@ -803,25 +1001,41 @@ void MainWindow::sketchExtrusion() {
     };
     auto* originX = makeField(-1e6, 1e6, 1.0, 0.0);
     auto* originY = makeField(-1e6, 1e6, 1.0, 0.0);
+    auto* planeOffset = makeField(-1e6, 1e6, 1.0, 0.0);
     auto* sizeX = makeField(0.00001, 1e6, 1.0, 40.0);
     auto* depth = makeField(0.00001, 1e6, 1.0, 30.0);
     auto* height = makeField(0.00001, 1e6, 1.0, 20.0);
     auto* sizeLabel = new QLabel("Width (mm)",&dialog);
     auto* depthLabel = new QLabel("Depth (mm)",&dialog);
-    form->addRow("Origin X (mm)",originX);
-    form->addRow("Origin Y (mm)",originY);
+    form->addRow("Origin U (mm)",originX);
+    form->addRow("Origin V (mm)",originY);
+    form->addRow("Plane offset W (mm)",planeOffset);
     form->addRow(sizeLabel,sizeX);
     form->addRow(depthLabel,depth);
     form->addRow("Extrusion height (mm)",height);
     auto* symmetric=new QCheckBox("Symmetric about sketch plane",&dialog);
+    auto* reverseDirection=new QCheckBox("Reverse extrusion direction",&dialog);
+    auto* throughAll=new QCheckBox("Through all (Cut)",&dialog);
     auto* tapered=new QCheckBox("Tapered extrusion",&dialog);
     auto* taperAngle=new QDoubleSpinBox(&dialog);taperAngle->setRange(-45,45);taperAngle->setDecimals(3);taperAngle->setValue(5);taperAngle->setEnabled(false);
-    form->addRow(symmetric);form->addRow(tapered);form->addRow("Taper angle (degrees)",taperAngle);
+    form->addRow(symmetric);form->addRow(reverseDirection);form->addRow(throughAll);form->addRow(tapered);form->addRow("Taper angle (degrees)",taperAngle);
     auto* cornerRadius=new QDoubleSpinBox(&dialog);cornerRadius->setRange(0.00001,1e6);cornerRadius->setDecimals(5);cornerRadius->setValue(5);
     auto* cornerRadiusLabel=new QLabel("Corner radius (mm)",&dialog);cornerRadiusLabel->setVisible(false);cornerRadius->setVisible(false);
     form->addRow(cornerRadiusLabel,cornerRadius);
     connect(tapered,&QCheckBox::toggled,taperAngle,&QDoubleSpinBox::setEnabled);
     connect(symmetric,&QCheckBox::toggled,&dialog,[tapered](bool enabled){tapered->setEnabled(!enabled);});
+    connect(symmetric,&QCheckBox::toggled,reverseDirection,&QCheckBox::setDisabled);
+    connect(throughAll,&QCheckBox::toggled,height,&QDoubleSpinBox::setDisabled);
+    auto updateThroughAll = [=](int) {
+        const bool allowed=operation->currentData().toInt()==static_cast<int>(cad::ExtrusionMode::Cut)&&
+                           !symmetric->isChecked()&&!tapered->isChecked();
+        throughAll->setEnabled(allowed);
+        if(!allowed)throughAll->setChecked(false);
+    };
+    connect(operation,qOverload<int>(&QComboBox::currentIndexChanged),&dialog,updateThroughAll);
+    connect(symmetric,&QCheckBox::toggled,&dialog,[updateThroughAll](bool){updateThroughAll(0);});
+    connect(tapered,&QCheckBox::toggled,&dialog,[updateThroughAll](bool){updateThroughAll(0);});
+    updateThroughAll(0);
     auto updateProfileFields = [=](int index) {
         const bool showDepth = index == 0 || index == 2 || index == 3 || index == 5 || index == 6 || index == 7;
         const QString sizeText = index == 0 ? "Width (mm)" :
@@ -878,6 +1092,7 @@ void MainWindow::sketchExtrusion() {
         prepared=document_.prepareExtrusion(profileKind,originX->value(),originY->value(),sizeX->value(),
             depth->value(),height->value(),operationKind,targetId,&command,&error);
     if(prepared&&symmetric->isChecked())command.symmetric=true;
+    if(prepared){command.sketchPlane=static_cast<cad::SketchPlane>(sketchPlane->currentIndex());command.planeOffset=planeOffset->value();command.reverseDirection=reverseDirection->isChecked();command.throughAll=throughAll->isChecked();}
     if (!prepared) {
         reportError("Sketch extrusion",error);
         return;
@@ -1125,6 +1340,37 @@ void MainWindow::rectangularPatternSelectedBody() {
     refresh(true);
 }
 
+void MainWindow::rectangularPatternAlongVectorsSelectedBody(){
+    if(!requireBodyMode("Vector rectangular pattern"))return;
+    const auto ids=selectedIds();
+    if(ids.size()!=1){reportError("Vector rectangular pattern","Select exactly one body.");return;}
+    QDialog dialog(this);dialog.setWindowTitle("Two-vector rectangular pattern");dialog.setMinimumWidth(410);
+    auto* form=new QFormLayout(&dialog);
+    auto makeCoordinate=[&](double value){
+        auto* field=new QDoubleSpinBox(&dialog);field->setRange(-1e6,1e6);field->setDecimals(5);field->setValue(value);return field;
+    };
+    auto* firstX=makeCoordinate(1);auto* firstY=makeCoordinate(0);auto* firstZ=makeCoordinate(0);
+    auto* secondX=makeCoordinate(0);auto* secondY=makeCoordinate(1);auto* secondZ=makeCoordinate(0);
+    auto* firstCount=new QSpinBox(&dialog);firstCount->setRange(1,1000);firstCount->setValue(3);
+    auto* firstSpacing=makeCoordinate(30);
+    auto* secondCount=new QSpinBox(&dialog);secondCount->setRange(1,1000);secondCount->setValue(2);
+    auto* secondSpacing=makeCoordinate(30);
+    form->addRow("First direction X",firstX);form->addRow("First direction Y",firstY);form->addRow("First direction Z",firstZ);
+    form->addRow("First-direction instances",firstCount);form->addRow("First-direction spacing (mm)",firstSpacing);
+    form->addRow("Second direction X",secondX);form->addRow("Second direction Y",secondY);form->addRow("Second direction Z",secondZ);
+    form->addRow("Second-direction instances",secondCount);form->addRow("Second-direction spacing (mm)",secondSpacing);
+    auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);form->addWidget(buttons);
+    connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+    if(dialog.exec()!=QDialog::Accepted)return;
+    QString error;
+    if(!document_.rectangularPatternAlongVectors(ids.first(),firstX->value(),firstY->value(),firstZ->value(),
+            firstCount->value(),firstSpacing->value(),secondX->value(),secondY->value(),secondZ->value(),
+            secondCount->value(),secondSpacing->value(),&error)){
+        reportError("Vector rectangular pattern",error);return;
+    }
+    refresh(true);
+}
+
 void MainWindow::circularPatternSelectedBody() {
     if (!requireBodyMode("Circular pattern")) return;
     const auto ids=selectedIds();
@@ -1175,6 +1421,33 @@ void MainWindow::circularPatternSelectedBody() {
                                    centerU->value(),centerV->value(),count->value(),angle->value(),&error)) {
         reportError("Circular pattern",error);
         return;
+    }
+    refresh(true);
+}
+
+void MainWindow::circularPatternAboutAxisSelectedBody() {
+    if(!requireBodyMode("Circular pattern about custom axis"))return;
+    const auto ids=selectedIds();
+    if(ids.size()!=1){reportError("Circular pattern about custom axis","Select exactly one body.");return;}
+    QDialog dialog(this);dialog.setWindowTitle("Circular pattern about custom axis");
+    auto* form=new QFormLayout(&dialog);
+    auto field=[&](double minimum,double maximum,double value){
+        auto* spin=new QDoubleSpinBox(&dialog);spin->setRange(minimum,maximum);spin->setDecimals(5);spin->setSingleStep(1);spin->setValue(value);return spin;
+    };
+    auto* originX=field(-1e6,1e6,0);auto* originY=field(-1e6,1e6,0);auto* originZ=field(-1e6,1e6,0);
+    auto* axisX=field(-1e6,1e6,0);auto* axisY=field(-1e6,1e6,0);auto* axisZ=field(-1e6,1e6,1);
+    auto* count=new QSpinBox(&dialog);count->setRange(2,1000);count->setValue(4);
+    auto* angle=field(1,360,360);
+    form->addRow("Axis origin X (mm)",originX);form->addRow("Axis origin Y (mm)",originY);form->addRow("Axis origin Z (mm)",originZ);
+    form->addRow("Axis direction X",axisX);form->addRow("Axis direction Y",axisY);form->addRow("Axis direction Z",axisZ);
+    form->addRow("Total instances",count);form->addRow("Total angle (degrees)",angle);
+    auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);form->addWidget(buttons);
+    connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+    if(dialog.exec()!=QDialog::Accepted)return;
+    QString error;
+    if(!document_.circularPatternAboutAxis(ids.first(),originX->value(),originY->value(),originZ->value(),
+        axisX->value(),axisY->value(),axisZ->value(),count->value(),angle->value(),&error)){
+        reportError("Circular pattern about custom axis",error);return;
     }
     refresh(true);
 }
@@ -1405,6 +1678,76 @@ void MainWindow::circularCounterborePatternSelectedBody(){
         diameter->value(),depth->value(),throughAll->isChecked(),headDiameter->value(),headDepth->value(),count->value(),
         totalAngle->value(),&error)){
         reportError("Circular counterbore pattern",error);return;
+    }
+    refresh(true);
+}
+
+void MainWindow::linearCounterborePatternSelectedBody(){
+    if(!requireBodyMode("Linear counterbore pattern"))return;
+    const auto ids=selectedIds();if(ids.size()!=1){reportError("Linear counterbore pattern","Select exactly one body.");return;}
+    const cad::Part* part=document_.find(ids.first());if(!part)return;
+    Bnd_Box bounds;BRepBndLib::AddOptimal(part->shape,bounds,false,false);
+    if(bounds.IsVoid()){reportError("Linear counterbore pattern","The selected body has no measurable bounds.");return;}
+    double xmin=0,ymin=0,zmin=0,xmax=0,ymax=0,zmax=0;bounds.Get(xmin,ymin,zmin,xmax,ymax,zmax);
+    const double xSpan=xmax-xmin,ySpan=ymax-ymin,zSpan=zmax-zmin;
+    QDialog dialog(this);dialog.setWindowTitle("Linear counterbore pattern");auto* form=new QFormLayout(&dialog);
+    auto field=[&](double minimum,double maximum,double value){auto* spin=new QDoubleSpinBox(&dialog);spin->setRange(minimum,maximum);spin->setDecimals(4);spin->setValue(value);return spin;};
+    auto* count=new QSpinBox(&dialog);count->setRange(2,100);count->setValue(3);
+    const double head=std::max(2.0,std::min(8.0,std::min(xSpan,ySpan)*0.24));
+    const double drill=std::max(1.0,std::min(4.0,head*0.5));
+    const double spacing=std::max(head+1.0,std::min(12.0,xSpan/3.0));
+    auto* centerX=field(-1e6,1e6,(xmin+xmax)/2-spacing);auto* centerY=field(-1e6,1e6,(ymin+ymax)/2);
+    auto* entryZ=field(-1e6,1e6,zmax);auto* diameter=field(0.0001,1e6,drill);
+    auto* headDiameter=field(0.0001,1e6,head);auto* headDepth=field(0.0001,1e6,std::max(0.5,std::min(3.0,zSpan*0.15)));
+    auto* depth=field(0.0001,1e6,zSpan);auto* spacingX=field(-1e6,1e6,spacing);auto* spacingY=field(-1e6,1e6,0);
+    auto* throughAll=new QCheckBox("Through all",&dialog);throughAll->setChecked(true);depth->setEnabled(false);
+    connect(throughAll,&QCheckBox::toggled,depth,&QDoubleSpinBox::setDisabled);
+    form->addRow("First center X (mm)",centerX);form->addRow("Center Y (mm)",centerY);form->addRow("Entry Z (mm)",entryZ);
+    form->addRow("Drill diameter (mm)",diameter);form->addRow("Counterbore diameter (mm)",headDiameter);
+    form->addRow("Counterbore depth (mm)",headDepth);form->addRow("Blind hole depth (mm)",depth);
+    form->addRow("Instance count",count);form->addRow("Spacing X (mm)",spacingX);form->addRow("Spacing Y (mm)",spacingY);
+    form->addRow(throughAll);auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);form->addRow(buttons);
+    connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+    if(dialog.exec()!=QDialog::Accepted)return;
+    QString error;
+    if(!document_.linearCounterborePattern(ids.first(),centerX->value(),centerY->value(),entryZ->value(),diameter->value(),
+        depth->value(),throughAll->isChecked(),headDiameter->value(),headDepth->value(),count->value(),spacingX->value(),spacingY->value(),&error)){
+        reportError("Linear counterbore pattern",error);return;
+    }
+    refresh(true);
+}
+
+void MainWindow::linearCountersinkPatternSelectedBody(){
+    if(!requireBodyMode("Linear countersink pattern"))return;
+    const auto ids=selectedIds();if(ids.size()!=1){reportError("Linear countersink pattern","Select exactly one body.");return;}
+    const cad::Part* part=document_.find(ids.first());if(!part)return;
+    Bnd_Box bounds;BRepBndLib::AddOptimal(part->shape,bounds,false,false);
+    if(bounds.IsVoid()){reportError("Linear countersink pattern","The selected body has no measurable bounds.");return;}
+    double xmin=0,ymin=0,zmin=0,xmax=0,ymax=0,zmax=0;bounds.Get(xmin,ymin,zmin,xmax,ymax,zmax);
+    const double xSpan=xmax-xmin,ySpan=ymax-ymin,zSpan=zmax-zmin;
+    QDialog dialog(this);dialog.setWindowTitle("Linear countersink pattern");auto* form=new QFormLayout(&dialog);
+    auto field=[&](double minimum,double maximum,double value){auto* spin=new QDoubleSpinBox(&dialog);spin->setRange(minimum,maximum);spin->setDecimals(4);spin->setValue(value);return spin;};
+    auto* count=new QSpinBox(&dialog);count->setRange(2,100);count->setValue(3);
+    const double head=std::max(2.0,std::min(8.0,std::min(xSpan,ySpan)*0.24));
+    const double drill=std::max(1.0,std::min(4.0,head*0.5));
+    const double spacing=std::max(head+1.0,std::min(12.0,xSpan/3.0));
+    auto* centerX=field(-1e6,1e6,(xmin+xmax)/2-spacing);auto* centerY=field(-1e6,1e6,(ymin+ymax)/2);
+    auto* entryZ=field(-1e6,1e6,zmax);auto* diameter=field(0.0001,1e6,drill);
+    auto* headDiameter=field(0.0001,1e6,head);auto* angle=field(2,178,90);
+    auto* depth=field(0.0001,1e6,zSpan);auto* spacingX=field(-1e6,1e6,spacing);auto* spacingY=field(-1e6,1e6,0);
+    auto* throughAll=new QCheckBox("Through all",&dialog);throughAll->setChecked(true);depth->setEnabled(false);
+    connect(throughAll,&QCheckBox::toggled,depth,&QDoubleSpinBox::setDisabled);
+    form->addRow("First center X (mm)",centerX);form->addRow("Center Y (mm)",centerY);form->addRow("Entry Z (mm)",entryZ);
+    form->addRow("Drill diameter (mm)",diameter);form->addRow("Countersink diameter (mm)",headDiameter);
+    form->addRow("Included angle (degrees)",angle);form->addRow("Blind hole depth (mm)",depth);
+    form->addRow("Instance count",count);form->addRow("Spacing X (mm)",spacingX);form->addRow("Spacing Y (mm)",spacingY);
+    form->addRow(throughAll);auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);form->addRow(buttons);
+    connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+    if(dialog.exec()!=QDialog::Accepted)return;
+    QString error;
+    if(!document_.linearCountersinkPattern(ids.first(),centerX->value(),centerY->value(),entryZ->value(),diameter->value(),
+        depth->value(),throughAll->isChecked(),headDiameter->value(),angle->value(),count->value(),spacingX->value(),spacingY->value(),&error)){
+        reportError("Linear countersink pattern",error);return;
     }
     refresh(true);
 }
@@ -1745,10 +2088,15 @@ void MainWindow::shellSelectedBody() {
     QDialog dialog(this);
     dialog.setWindowTitle("Shell body");
     auto* form=new QFormLayout(&dialog);
-    auto* opening=new QComboBox(&dialog);
-    opening->addItems({"-X face", "+X face", "-Y face", "+Y face", "-Z face", "+Z face"});
-    opening->setCurrentIndex(5);
-    form->addRow("Opening face",opening);
+    form->addRow(new QLabel("Opening faces (select one or more)",&dialog));
+    const QStringList openingNames={"-X face", "+X face", "-Y face", "+Y face", "-Z face", "+Z face"};
+    QVector<QCheckBox*> openingChecks;
+    for(int i=0;i<openingNames.size();++i){
+        auto* check=new QCheckBox(openingNames[i],&dialog);
+        check->setChecked(i==5);
+        openingChecks.append(check);
+        form->addRow(QString(),check);
+    }
     auto* thickness=new QDoubleSpinBox(&dialog);
     thickness->setRange(0.00001,1e6);
     thickness->setDecimals(5);
@@ -1760,11 +2108,11 @@ void MainWindow::shellSelectedBody() {
     connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);
     connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
     if (dialog.exec()!=QDialog::Accepted) return;
-    const int selectedFace=opening->currentIndex();
-    const auto axis=static_cast<cad::Axis>(selectedFace/2);
-    const bool positive=(selectedFace%2)==1;
+    QVector<cad::ShellOpeningFace> openings;
+    for(int i=0;i<openingChecks.size();++i)
+        if(openingChecks[i]->isChecked())openings.append({static_cast<cad::Axis>(i/2),(i%2)==1});
     QString error;
-    if (!document_.shellBody(ids.first(),axis,positive,thickness->value(),&error)) {
+    if (!document_.shellBodyWithOpenings(ids.first(),openings,thickness->value(),&error)) {
         reportError("Shell",error); return;
     }
     refresh();
@@ -1827,6 +2175,19 @@ void MainWindow::scaleObject() {
     if (!document_.scale(ids.first(),values->first(),&error)) { reportError("Scale",error); return; }
     refresh();
 }
+void MainWindow::scaleNonUniformSelectedBody() {
+    if(!requireBodyMode("Nonuniform scale"))return;
+    const auto ids=selectedIds();
+    if(ids.size()!=1){reportError("Nonuniform scale","Select exactly one body.");return;}
+    const auto values=valuesDialog(this,"Nonuniform scale about world origin",
+        {"X scale multiplier","Y scale multiplier","Z scale multiplier"},{1,1,1},0.0001,10000);
+    if(!values)return;
+    QString error;
+    if(!document_.scaleNonUniform(ids.first(),(*values)[0],(*values)[1],(*values)[2],&error)){
+        reportError("Nonuniform scale",error);return;
+    }
+    refresh();
+}
 void MainWindow::duplicateObject() {
     if (!requireBodyMode("Duplicate")) return;
     const auto ids = selectedIds();
@@ -1877,25 +2238,25 @@ void MainWindow::runBoolean(cad::BooleanOp op) {
 
 void MainWindow::filletSelectedEdge() {
     const auto edges = viewport_->selectedEdgeReferences();
-    if (edges.size() != 1) {
-        QMessageBox::information(this,"Fillet edge","Switch to Select â†’ Edges and select exactly one edge in the viewport.");
+    if (edges.isEmpty()) {
+        QMessageBox::information(this,"Fillet edges","Switch to Select â†’ Edges and select one or more edges in the viewport (Ctrl+click to add edges).");
         return;
     }
     const auto radius = valuesDialog(this,"Edge fillet",{"Radius (mm)"},{1.0},0.00001,1e6);
     if (!radius) return;
     cad::FilletCommand command;
     QString error;
-    if (!document_.prepareFillet(edges.first(),radius->first(),&command,&error)) {
+    if (!document_.prepareFillet(edges,radius->first(),&command,&error)) {
         reportError("Edge fillet",error);
         return;
     }
 
     runPreviewAsync<cad::FilletPreview>(this, statusBar(), "Edge fillet",
-        "Calculating fillet preview...", [command] {
+        QStringLiteral("Calculating fillet preview for %1 edge(s)...").arg(edges.size()), [command] {
             return cad::SceneDocument::buildFilletPreview(command);
         }, [this, command](const cad::FilletPreview& preview) {
             confirmPreview("Preview edge fillet",
-                "Inspect the translucent gold preview. Apply this fillet to the body?", preview.shape,
+                QStringLiteral("Inspect the translucent gold preview. Apply this fillet to the %1 selected edge(s)?").arg(command.edges.size()), preview.shape,
                 [this, command, preview] {
                     QString commitError;
                     if (!document_.commitFillet(command,preview.shape,&commitError))
@@ -1907,29 +2268,54 @@ void MainWindow::filletSelectedEdge() {
 
 void MainWindow::chamferSelectedEdge() {
     const auto edges = viewport_->selectedEdgeReferences();
-    if (edges.size() != 1) {
-        QMessageBox::information(this,"Chamfer edge","Switch to Select â†’ Edges and select exactly one edge in the viewport.");
+    if (edges.isEmpty()) {
+        QMessageBox::information(this,"Chamfer edges","Switch to Select â†’ Edges and select one or more edges in the viewport (Ctrl+click to add edges).");
         return;
     }
     const auto distance = valuesDialog(this,"Edge chamfer",{"Distance (mm)"},{1.0},0.00001,1e6);
     if (!distance) return;
     cad::ChamferCommand command;
     QString error;
-    if (!document_.prepareChamfer(edges.first(),distance->first(),&command,&error)) {
+    if (!document_.prepareChamfer(edges,distance->first(),&command,&error)) {
         reportError("Edge chamfer",error);
         return;
     }
 
     runPreviewAsync<cad::ChamferPreview>(this, statusBar(), "Edge chamfer",
-        "Calculating chamfer preview...", [command] {
+        QStringLiteral("Calculating chamfer preview for %1 edge(s)...").arg(edges.size()), [command] {
             return cad::SceneDocument::buildChamferPreview(command);
         }, [this, command](const cad::ChamferPreview& preview) {
             confirmPreview("Preview edge chamfer",
-                "Inspect the translucent gold preview. Apply this chamfer to the body?", preview.shape,
+                QStringLiteral("Inspect the translucent gold preview. Apply this chamfer to the %1 selected edge(s)?").arg(command.edges.size()), preview.shape,
                 [this, command, preview] {
                     QString commitError;
                     if (!document_.commitChamfer(command,preview.shape,&commitError))
                         reportError("Edge chamfer",commitError);
+                    else refresh();
+                });
+        });
+}
+
+void MainWindow::asymmetricChamferSelectedEdge() {
+    const auto edges=viewport_->selectedEdgeReferences();
+    if(edges.size()!=1){
+        QMessageBox::information(this,"Asymmetric chamfer","Switch to Select → Edges and select exactly one edge in the viewport.");
+        return;
+    }
+    const auto distances=valuesDialog(this,"Asymmetric edge chamfer",
+        {"Distance on reference face (mm)","Distance on opposite face (mm)"},{1.0,2.0},0.00001,1e6);
+    if(!distances)return;
+    cad::ChamferCommand command;QString error;
+    if(!document_.prepareAsymmetricChamfer(edges.first(),(*distances)[0],(*distances)[1],&command,&error)){
+        reportError("Asymmetric chamfer",error);return;
+    }
+    runPreviewAsync<cad::ChamferPreview>(this,statusBar(),"Asymmetric chamfer",
+        "Calculating asymmetric chamfer preview...",[command]{return cad::SceneDocument::buildChamferPreview(command);},
+        [this,command](const cad::ChamferPreview& preview){
+            confirmPreview("Preview asymmetric chamfer",
+                "Inspect the preview. Apply the two-distance chamfer to the selected edge?",preview.shape,
+                [this,command,preview]{QString commitError;
+                    if(!document_.commitChamfer(command,preview.shape,&commitError))reportError("Asymmetric chamfer",commitError);
                     else refresh();
                 });
         });
