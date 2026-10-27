@@ -101,12 +101,22 @@ constexpr int kMaxObjects = 2000;
 constexpr int kHistoryDepth = 40;
 const QString kSchema1 = QStringLiteral("cadworkbench.scene.v1");
 const QString kSchema2 = QStringLiteral("cadworkbench.scene.v2");
+const QString kSchema3 = QStringLiteral("cadworkbench.scene.v3");
+const QString kSchema4 = QStringLiteral("cadworkbench.scene.v4");
+const QString kSchema5 = QStringLiteral("cadworkbench.scene.v5");
 
 bool finitePositive(double v) { return std::isfinite(v) && v > 1e-5 && v <= 1e6; }
 bool finiteOffset(double v) { return std::isfinite(v) && std::abs(v) <= 1e6; }
 void inheritMaterial(Part& destination, const Part& source) {
     destination.materialName = source.materialName;
     destination.materialDensityKgPerM3 = source.materialDensityKgPerM3;
+    destination.partNumber = source.partNumber;
+    destination.description = source.description;
+    destination.revision = source.revision;
+    destination.assemblyPath = source.assemblyPath;
+    destination.procurementType = source.procurementType;
+    destination.supplier = source.supplier;
+    destination.supplierPartNumber = source.supplierPartNumber;
 }
 QString generatedId() { return QUuid::createUuid().toString(QUuid::WithoutBraces); }
 const char* primitiveName(Primitive kind) {
@@ -3217,10 +3227,17 @@ bool SceneDocument::saveAs(const QString& path, QString* error) {
             item.insert("visible",part.visible); item.insert("color",part.color);
             item.insert("material",part.materialName);
             item.insert("density_kg_per_m3",part.materialDensityKgPerM3);
+            item.insert("part_number",part.partNumber);
+            item.insert("description",part.description);
+            item.insert("revision",part.revision);
+            item.insert("assembly_path",part.assemblyPath);
+            item.insert("procurement_type",part.procurementType);
+            item.insert("supplier",part.supplier);
+            item.insert("supplier_part_number",part.supplierPartNumber);
             array.append(item);
         }
         QJsonObject root;
-        root.insert("schema",kSchema2);
+        root.insert("schema",kSchema5);
         root.insert("units","mm");
         root.insert("parts",array);
         const QByteArray bytes = QJsonDocument(root).toJson(QJsonDocument::Compact);
@@ -3247,7 +3264,7 @@ bool SceneDocument::load(const QString& path, QString* error) {
     if (parseError.error != QJsonParseError::NoError || !json.isObject()) { setError(error,"Invalid project JSON."); return false; }
     const QJsonObject root = json.object();
     const QString schema = root.value("schema").toString();
-    if ((schema != kSchema1 && schema != kSchema2) || root.value("units").toString() != "mm" || !root.value("parts").isArray()) {
+    if ((schema != kSchema1 && schema != kSchema2 && schema != kSchema3 && schema != kSchema4 && schema != kSchema5) || root.value("units").toString() != "mm" || !root.value("parts").isArray()) {
         setError(error,"Unsupported project schema or units."); return false;
     }
     const QJsonArray array = root.value("parts").toArray();
@@ -3270,7 +3287,9 @@ bool SceneDocument::load(const QString& path, QString* error) {
             QString color = "#6c9dc2";
             QString materialName;
             double materialDensityKgPerM3=0.0;
-            if (schema == kSchema2) {
+            QString partNumber, description, revision, assemblyPath;
+            QString procurementType = QStringLiteral("Manufactured"), supplier, supplierPartNumber;
+            if (schema == kSchema2 || schema == kSchema3 || schema == kSchema4 || schema == kSchema5) {
                 if (!item.value("visible").isBool() || !item.value("color").isString()) {
                     setError(error,"Invalid v2 appearance fields."); return false;
                 }
@@ -3288,12 +3307,63 @@ bool SceneDocument::load(const QString& path, QString* error) {
                         setError(error,"Invalid body material name or density.");return false;
                     }
                 }
+                if (schema == kSchema3 || schema == kSchema4 || schema == kSchema5) {
+                    if (!item.value("part_number").isString() || !item.value("description").isString() || !item.value("revision").isString()) {
+                        setError(error,"Invalid part-information fields."); return false;
+                    }
+                    partNumber=item.value("part_number").toString().trimmed().toUpper();
+                    description=item.value("description").toString().trimmed();
+                    revision=item.value("revision").toString().trimmed().toUpper();
+                    if (partNumber.size()>32 || description.size()>200 || revision.size()>16 ||
+                        partNumber.contains('\n') || description.contains('\n') || revision.contains('\n') ||
+                        partNumber.contains('\r') || description.contains('\r') || revision.contains('\r')) {
+                        setError(error,"Invalid part-information values."); return false;
+                    }
+                    if (schema == kSchema4 || schema == kSchema5) {
+                        if (!item.value("assembly_path").isString()) { setError(error,"Invalid assembly path."); return false; }
+                        assemblyPath = item.value("assembly_path").toString();
+                        QStringList normalizedSegments;
+                        for (const QString& segment : assemblyPath.split('/', Qt::SkipEmptyParts)) {
+                            const QString clean = segment.trimmed();
+                            if (clean.isEmpty() || clean == "." || clean == ".." || clean.size() > 80) {
+                                setError(error,"Invalid assembly path segment."); return false;
+                            }
+                            normalizedSegments.append(clean);
+                        }
+                        assemblyPath = normalizedSegments.join('/');
+                        if (assemblyPath.size() > 200 || assemblyPath.contains('\\') || assemblyPath.contains('\n') || assemblyPath.contains('\r')) {
+                            setError(error,"Invalid assembly path value."); return false;
+                        }
+                    }
+                    if (schema == kSchema5) {
+                        if (!item.value("procurement_type").isString() || !item.value("supplier").isString() ||
+                            !item.value("supplier_part_number").isString()) {
+                            setError(error,"Invalid procurement fields."); return false;
+                        }
+                        const QString typeKey = item.value("procurement_type").toString().trimmed().toCaseFolded();
+                        if (typeKey != "manufactured" && typeKey != "purchased") { setError(error,"Invalid procurement type."); return false; }
+                        procurementType = typeKey == "purchased" ? QStringLiteral("Purchased") : QStringLiteral("Manufactured");
+                        supplier = item.value("supplier").toString().trimmed();
+                        supplierPartNumber = item.value("supplier_part_number").toString().trimmed();
+                        if (supplier.size() > 80 || supplierPartNumber.size() > 64 || supplier.contains('\n') || supplier.contains('\r') ||
+                            supplierPartNumber.contains('\n') || supplierPartNumber.contains('\r')) {
+                            setError(error,"Invalid supplier fields."); return false;
+                        }
+                    }
+                }
             }
             const TopoDS_Shape shape = brepFromText(payload);
             if (!validShape(shape,error)) return false;
             candidate.append({id,name,shape,visible,color});
             candidate.last().materialName=materialName;
             candidate.last().materialDensityKgPerM3=materialDensityKgPerM3;
+            candidate.last().partNumber=partNumber;
+            candidate.last().description=description;
+            candidate.last().revision=revision;
+            candidate.last().assemblyPath=assemblyPath;
+            candidate.last().procurementType=procurementType;
+            candidate.last().supplier=supplier;
+            candidate.last().supplierPartNumber=supplierPartNumber;
             ids.insert(id); names.insert(name.toLower());
         }
     } catch (const Standard_Failure& e) { setError(error,QStringLiteral("Invalid B-rep: %1").arg(e.what())); return false; }

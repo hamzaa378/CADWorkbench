@@ -1,4 +1,5 @@
 ﻿#include "core/SceneDocument.h"
+#include "core/DrawingSheet.h"
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepGProp.hxx>
 #include <BRepBndLib.hxx>
@@ -13,6 +14,7 @@
 #include <QJsonObject>
 #include <QSet>
 #include <QTemporaryDir>
+#include <QXmlStreamReader>
 
 #include <algorithm>
 #include <cmath>
@@ -855,6 +857,359 @@ void testBodyScheduleCsv() {
     require(!cad::SceneDocument{}.exportBodyScheduleCsv(path,&error),"Empty document produced a CSV schedule");
     QFile asDirectory(dir.path());
     require(!doc.exportBodyScheduleCsv(dir.path(),&error),"Directory path was accepted as a CSV output file");
+}
+void testBomPartsStandards() {
+    QString error; cad::SceneDocument doc;
+    require(doc.addPrimitive(cad::Primitive::Box,{10,12,14},&error),"BOM source creation failed");
+    const QString source=doc.parts().first().id;
+    require(doc.setMaterial(source,"Aluminum 6061",2700,&error),"BOM material assignment failed");
+    require(doc.setPartMetadata(source," plate-001 "," Base plate, upper "," a ","Vehicle\\Front Axle","Purchased"," ACME Supply "," ACM-120 ",&error),"Part metadata assignment failed");
+    require(doc.find(source)->partNumber=="PLATE-001"&&doc.find(source)->description=="Base plate, upper"&&doc.find(source)->revision=="A",
+            "Part metadata was not normalized");
+    require(doc.find(source)->assemblyPath=="Vehicle/Front Axle","Assembly path was not normalized into hierarchical segments");
+    require(doc.find(source)->procurementType=="Purchased"&&doc.find(source)->supplier=="ACME Supply"&&doc.find(source)->supplierPartNumber=="ACM-120",
+            "Purchased-item supplier fields were not normalized");
+    require(!doc.setPartMetadata(source,"PLATE-001","bad\nline","A",&error),"Metadata line break was accepted");
+    require(!doc.setPartMetadata(source,"PLATE-001","Base plate, upper","A","Vehicle/../Unsafe",&error),"Assembly path traversal segment was accepted");
+    require(!doc.setPartMetadata(source,"PLATE-001","Base plate, upper","A","Vehicle/Front Axle","Other","ACME Supply","ACM-120",&error),
+            "Unsupported procurement type was accepted");
+    require(!doc.setPartMetadata(source,"PLATE-001","Base plate, upper","A","Vehicle/Front Axle","Purchased",QString(81,'S'),"ACM-120",&error),
+            "Overlong supplier name was accepted");
+    require(doc.duplicate(source,20,0,0,&error),"BOM duplicate creation failed");
+    const QString instance=doc.parts().last().id;
+    require(doc.find(instance)->partNumber=="PLATE-001"&&doc.find(instance)->description=="Base plate, upper"&&doc.find(instance)->revision=="A",
+            "Duplicate did not inherit part metadata");
+    require(doc.find(instance)->assemblyPath=="Vehicle/Front Axle","Duplicate did not inherit its assembly path");
+    require(doc.find(instance)->procurementType=="Purchased"&&doc.find(instance)->supplier=="ACME Supply"&&doc.find(instance)->supplierPartNumber=="ACM-120",
+            "Duplicate did not inherit supplier procurement data");
+    require(doc.find(instance)->materialName=="Aluminum 6061","Duplicate did not preserve assigned material");
+
+    const auto bom=doc.billOfMaterials(&error);
+    require(bom.size()==1&&bom.first().quantity==2,"Identical metadata and geometry did not aggregate into quantity two");
+    closeTo(bom.first().unitVolumeMm3,1680);closeTo(bom.first().totalVolumeMm3,3360);
+    closeTo(bom.first().unitMassKg,0.004536,1e-10);closeTo(bom.first().totalMassKg,0.009072,1e-10);
+    const auto list=doc.partsList(&error);
+    require(list.size()==2&&list[0].itemNumber==1&&list[1].itemNumber==2,"Parts list did not emit one stable row per body");
+    require(list[0].bodyId!=list[1].bodyId&&list[0].quantity==1,"Parts list rows did not retain body identity and unit quantity");
+
+    QTemporaryDir dir;require(dir.isValid(),"BOM test temporary directory failed");
+    const QString bomPath=dir.filePath("bom.csv"),listPath=dir.filePath("parts.csv");
+    require(doc.exportBillOfMaterialsCsv(bomPath,&error),"BOM export failed");
+    require(doc.exportPartsListCsv(listPath,&error),"Parts-list export failed");
+    const QByteArray bomCsv=readBytes(bomPath),listCsv=readBytes(listPath);
+    require(bomCsv.startsWith("Item,Part number,Description,Revision,Material,Quantity,"),"BOM header missing required columns");
+    require(bomCsv.contains("\"Base plate, upper\"")&&bomCsv.contains(",2,1680,3360,"),"BOM CSV lost escaped text or aggregated quantities");
+    require(listCsv.startsWith("Item,Body ID,Body name,Part number,Description,Revision,Material,Quantity,"),"Parts-list header missing required columns");
+    require(listCsv.count('\n')==3,"Parts list should contain exactly one row for each of two bodies");
+    require(!doc.exportBillOfMaterialsCsv({},&error)&&!doc.exportPartsListCsv(dir.path(),&error),"Invalid CSV destinations were accepted");
+    require(bomCsv.contains("Vehicle/Front Axle")&&listCsv.contains("Vehicle/Front Axle"),"CSV exports omitted assembly paths");
+    require(bomCsv.contains("Purchased")&&bomCsv.contains("ACME Supply")&&bomCsv.contains("ACM-120")&&
+            listCsv.contains("ACME Supply")&&listCsv.contains("ACM-120"),"CSV exports omitted purchased-item supplier data");
+
+    const auto bomCheck=doc.checkStandards(cad::StandardsProfile::BomData);
+    require(bomCheck.passed()&&bomCheck.errors==0&&bomCheck.warnings==0,"Complete BOM data unexpectedly failed its checker");
+    const auto isoCheck=doc.checkStandards(cad::StandardsProfile::IsoDrawingReadiness);
+    const auto asmeCheck=doc.checkStandards(cad::StandardsProfile::AsmeDrawingReadiness);
+    require(isoCheck.profile==cad::StandardsProfile::IsoDrawingReadiness&&isoCheck.passed(),"ISO pre-drawing readiness report failed unexpectedly");
+    require(asmeCheck.profile==cad::StandardsProfile::AsmeDrawingReadiness&&asmeCheck.passed(),"ASME pre-drawing readiness report failed unexpectedly");
+    require(std::any_of(isoCheck.findings.cbegin(),isoCheck.findings.cend(),[](const auto& f){return f.code=="CHECK_SCOPE"&&f.severity==cad::FindingSeverity::Info;}),
+            "ISO checker omitted its scope limitations");
+    require(std::any_of(isoCheck.findings.cbegin(),isoCheck.findings.cend(),[](const auto& f){return f.message.contains("Exported drawing sheets are not inspected");}),
+            "ISO checker did not explain that drawing sheets are not inspected");
+    require(std::any_of(asmeCheck.findings.cbegin(),asmeCheck.findings.cend(),[](const auto& f){return f.message.contains("Exported drawing sheets are not inspected");}),
+            "ASME checker did not explain that drawing sheets are not inspected");
+
+    require(doc.setPartMetadata(instance,"PLATE-001","Different description","A",&error),"Conflicting part metadata setup failed");
+    const auto conflict=doc.checkStandards(cad::StandardsProfile::BomData);
+    require(!conflict.passed()&&conflict.errors==1,"Duplicate part number with conflicting metadata was not rejected");
+    const auto separateBom=doc.billOfMaterials(&error);
+    require(separateBom.size()==2,"BOM incorrectly aggregated conflicting part definitions");
+    require(doc.undo(),"Part metadata undo failed");
+
+    require(doc.setPartMetadata(instance,"PLATE-001","Base plate, upper","A","Vehicle/Rear Axle",&error),"Assembly assignment failed");
+    const auto splitAssemblies=doc.billOfMaterials(&error);
+    require(splitAssemblies.size()==2&&splitAssemblies[0].quantity==1&&splitAssemblies[1].quantity==1,
+            "Identical parts in different assembly paths were incorrectly merged");
+    require(splitAssemblies[0].assemblyPath!=splitAssemblies[1].assemblyPath,"Assembly-separated BOM rows lost their paths");
+    require(doc.setPartMetadata(instance,"PLATE-001","Base plate, upper","A","Vehicle/Front Axle",&error),"Assembly path restore failed");
+    require(doc.setPartMetadata(instance,"PLATE-001","Base plate, upper","A","Vehicle/Front Axle","Purchased","Second Supplier","ACM-120",&error),
+            "Alternate supplier assignment failed");
+    const auto alternateSupplierBom=doc.billOfMaterials(&error);
+    require(alternateSupplierBom.size()==2&&alternateSupplierBom[0].supplier!=alternateSupplierBom[1].supplier,
+            "BOM incorrectly merged purchased parts with different suppliers");
+    require(doc.setPartMetadata(instance,"PLATE-001","Base plate, upper","A","Vehicle/Front Axle","Purchased","ACME Supply","ACM-120",&error),
+            "Supplier restore failed");
+
+    const QString scene=dir.filePath("bom.cadscene");
+    require(doc.saveAs(scene,&error),"BOM metadata save failed");
+    const QJsonObject root=QJsonDocument::fromJson(readBytes(scene)).object();
+    require(root.value("schema").toString()=="cadworkbench.scene.v5","New scenes did not use schema v5");
+    cad::SceneDocument loaded;require(loaded.load(scene,&error),"BOM metadata load failed");
+    require(loaded.find(source)->partNumber=="PLATE-001"&&loaded.find(source)->description=="Base plate, upper"&&loaded.find(source)->revision=="A",
+            "Part metadata did not round-trip through save/reopen");
+    require(loaded.find(source)->assemblyPath=="Vehicle/Front Axle","Assembly path did not round-trip through save/reopen");
+    require(loaded.find(source)->procurementType=="Purchased"&&loaded.find(source)->supplier=="ACME Supply"&&loaded.find(source)->supplierPartNumber=="ACM-120",
+            "Purchased supplier information did not round-trip through save/reopen");
+    require(loaded.billOfMaterials(&error).first().quantity==2,"Saved BOM quantity changed after reload");
+
+    QJsonObject schema4Root=root;
+    schema4Root.insert("schema","cadworkbench.scene.v4");
+    QJsonArray schema4Parts=schema4Root.value("parts").toArray();
+    for (int i=0;i<schema4Parts.size();++i) {
+        QJsonObject part=schema4Parts[i].toObject();
+        part.remove("procurement_type");part.remove("supplier");part.remove("supplier_part_number");
+        schema4Parts[i]=part;
+    }
+    schema4Root.insert("parts",schema4Parts);
+    const QString schema4Scene=dir.filePath("bom-v4.cadscene");
+    QFile schema4File(schema4Scene);require(schema4File.open(QIODevice::WriteOnly),"Could not create schema-v4 migration fixture");
+    require(schema4File.write(QJsonDocument(schema4Root).toJson())>0,"Could not write schema-v4 migration fixture");schema4File.close();
+    cad::SceneDocument migrated;require(migrated.load(schema4Scene,&error),"Schema-v4 scene failed to migrate");
+    require(migrated.find(source)->assemblyPath=="Vehicle/Front Axle"&&migrated.find(source)->procurementType=="Manufactured"&&
+            migrated.find(source)->supplier.isEmpty()&&migrated.find(source)->supplierPartNumber.isEmpty(),
+            "Schema-v4 migration did not preserve assembly path or default procurement fields");
+
+    cad::SceneDocument incomplete;require(incomplete.addPrimitive(cad::Primitive::Box,{2,3,4},&error),"Incomplete standards fixture failed");
+    const auto incompleteReport=incomplete.checkStandards(cad::StandardsProfile::BomData);
+    require(incompleteReport.passed()&&incompleteReport.warnings>=4,"Missing BOM fields were not reported as actionable warnings");
+    const QString incompleteId=incomplete.parts().first().id;
+    require(incomplete.setPartMetadata(incompleteId,"PUR-001","Purchased fitting","A",{},"Purchased",{}, {},&error),
+            "Purchased-item completeness fixture setup failed");
+    const auto incompletePurchased=incomplete.checkStandards(cad::StandardsProfile::BomData);
+    require(incompletePurchased.passed()&&std::any_of(incompletePurchased.findings.cbegin(),incompletePurchased.findings.cend(),[](const auto& f){return f.code=="SUPPLIER_MISSING";}),
+            "Purchased item without a supplier was not flagged");
+    require(std::any_of(incompletePurchased.findings.cbegin(),incompletePurchased.findings.cend(),[](const auto& f){return f.code=="SUPPLIER_PART_NUMBER_MISSING";}),
+            "Purchased item without a supplier part number was not flagged");
+    require(!cad::SceneDocument{}.checkStandards(cad::StandardsProfile::BomData).passed(),"Empty model passed the standards checker");
+}
+void testOrthographicDrawingExport() {
+    QString error;cad::SceneDocument doc;
+    require(doc.addPrimitive(cad::Primitive::Box,{40,30,20},&error),"Drawing fixture creation failed");
+    const QString id=doc.parts().first().id;
+    require(doc.setPartMetadata(id,"PLATE-001","Flange & support <upper>","B",&error),"Drawing metadata setup failed");
+    require(doc.setMaterial(id,"Aluminum 6061",2700,&error),"Drawing material setup failed");
+    QByteArray svg;double scale=0;int visible=0,hidden=0;
+    require(cad::buildOrthographicDrawingSvg(*doc.find(id),&svg,&error,&scale,&visible,&hidden),
+            ("Orthographic drawing generation failed: "+error.toStdString()).c_str());
+    require(svg.startsWith("<?xml")&&svg.contains("width=\"297mm\"")&&svg.contains("height=\"210mm\""),
+            "Drawing export is not an A4 landscape SVG");
+    require(svg.contains(">TOP</text>")&&svg.contains(">FRONT</text>")&&svg.contains(">RIGHT</text>")
+            &&svg.contains(">ISOMETRIC</text>"),
+            "Orthographic and isometric drawing views are not labelled");
+    require(svg.contains("data-projection-symbol=\"third-angle\"")&&svg.contains("<circle cx=\"261\" cy=\"165\" r=\"3\""),
+            "Third-angle projection symbol or end-view placement is missing");
+    require(svg.contains("X 40.000 mm")&&svg.contains("Z 20.000 mm")&&svg.contains("Y 30.000 mm")
+            &&svg.contains("OVERALL ENVELOPE DIMENSIONS ONLY"),
+            "Overall X/Y/Z envelope dimensions do not match the orthographic views");
+    require(svg.contains("Flange &amp; support &lt;upper&gt;")&&svg.contains("PLATE-001")&&svg.contains("Aluminum 6061"),
+            "Drawing title block omitted or failed to escape part metadata");
+    QByteArray notesSvg;
+    require(cad::buildOrthographicDrawingSvg(*doc.find(id),&notesSvg,&error,nullptr,nullptr,nullptr,
+                cad::OrthographicProjection::ThirdAngle,cad::DrawingSheetSize::A4Landscape,
+                cad::DrawingAuxiliaryView::Isometric,0.5,{"Inspect & deburr <edges>","Refer to assembly 42"}),
+            ("Drawing general notes were rejected: "+error.toStdString()).c_str());
+    require(notesSvg.contains("GENERAL NOTES")&&notesSvg.contains("Inspect &amp; deburr &lt;edges&gt;")&&notesSvg.contains("Refer to assembly 42"),
+            "General notes were omitted or not safely XML-escaped");
+    QByteArray titleBlockSvg;
+    const cad::DrawingTitleBlock titleBlock{"DWG-007","Hamza & Co","Reviewer <2>","2026-10-27","C&1"};
+    require(cad::buildOrthographicDrawingSvg(*doc.find(id),&titleBlockSvg,&error,nullptr,nullptr,nullptr,
+                cad::OrthographicProjection::ThirdAngle,cad::DrawingSheetSize::A4Landscape,
+                cad::DrawingAuxiliaryView::Isometric,0.5,{},titleBlock),
+            "Custom drawing title-block fields were rejected");
+    require(titleBlockSvg.contains("DWG-007")&&titleBlockSvg.contains("Hamza &amp; Co")&&
+            titleBlockSvg.contains("Reviewer &lt;2&gt;")&&titleBlockSvg.contains("2026-10-27")&&titleBlockSvg.contains("C&amp;1"),
+            "Custom drawing number, author, checker, revision, or issue date was omitted or not XML-escaped");
+    require(cad::checkDrawingSvg(titleBlockSvg,cad::StandardsProfile::IsoDrawingReadiness).warnings==0,
+            "Complete custom title-block drawing did not pass ISO structural screen");
+    cad::DrawingTitleBlock invalidIssueDate=titleBlock;invalidIssueDate.issueDate="27/10/2026";
+    require(!cad::buildOrthographicDrawingSvg(*doc.find(id),&titleBlockSvg,&error,nullptr,nullptr,nullptr,
+                cad::OrthographicProjection::ThirdAngle,cad::DrawingSheetSize::A4Landscape,
+                cad::DrawingAuxiliaryView::Isometric,0.5,{},invalidIssueDate),
+            "Non-ISO drawing issue date was accepted by the exporter");
+    QByteArray malformedDateSvg;
+    require(cad::buildOrthographicDrawingSvg(*doc.find(id),&malformedDateSvg,&error,nullptr,nullptr,nullptr,
+                cad::OrthographicProjection::ThirdAngle,cad::DrawingSheetSize::A4Landscape,
+                cad::DrawingAuxiliaryView::Isometric,0.5,{},titleBlock),
+            "Valid ISO drawing issue date could not be generated for readiness validation");
+    malformedDateSvg.replace("2026-10-27","27/10/2026");
+    const auto malformedDateCheck=cad::checkDrawingSvg(malformedDateSvg,cad::StandardsProfile::AsmeDrawingReadiness);
+    require(std::any_of(malformedDateCheck.findings.cbegin(),malformedDateCheck.findings.cend(),
+                        [](const auto& f){return f.code=="DRAWING_ISSUE_DATE_FORMAT";}),
+            "Drawing readiness screen did not detect a malformed issue date");
+    cad::Part noDrawingNumber=*doc.find(id);noDrawingNumber.partNumber.clear();
+    QByteArray missingDrawingNumberSvg;
+    require(cad::buildOrthographicDrawingSvg(noDrawingNumber,&missingDrawingNumberSvg,&error),
+            "Drawing without a part or drawing number could not be generated for the missing-field check");
+    const auto missingDrawingNumberCheck=cad::checkDrawingSvg(missingDrawingNumberSvg,cad::StandardsProfile::IsoDrawingReadiness);
+    require(std::any_of(missingDrawingNumberCheck.findings.cbegin(),missingDrawingNumberCheck.findings.cend(),
+                        [](const auto& f){return f.code=="DRAWING_NUMBER_MISSING";}),
+            "Drawing readiness screen did not detect an absent drawing number");
+    cad::DrawingTitleBlock oversizedTitle=titleBlock;oversizedTitle.drawingNumber=QString(33,'D');
+    require(!cad::buildOrthographicDrawingSvg(*doc.find(id),&titleBlockSvg,&error,nullptr,nullptr,nullptr,
+                cad::OrthographicProjection::ThirdAngle,cad::DrawingSheetSize::A4Landscape,
+                cad::DrawingAuxiliaryView::Isometric,0.5,{},oversizedTitle),
+            "Overlong title-block drawing number was accepted");
+    oversizedTitle=titleBlock;oversizedTitle.revision=QString(17,'R');
+    require(!cad::buildOrthographicDrawingSvg(*doc.find(id),&titleBlockSvg,&error,nullptr,nullptr,nullptr,
+                cad::OrthographicProjection::ThirdAngle,cad::DrawingSheetSize::A4Landscape,
+                cad::DrawingAuxiliaryView::Isometric,0.5,{},oversizedTitle),
+            "Overlong title-block revision was accepted");
+    require(!cad::buildOrthographicDrawingSvg(*doc.find(id),&notesSvg,&error,nullptr,nullptr,nullptr,
+                cad::OrthographicProjection::ThirdAngle,cad::DrawingSheetSize::A4Landscape,
+                cad::DrawingAuxiliaryView::Isometric,0.5,{"a","b","c","d","e","f"}),
+            "More than five general drawing notes were accepted");
+    require(!cad::buildOrthographicDrawingSvg(*doc.find(id),&notesSvg,&error,nullptr,nullptr,nullptr,
+                cad::OrthographicProjection::ThirdAngle,cad::DrawingSheetSize::A4Landscape,
+                cad::DrawingAuxiliaryView::Isometric,0.5,{QString(61,'x')}),
+            "An overlong general drawing note was accepted");
+    require(!cad::buildOrthographicDrawingSvg(*doc.find(id),&notesSvg,&error,nullptr,nullptr,nullptr,
+                cad::OrthographicProjection::ThirdAngle,cad::DrawingSheetSize::A4Landscape,
+                cad::DrawingAuxiliaryView::Isometric,0.5,{QStringLiteral("bad\tcontrol")}),
+            "A general drawing note with a control character was accepted");
+    require(visible>0&&scale>0.0&&scale<=1.0,"Drawing produced no visible linework or an invalid automatic scale");
+    const auto isoDrawingCheck=cad::checkDrawingSvg(svg,cad::StandardsProfile::IsoDrawingReadiness);
+    require(isoDrawingCheck.errors==0&&isoDrawingCheck.warnings==0,
+            "Complete drawing did not pass the ISO structural-readiness screen");
+    const auto asmeDrawingCheck=cad::checkDrawingSvg(svg,cad::StandardsProfile::AsmeDrawingReadiness);
+    require(asmeDrawingCheck.errors==0&&asmeDrawingCheck.warnings==0
+            &&std::any_of(asmeDrawingCheck.findings.cbegin(),asmeDrawingCheck.findings.cend(),[](const auto& f){return f.code=="DRAWING_CHECK_SCOPE"&&f.message.contains("not standards certification");}),
+            "ASME structural screen failed or omitted its no-certification scope note");
+    QByteArray conflictingProjectionSvg=svg;
+    conflictingProjectionSvg.replace("data-projection-symbol=\"third-angle\"","data-projection-symbol=\"first-angle\"");
+    const auto conflictingProjectionCheck=cad::checkDrawingSvg(conflictingProjectionSvg,cad::StandardsProfile::IsoDrawingReadiness);
+    require(std::any_of(conflictingProjectionCheck.findings.cbegin(),conflictingProjectionCheck.findings.cend(),[](const auto& f){return f.code=="DRAWING_PROJECTION_SYMBOL_CONFLICT";}),
+            "Drawing screen failed to detect a projection-heading/symbol mismatch");
+    QByteArray misplacedProjectionSvg=svg;
+    misplacedProjectionSvg.replace("<circle cx=\"261\" cy=\"165\" r=\"3\"/>","<circle cx=\"282\" cy=\"165\" r=\"3\"/>");
+    const auto misplacedProjectionCheck=cad::checkDrawingSvg(misplacedProjectionSvg,cad::StandardsProfile::AsmeDrawingReadiness);
+    require(std::any_of(misplacedProjectionCheck.findings.cbegin(),misplacedProjectionCheck.findings.cend(),[](const auto& f){return f.code=="DRAWING_PROJECTION_SYMBOL_PLACEMENT";}),
+            "Drawing screen failed to detect a circular projection view on the wrong side");
+    QByteArray misplacedViewSvg=svg;
+    const qsizetype rightTextEnd=misplacedViewSvg.indexOf(">RIGHT</text>");
+    const qsizetype rightTextStart=rightTextEnd<0 ? -1 : misplacedViewSvg.lastIndexOf("<text ",rightTextEnd);
+    const qsizetype rightXStart=rightTextStart<0 ? -1 : misplacedViewSvg.indexOf("x=\"",rightTextStart);
+    const qsizetype rightXEnd=rightXStart<0 ? -1 : misplacedViewSvg.indexOf('"',rightXStart+3);
+    require(rightXEnd>rightXStart&&rightXEnd>rightTextStart&&rightTextEnd>rightTextStart,
+            "Could not locate the RIGHT view label for projection-layout regression");
+    misplacedViewSvg.replace(rightXStart+3,rightXEnd-rightXStart-3,"45.00");
+    const auto misplacedViewCheck=cad::checkDrawingSvg(misplacedViewSvg,cad::StandardsProfile::IsoDrawingReadiness);
+    require(std::any_of(misplacedViewCheck.findings.cbegin(),misplacedViewCheck.findings.cend(),[](const auto& f){return f.code=="DRAWING_PROJECTION_LAYOUT";}),
+            "Drawing screen failed to detect third-angle orthographic views placed using the wrong convention");
+    QByteArray invalidDimensionSvg=svg;invalidDimensionSvg.replace("X 40.000 mm","X NaN mm");
+    const auto invalidDimensionCheck=cad::checkDrawingSvg(invalidDimensionSvg,cad::StandardsProfile::IsoDrawingReadiness);
+    require(std::any_of(invalidDimensionCheck.findings.cbegin(),invalidDimensionCheck.findings.cend(),[](const auto& f){return f.code=="DRAWING_ENVELOPE_DIMENSION_MISSING"&&f.message.contains("X");}),
+            "Drawing screen accepted a non-numeric envelope dimension");
+    QByteArray missingProjectionSymbolSvg=svg;missingProjectionSymbolSvg.replace("data-projection-symbol=\"third-angle\"","data-schematic-symbol=\"third-angle\"");
+    const auto missingProjectionSymbolCheck=cad::checkDrawingSvg(missingProjectionSymbolSvg,cad::StandardsProfile::AsmeDrawingReadiness);
+    require(std::any_of(missingProjectionSymbolCheck.findings.cbegin(),missingProjectionSymbolCheck.findings.cend(),[](const auto& f){return f.code=="DRAWING_PROJECTION_SYMBOL_MISSING";}),
+            "Drawing screen failed to warn when the schematic projection marker was absent");
+    QByteArray missingViewSvg=svg;missingViewSvg.replace(">FRONT</text>",">WEST</text>");
+    const auto missingViewCheck=cad::checkDrawingSvg(missingViewSvg,cad::StandardsProfile::IsoDrawingReadiness);
+    require(missingViewCheck.errors==1&&std::any_of(missingViewCheck.findings.cbegin(),missingViewCheck.findings.cend(),[](const auto& f){return f.code=="DRAWING_VIEW_MISSING";}),
+            "Drawing screen did not report a missing required orthographic view");
+    require(cad::checkDrawingSvg("<not svg>",cad::StandardsProfile::IsoDrawingReadiness).errors==1,
+            "Drawing screen accepted malformed SVG");
+    QByteArray mismatchedViewBoxSvg=svg;mismatchedViewBoxSvg.replace("viewBox=\"0 0 297 210\"","viewBox=\"0 0 296 210\"");
+    const auto mismatchedViewBoxCheck=cad::checkDrawingSvg(mismatchedViewBoxSvg,cad::StandardsProfile::IsoDrawingReadiness);
+    require(std::any_of(mismatchedViewBoxCheck.findings.cbegin(),mismatchedViewBoxCheck.findings.cend(),[](const auto& f){return f.code=="DRAWING_SHEET_FORMAT";}),
+            "Drawing screen accepted a viewBox that conflicts with the physical sheet dimensions");
+    require(cad::checkDrawingSvg(svg,cad::StandardsProfile::BomData).errors==1,
+            "Drawing SVG screen accepted the BOM-only profile");
+    cad::SceneDocument cylinderDoc;
+    require(cylinderDoc.addPrimitive(cad::Primitive::Cylinder,{5,12},&error),"Centerline cylinder fixture creation failed");
+    QByteArray centerlineSvg;
+    require(cad::buildOrthographicDrawingSvg(cylinderDoc.parts().first(),&centerlineSvg,&error),
+            "Cylindrical drawing generation failed");
+    const auto incompleteDrawingCheck=cad::checkDrawingSvg(centerlineSvg,cad::StandardsProfile::IsoDrawingReadiness);
+    require(std::any_of(incompleteDrawingCheck.findings.cbegin(),incompleteDrawingCheck.findings.cend(),[](const auto& f){return f.code=="DRAWING_PART_NUMBER_MISSING";}),
+            "Drawing screen did not flag missing title-block metadata");
+    require(centerlineSvg.count("stroke-dasharray=\"6,1,1,1\"")>=5,
+            "Cylindrical face axes and end-view center marks were not added to the drawing");
+    require(centerlineSvg.contains(QString::fromUtf8("Ø10.000 mm").toUtf8()),
+            "End-on cylindrical feature did not receive its true-diameter drawing callout");
+    QXmlStreamReader reader(svg);
+    while(!reader.atEnd()) reader.readNext();
+    require(!reader.hasError(),"Drawing SVG is not well-formed XML");
+    auto viewLabelY=[](const QByteArray& data,const QString& label) {
+        QXmlStreamReader xmlReader(data);
+        while(!xmlReader.atEnd()) {
+            xmlReader.readNext();
+            if(xmlReader.isStartElement()&&xmlReader.name()=="text") {
+                const double y=xmlReader.attributes().value("y").toDouble();
+                if(xmlReader.readElementText()==label)return y;
+            }
+        }
+        return -1.0;
+    };
+    auto viewLabelX=[](const QByteArray& data,const QString& label) {
+        QXmlStreamReader xmlReader(data);
+        while(!xmlReader.atEnd()) {
+            xmlReader.readNext();
+            if(xmlReader.isStartElement()&&xmlReader.name()=="text") {
+                const double x=xmlReader.attributes().value("x").toDouble();
+                if(xmlReader.readElementText()==label)return x;
+            }
+        }
+        return -1.0;
+    };
+    require(viewLabelX(svg,"ISOMETRIC")>viewLabelX(svg,"RIGHT")
+            &&viewLabelY(svg,"TOP")<viewLabelY(svg,"ISOMETRIC")
+            &&viewLabelY(svg,"ISOMETRIC")<viewLabelY(svg,"FRONT"),
+            "Third-angle isometric view was not placed in its reserved sheet quadrant");
+    QByteArray firstAngle;
+    require(cad::buildOrthographicDrawingSvg(*doc.find(id),&firstAngle,&error,nullptr,nullptr,nullptr,
+            cad::OrthographicProjection::FirstAngle),"First-angle SVG layout generation failed");
+    require(firstAngle.contains("FIRST-ANGLE TECHNICAL DRAWING")&&firstAngle.contains("<rect x=\"10\" y=\"171\"")
+            &&firstAngle.contains("data-projection-symbol=\"first-angle\"")
+            &&firstAngle.contains("<circle cx=\"282\" cy=\"165\" r=\"3\""),
+            "First-angle convention label or title-block placement is missing");
+    const auto firstAngleIsoCheck=cad::checkDrawingSvg(firstAngle,cad::StandardsProfile::IsoDrawingReadiness);
+    const auto firstAngleAsmeCheck=cad::checkDrawingSvg(firstAngle,cad::StandardsProfile::AsmeDrawingReadiness);
+    require(firstAngleIsoCheck.errors==0&&firstAngleIsoCheck.warnings==0
+            &&firstAngleAsmeCheck.errors==0&&firstAngleAsmeCheck.warnings==0,
+            "A valid first-angle drawing did not pass both structural-readiness profiles");
+    require(viewLabelX(firstAngle,"ISOMETRIC")>viewLabelX(firstAngle,"RIGHT"),
+            "First-angle isometric view was not placed opposite the right-side view");
+    QByteArray sectionSvg;int sectionVisible=0;
+    require(cad::buildOrthographicDrawingSvg(*doc.find(id),&sectionSvg,&error,nullptr,&sectionVisible,nullptr,
+            cad::OrthographicProjection::ThirdAngle,cad::DrawingSheetSize::A4Landscape,
+            cad::DrawingAuxiliaryView::SectionA),
+            ("Mid-depth section drawing generation failed: "+error.toStdString()).c_str());
+    require(sectionSvg.contains(">SECTION A-A</text>")&&sectionSvg.contains("CUT PLANE A-A AT MID-DEPTH")
+            &&sectionSvg.contains("stroke-width=\"0.12\"")&&sectionVisible>=4,
+            "Section view, hatching, cutting-plane callout, or section contour is missing");
+    QByteArray positionedSection;
+    require(cad::buildOrthographicDrawingSvg(*doc.find(id),&positionedSection,&error,nullptr,nullptr,nullptr,
+            cad::OrthographicProjection::ThirdAngle,cad::DrawingSheetSize::A4Landscape,
+            cad::DrawingAuxiliaryView::SectionA,0.35),
+            "Custom-depth section generation failed");
+    require(positionedSection.contains("CUT PLANE A-A AT 35% DEPTH (Y=10.500 mm)"),
+            "Custom section plane did not report its chosen depth and model coordinate");
+    require(!cad::buildOrthographicDrawingSvg(*doc.find(id),&positionedSection,&error,nullptr,nullptr,nullptr,
+            cad::OrthographicProjection::ThirdAngle,cad::DrawingSheetSize::A4Landscape,
+            cad::DrawingAuxiliaryView::SectionA,1.0),
+            "Boundary-only section plane was accepted");
+    require(viewLabelY(svg,"TOP")<viewLabelY(svg,"FRONT")&&viewLabelY(firstAngle,"TOP")>viewLabelY(firstAngle,"FRONT"),
+            "First-angle and third-angle top-view placements were not reversed");
+    QByteArray a3Svg;double a3Scale=0.0;
+    require(cad::buildOrthographicDrawingSvg(*doc.find(id),&a3Svg,&error,&a3Scale,nullptr,nullptr,
+            cad::OrthographicProjection::ThirdAngle,cad::DrawingSheetSize::A3Landscape),
+            "A3 landscape SVG generation failed");
+    require(a3Svg.contains("width=\"420mm\"")&&a3Svg.contains("height=\"297mm\"")
+            &&a3Svg.contains("scale(1.414141)")&&a3Scale>1.4,
+            "A3 sheet dimensions or proportional drawing scale are incorrect");
+    QXmlStreamReader a3Reader(a3Svg);while(!a3Reader.atEnd())a3Reader.readNext();
+    require(!a3Reader.hasError(),"A3 SVG is not well-formed XML");
+    const auto a3IsoCheck=cad::checkDrawingSvg(a3Svg,cad::StandardsProfile::IsoDrawingReadiness);
+    const auto a3AsmeCheck=cad::checkDrawingSvg(a3Svg,cad::StandardsProfile::AsmeDrawingReadiness);
+    require(a3IsoCheck.errors==0&&a3IsoCheck.warnings==0&&a3AsmeCheck.errors==0&&a3AsmeCheck.warnings==0,
+            "Valid scaled A3 third-angle sheet did not pass ISO and ASME structural-readiness checks");
+    require(!cad::buildOrthographicDrawingSvg(*doc.find(id),nullptr,&error),"Null drawing output buffer was accepted");
+    QTemporaryDir dir;require(dir.isValid(),"Drawing test folder creation failed");
+    const QString path=dir.filePath("plate.svg");
+    require(cad::exportOrthographicDrawingSvg(*doc.find(id),path,&error),"Orthographic SVG save failed");
+    require(readBytes(path)==svg,"Saved drawing SVG differs from generated drawing data");
+    require(!cad::exportOrthographicDrawingSvg(*doc.find(id),{},&error),"Empty drawing path was accepted");
 }
 void testBodyMaterialAssignment() {
     cad::SceneDocument doc;QString error;
@@ -2433,6 +2788,8 @@ int main(int argc,char** argv) {
         if(argc==2&&std::string(argv[1])=="--density-mass-properties") { testDensityMassProperties(); std::cout<<"PASS: "<<checks<<" density-mass-properties assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--body-materials") { testBodyMaterialAssignment(); std::cout<<"PASS: "<<checks<<" body-material assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--body-schedule-csv") { testBodyScheduleCsv(); std::cout<<"PASS: "<<checks<<" body-schedule-csv assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--bom-parts-standards") { testBomPartsStandards(); std::cout<<"PASS: "<<checks<<" BOM/parts/standards assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--orthographic-drawing") { testOrthographicDrawingExport(); std::cout<<"PASS: "<<checks<<" orthographic-drawing assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--planar-section") { testPlanarSectionMeasurement(); std::cout<<"PASS: "<<checks<<" planar-section assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--surface-summary") { testSurfaceTypeSummary(); std::cout<<"PASS: "<<checks<<" surface-summary assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--face-area") { testSelectedFaceArea(); std::cout<<"PASS: "<<checks<<" face-area assertions\n"; return 0; }

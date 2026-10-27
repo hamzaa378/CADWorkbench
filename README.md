@@ -19,6 +19,9 @@ CADWorkbench is a native Windows 3D CAD application built with C++20, Qt 6, and 
 - Save and reopen native `.cadscene` documents; use undo and redo.
 - Import and export multi-body STEP files; export STL.
 - Export a CSV body schedule with stable body IDs, names, visibility, volume, area, extents, and center coordinates.
+- Maintain persistent part numbers, descriptions, revisions, purchased/manufactured status, supplier details, and assembly paths; view grouped BOM quantities, per-body parts lists, and a derived assembly tree with quantity/volume/mass roll-ups; export BOM and parts lists as CSV. See [`docs/BOM_PARTS_LIST.md`](docs/BOM_PARTS_LIST.md).
+- Run BOM data-quality and ISO/ASME drawing-readiness checks, plus a separate basic SVG content screen for exported drawings. These checks do not claim standards compliance; clause-level ISO validation and ASME GD&T checks are not implemented. See [`docs/STANDARDS_CHECKS.md`](docs/STANDARDS_CHECKS.md).
+- Export an initial A4 or A3 landscape SVG drawing for one selected solid with selectable first-angle or third-angle layout, front/top/right orthographic views, an isometric or section view, visible/hidden edges, cylindrical centerlines and diameter callouts, notes, editable title-block metadata, and overall X/Y/Z bounding dimensions. Issue dates use `YYYY-MM-DD`. Feature dimensions and standards validation are not included. See [`docs/ORTHOGRAPHIC_DRAWINGS.md`](docs/ORTHOGRAPHIC_DRAWINGS.md).
 - Create a dimensioned Wing rib with an airfoil outline, spar opening, and two lightening holes.
 - Sweep circular or rectangular profiles along a smooth generated 3D path.
 - Sweep elliptical profiles along a smooth generated 3D path.
@@ -40,6 +43,17 @@ CADWorkbench is a native Windows 3D CAD application built with C++20, Qt 6, and 
 - Cut linear arrays of through or blind counterbores along an editable 2D spacing vector.
 - Cut linear arrays of through or blind countersinks with adjustable included angle.
 - Cut a linear array of keyhole slots with adjustable head and throat dimensions.
+
+## BOM, standards, and drawing status (v1.27)
+
+| Area | Implemented and live-checked | Still missing |
+|---|---|---|
+| BOM | Persistent part and purchasing fields, supplier grouping, BOM quality findings, CSV export, and schema-v5 storage; UI editing, reporting, save/reopen, and checks exercised. | Pricing, inventory, purchase orders, and ERP/MRP integration. |
+| Parts list | Per-body list plus a derived assembly tree with quantity, volume, and mass roll-ups; hierarchy and duplicate roll-up exercised in the UI. | Persistent assembly/component instances and independently defined subassemblies. |
+| ISO/ASME checks | BOM/model readiness checks and an exported-SVG content screen; ISO and ASME profile workflows exercised live, including valid and malformed issue dates. | Clause-level ISO compliance, ISO 7200 title-block certification, ASME Y14/GD&T, tolerance, and datum validation. |
+| 2D drawings | One-body A4/A3 SVG export with first/third-angle layouts, orthographic and auxiliary views, basic envelope dimensions, notes, centerlines/callouts, and title-block fields; export and both content screens exercised live. | Persistent editable drawings, multi-part sheets, feature dimensions, and production-release standards validation. |
+
+The verification record and detailed limitations are in [`docs/local_verification.json`](docs/local_verification.json), [`docs/BOM_PARTS_LIST.md`](docs/BOM_PARTS_LIST.md), [`docs/STANDARDS_CHECKS.md`](docs/STANDARDS_CHECKS.md), and [`docs/ORTHOGRAPHIC_DRAWINGS.md`](docs/ORTHOGRAPHIC_DRAWINGS.md). These implemented areas are useful workflows, not full Fusion 360 or AutoCAD parity.
 
 Component templates are editable direct solids, not feature timelines or certified manufacturing designs. CADWorkbench does not claim feature parity with AutoCAD or Fusion 360. See [`docs/FEATURE_GAP_COMPARISON.md`](docs/FEATURE_GAP_COMPARISON.md) for the current scope and known gaps.
 
@@ -195,9 +209,13 @@ ctest --test-dir build -C Release --output-on-failure
 
 The app uses Open CASCADE for solid construction and validity checks. A passing build or core test suite does not by itself confirm every menu workflow or a clean-machine installation. See [`docs/QA_MATRIX.md`](docs/QA_MATRIX.md) and [`docs/manual_qa_results.md`](docs/manual_qa_results.md) for tested workflows and remaining release checks.
 
-Current Windows verification snapshot (2026-10-27): Windows x64 Release build passed; the complete CTest suite passed 41/41. The source audit passes 145 checks with all 115 public core operations referenced by regression. Live UI verified arbitrary-plane sketch extrusion and custom-axis revolution, including preview, solid properties, undo, and redo. Live UI also verified preset/custom material assignment and density-based mass calculations; save/reload remains core-tested but was not repeated in that UI pass. The body-schedule CSV save workflow remains unverified, and numeric two-vertex distance UI verification remains pending because the desktop input path cannot Ctrl-click a second subshape. The W01-W24 release checklist, clean-VM deployment, and approver sign-off remain outstanding. See [`docs/local_verification.json](docs/local_verification.json) for the structured snapshot and [`docs/QA_MATRIX.md](docs/QA_MATRIX.md) for feature details.
+## Current Windows verification (2026-10-27)
 
-Body-schedule CSV verification: Windows Release app and test targets rebuilt; full CTest passed 38/38, including 14 CSV assertions; source audit passed 141 checks with all 113 public core operations covered by regression references. Live UI confirmed the File menu command and CSV save dialog appear for a test box; saving a CSV through the UI remains unverified. See [`docs/BODY_SCHEDULE_CSV.md`](docs/BODY_SCHEDULE_CSV.md).
+The v1.27.0 Windows x64 Release build passed, and the full CTest suite passed **43/43**. Focused drawing checks passed 64 assertions; BOM/parts/standards checks passed 69 assertions. The source audit passed **222 checks**, with all 118 public core operations referenced by regression tests.
+
+Live UI verification covered BOM and parts-list reports, procurement metadata and schema-v5 save/reopen, assembly-tree quantity/volume/mass roll-ups, drawing export, and both ISO/ASME-labeled SVG content screens. A valid revision-A export passed both drawing screens with 0 errors and 0 warnings; an imported malformed issue date produced the expected warning. These screens do not certify standards compliance. See [`docs/local_verification.json`](docs/local_verification.json), [`docs/QA_MATRIX.md`](docs/QA_MATRIX.md), [`docs/BOM_PARTS_LIST.md`](docs/BOM_PARTS_LIST.md), and [`docs/ORTHOGRAPHIC_DRAWINGS.md`](docs/ORTHOGRAPHIC_DRAWINGS.md).
+
+Some individual manual checks remain: the body-schedule CSV save dialog has not been exercised through a save in the UI, and the numeric two-vertex measurement has not been verified live because the available desktop input could not Ctrl-click the second subshape. See [`docs/BODY_SCHEDULE_CSV.md`](docs/BODY_SCHEDULE_CSV.md) and [`docs/VERTEX_DISTANCE.md`](docs/VERTEX_DISTANCE.md).
 
 ## Upload the source to GitHub
 

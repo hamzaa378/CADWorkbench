@@ -1,3 +1,52 @@
+## v1.27.0 drawing issue-date validation - 2026-10-27
+
+- Drawing export now rejects nonempty issue dates outside `YYYY-MM-DD`; the exported-SVG checker flags malformed dates as `DRAWING_ISSUE_DATE_FORMAT`.
+- The Windows x64 Release build passed; focused drawing regression passed 64 assertions, full CTest passed 43/43, and source audit passed 222 checks.
+- Final-app live export with revision A and date `2026-10-27` passed ISO and ASME screens with 0 errors and 0 warnings. An external SVG with `27/10/2026` produced 1 date-format warning under each profile; details state that clause compliance is not checked.
+
+## v1.26.0 derived assembly hierarchy report - 2026-10-27
+
+- Added an Assembly structure report tab that derives parent/child nodes from slash-separated assembly paths and rolls up descendant quantity, total volume, and total mass.
+- Live Windows verification confirmed `Powertrain/Drive` shows quantity 1 / 24,000 mm³, then quantity 2 / 48,000 mm³ after duplicating the test part. The unsaved test duplicate was discarded.
+- Windows x64 Release build passed; full CTest passed 43/43; source audit passed 219 checks. ISO/ASME drawing checks and editable drawing revision were also verified in the preceding v1.25 UI.
+- The hierarchy is a report view derived from text paths; persistent assembly objects and independent subassembly definitions remain unimplemented.
+
+## v1.25.0 editable drawing revision - 2026-10-27
+
+- Added a drawing-specific revision field to the SVG title-block dialog; it defaults to the selected part's revision and validates length and control characters.
+- The revision is XML-escaped in the SVG. Drawing readiness screens can now pass without a missing-revision warning when the field is supplied.
+- Windows x64 Release build passed; focused drawing regression passed 61 assertions, BOM/parts/standards regression passed 69 assertions, full CTest passed 43/43, and source audit passed 217 checks.
+- Live Windows UI exported a revision-A sheet; ISO and ASME content screens both returned 0 errors and 0 warnings. They remain content screens, not standards certification.
+
+## v1.24.0 editable drawing title-block identity fields - 2026-10-27
+
+- Added drawing number, drawn-by, checked-by, and issue-date fields to the orthographic SVG export flow and title block. Empty drawing numbers use the part number; user text is validated and XML-escaped.
+- The SVG readiness screen reports a missing drawing number. The UI is tested live: export retained notes and entered title-block fields, and XML parsed successfully. ISO and ASME drawing screens each returned 0 errors and 1 expected revision warning, with explicit non-certification scope details.
+- Windows Release build passed; focused drawing regression passed 60 assertions, BOM/parts/standards regression passed 69 assertions, full CTest passed 43/43, and the source audit result is recorded in `docs/local_verification.json`.
+- The export remains a static SVG with envelope dimensions. ISO 7200 certification, ISO tolerances, ASME Y14, datums, and GD&T remain unimplemented.
+
+## v1.22.0 assembly-aware BOM paths - 2026-10-27
+
+- Added slash-separated per-body assembly paths, editable with part number, description, and revision. BOM and parts-list reports and CSV exports now include the path; the BOM keeps identical part definitions in different paths separate.
+- Native scenes save as schema v4; older v1-v3 files continue to load with empty assembly paths. Duplicate, pattern, and mirror operations carry path metadata.
+- Orthographic SVG export accepts up to five user-entered general-note lines, validates their length and printable text, and XML-escapes notes in the output.
+- Windows Release build and full CTest passed (43/43); BOM/standards focused regression passed 53 assertions; drawing regression passed 54 assertions; source audit passed 205 checks with all 118 public core operations covered.
+- Live UI verified assembly-path editing/reporting and schema-v4 save/reopen. General notes were entered during SVG export; the saved file contains both notes, and ISO and ASME readiness screens each returned 0 errors and 2 expected metadata warnings.
+- Assembly paths are grouping metadata. An editable assembly tree, recursive subassembly rollups, purchased parts, and ERP/MRP integration remain outside this update.
+
+## v1.21.0 projection-convention symbol - 2026-10-27
+
+- Orthographic sheets now include a schematic truncated-cone/circle projection symbol. The circular end view is placed to the right for first-angle and to the left for third-angle projection.
+- The symbol is separately identified in SVG and covered by regressions for both conventions; it is a drawing aid, not a claim of ISO/ASME symbol conformance.
+- Windows x64 Release rebuild passed; focused drawing regression passed 41 assertions; full CTest passed 43/43; source audit passed 196 checks with all 118 public core operations covered. Live UI exports passed for A4 first-angle and third-angle sheets; SVG inspection confirmed the matching symbol placement and Ø20.000 mm cylinder callout.
+
+## v1.20.0 cylindrical diameter drawing callouts - 2026-10-27
+
+- Orthographic SVG export now adds a deduplicated leader callout for the actual diameter of end-on cylindrical features. This complements the existing overall envelope dimensions, cylinder centerlines, and center marks.
+- Focused drawing regression passed 40 assertions; full Windows x64 Release CTest passed 43/43; the source audit and live Windows export confirmed a 10 mm radius cylinder is annotated `Ø20.000 mm`.
+- BOM, parts-list, combined checks, and individual ISO/ASME drawing-readiness checks were also exercised live. These checks report readiness and data issues and do not claim ISO or ASME compliance.
+- See `ORTHOGRAPHIC_DRAWINGS.md`, `STANDARDS_CHECKS.md`, and `QA_MATRIX.md` for scope and remaining work.
+
 ## v1.10.0 custom-axis modeling - 2026-10-27
 
 - Added sketch extrusion on arbitrary 3D planes, including world origin, normal, and projected U direction. Existing profiles, Join/Cut, taper, symmetric/reverse modes, and through-all cuts use the custom frame.
@@ -306,4 +355,70 @@
 
 
 - Live Windows UI verification passed: preset and custom material names/densities appeared in body properties, and mass properties used the assigned densities (0.064800 kg at 2,700 kg/m³; 0.188400 kg at 7,850 kg/m³ for a 24,000 mm³ box).
+
+## v1.11.0 BOM, parts lists, and data readiness - 2026-10-27
+
+- Added persistent part numbers, descriptions, and revisions with native-scene schema v3 and backwards-compatible v1/v2 loading.
+- Added grouped BOM and per-body parts-list reports, material-aware unit/total mass and volume, escaped CSV exports, and part metadata inheritance for duplicate/pattern/mirror operations.
+- Added BOM quality checks and selectable ISO/ASME drawing-readiness profiles. These profiles do not claim to validate drawing rules; ISO tolerances and ASME title-block/dimension/GD&T checks remain pending 2D drawings.
+- Windows Release build passed, focused regression passed 42 assertions, full CTest passed 42/42, and live UI confirmed metadata, material-aware mass, duplicate aggregation, per-body rows, both CSV exports, and all three checker profiles.
+- See `BOM_PARTS_LIST.md`, `STANDARDS_CHECKS.md`, and `QA_MATRIX.md` for behavior, coverage, and remaining work.
+
+## v1.12.0 orthographic SVG drawings - 2026-10-27
+
+- Added A4 landscape SVG export for one selected body, with front, top, and right hidden-line views and a basic part metadata block.
+- Windows Release build passed; drawing export regression passed 15 assertions; full CTest passed 43/43.
+- Live UI exported and parsed a test drawing with all three views, part number, revision, and 24 vector polylines.
+- This is an unannotated drawing export. Dimensions, tolerance annotations, datums, GD&T, and standards validation remain unimplemented.
+
+## v1.13.0 first-angle and third-angle drawing layouts - 2026-10-27
+
+- Added a projection picker and first-angle/third-angle orthographic layouts, with matching view arrangement and title-block placement.
+- Windows x64 Release build passed; focused drawing regression passed 19 assertions; full CTest passed 43/43.
+- Live UI exported both conventions for a 40 × 30 × 20 mm test solid. Both SVG artifacts parsed, and rendered previews confirmed the layouts.
+- The exports include overall-envelope dimensions only. Editable dimensions, feature dimensions, projection symbols, tolerance annotation, and ISO/ASME validation remain unimplemented.
+
+## v1.14.0 drawing sheet sizes - 2026-10-27
+
+- Added A3 landscape SVG export alongside A4, with a selectable paper size in the drawing export flow and proportional layout scaling.
+- Focused orthographic drawing regression passes 22 assertions. Live Windows UI exported an A3 first-angle test drawing; its SVG parsed with a 420 × 297 mm canvas, metadata, three orthographic views, envelope dimensions, and 24 model-edge paths. The rendered sheet was visually reviewed.
+- Windows Release build and full CTest/source-audit results are recorded in `docs/QA_MATRIX.md` and `docs/local_verification.json`.
+
+## v1.15.0 isometric drawing view - 2026-10-27
+
+- Added a hidden-line isometric view to the A4/A3 first-angle and third-angle SVG sheets; the drawing scale now fits all four views.
+- Core drawing regression passes 24 assertions. The live Windows app exported an A3 third-angle box drawing; SVG parsing confirmed a 420 × 297 mm sheet, all four view labels and 36 edge paths. Rendered layout review passed.
+- Windows x64 Release build and full CTest passed 43/43. See `docs/ORTHOGRAPHIC_DRAWINGS.md` and `docs/QA_MATRIX.md`.
+
+## v1.16.0 section views and combined readiness checks - 2026-10-27
+
+- Added selectable Section A-A at the body's Y mid-depth to first-/third-angle A4/A3 SVG sheets. The generated section has a cut-plane callout, same-direction arrows, and clipped 45-degree hatch lines. It remains a simple fixed-plane section view.
+- Added “All available checks” to run the BOM data, ISO drawing-readiness, and ASME drawing-readiness reports together with separate findings and combined totals.
+- Windows x64 Release build passed. Focused orthographic drawing regression passed 26 assertions; full CTest passed 43/43; source audit passed 180 checks with 118/118 public core operations referenced. Live UI verified the combined checks and A4 section export; rendered review of the section sheet remains pending.
+- The standards profiles remain readiness/data checks and do not claim ISO or ASME drawing compliance. See `ORTHOGRAPHIC_DRAWINGS.md`, `STANDARDS_CHECKS.md`, and `QA_MATRIX.md`.
+
+## v1.17.0 selectable section depth - 2026-10-27
+
+- Added a user-selected section location from 1% to 99% through the body's Y extent. The cut-plane callout reports the percentage and model-space Y coordinate; invalid boundary positions are rejected.
+- Windows x64 Release build passed; focused drawing regression passed 29 assertions; full CTest passed 43/43; source audit passed 184 checks with 118/118 public core operations referenced. Live UI exported a 35% section and confirmed its Y coordinate. Fresh raster sheet review remains pending.
+
+## v1.18.0 cylindrical centerlines and center marks - 2026-10-27
+
+- Added centerline strokes from cylindrical faces in projected orthographic views and center marks where the cylinder axis points toward the view.
+- Windows x64 Release build passed; focused drawing regression passed 32 assertions; full CTest passed 43/43; source audit passed 186 checks with all 118 public core operations referenced. Live UI exported a third-angle A4 drawing from a 10 mm radius × 35 mm cylinder. SVG validation found 31 polylines, including five centerline/center-mark strokes. Rendered review confirmed the annotations and title block fit; the PNG and source SVG are in `docs/evidence/`.
+- Updated ISO/ASME readiness messages to accurately state that exported drawing sheets are not inspected by those checks; the live combined run still reported 0 errors and 12 expected metadata warnings.
+
+## v1.19.0 exported drawing readiness screen - 2026-10-27
+
+- Added an Inspect command that screens SVG drawings for valid XML, A4/A3 metric dimensions with a matching viewBox, required orthographic and auxiliary-view labels, projection convention, X/Y/Z envelope dimensions, and populated title-block fields. ISO and ASME checks are reported separately and explicitly disclaim clause-level compliance.
+- Added regressions for complete sheets, malformed SVG, missing views, incomplete title blocks, mismatched page/viewBox sizes, and unsupported profile selection.
+- Windows x64 Release build passed; focused drawing regression passed 39 assertions; full CTest passed 43/43 with `-C Release`; source audit passed 190 checks and 118/118 public core regression references. The final v1.19 UI relaunch remains unverified because Computer Use was stopped by physical Escape; a prior UI run exercised both profile screens on the drawing.
+
+## v1.23.0 procurement-aware BOM - 2026-10-27
+
+- Added per-body Manufactured/Purchased classification, supplier, and supplier part number fields to the editor, grouped BOM, per-body parts list, and both CSV exports. Purchasing data participates in BOM rollup identity and duplicate inheritance.
+- BOM data-quality checks report missing supplier and catalogue number for purchased items. Native schema v5 persists the values; schema v1-v4 scenes continue to load with legacy items defaulting to Manufactured.
+- Live Windows UI opened a schema-v4 scene, edited it to a purchased component, displayed the new fields in both report tabs, ran the BOM data-quality profile (0 errors; 2 expected revision/material warnings), and saved/inspected a schema-v5 file.
+- Windows Release build passed; BOM/parts/standards regression passed 69 assertions; drawing regression passed 54 assertions; full CTest passed 43/43; source audit passed 209 checks with 118/118 public core operations referenced.
+- The update does not add pricing, stock management, purchase orders, supplier catalogs, or ERP integration.
 

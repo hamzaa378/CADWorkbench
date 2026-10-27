@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(CADWorkbench VERSION 1.10.0 LANGUAGES CXX)
+project(CADWorkbench VERSION 1.27.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -16,6 +16,8 @@ find_package(OpenCASCADE 8.0.1 REQUIRED CONFIG)
 add_library(cadcore STATIC
     src/core/SceneDocument.h
     src/core/SceneDocument.cpp
+    src/core/PartsData.cpp
+    src/core/DrawingSheet.cpp
     src/core/FormFeatures.cpp
     src/core/EngineeringComponents.cpp
     src/core/AdvancedComponents.cpp
@@ -30,7 +32,7 @@ target_include_directories(cadcore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src ${Open
 target_link_libraries(cadcore PUBLIC
     Qt6::Core Qt6::Gui
     TKernel TKMath TKG2d TKG3d TKBRep TKGeomBase TKGeomAlgo
-    TKPrim TKTopAlgo TKBO TKBool TKOffset TKFillet TKShHealing TKMesh
+    TKPrim TKTopAlgo TKBO TKBool TKOffset TKFillet TKShHealing TKMesh TKHLR
     TKDESTEP TKDESTL TKXSBase
 )
 
@@ -100,6 +102,8 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME cadcore_geometry_and_persistence COMMAND cadcore_tests)
     add_test(NAME cadcore_body_schedule_csv COMMAND cadcore_tests --body-schedule-csv)
+    add_test(NAME cadcore_bom_parts_standards COMMAND cadcore_tests --bom-parts-standards)
+    add_test(NAME cadcore_orthographic_drawing COMMAND cadcore_tests --orthographic-drawing)
 endif()
 
 # Manual Windows install: deploy Qt with windeployqt + OCCT DLLs from vcpkg.

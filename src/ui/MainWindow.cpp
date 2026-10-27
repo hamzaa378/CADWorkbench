@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "core/DrawingSheet.h"
 #include "CadViewport.h"
 
 #include <BRepGProp.hxx>
@@ -18,9 +19,13 @@
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDate>
+#include <QDateEdit>
 #include <QDockWidget>
 #include <QDoubleSpinBox>
 #include <QFutureWatcher>
+#include <QHash>
+#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
@@ -38,6 +43,8 @@
 #include <QStatusBar>
 #include <QToolBar>
 #include <QTabWidget>
+#include <QTableWidget>
+#include <QHeaderView>
 #include <QToolButton>
 #include <QTimer>
 #include <QTreeWidget>
@@ -161,6 +168,9 @@ void MainWindow::buildUi() {
     auto* exportStepAction = file->addAction("Export STEP...",this,[this]{exportFile(true);});
     auto* exportStlAction = file->addAction("Export STL...",this,[this]{exportFile(false);});
     auto* exportBodyScheduleAction=file->addAction("Export body schedule CSV...",this,&MainWindow::exportBodyScheduleCsv);
+    auto* exportBomAction=file->addAction("Export bill of materials CSV...",this,&MainWindow::exportBillOfMaterialsCsv);
+    auto* exportPartsListAction=file->addAction("Export parts list CSV...",this,&MainWindow::exportPartsListCsv);
+    auto* exportDrawingAction=file->addAction("Export orthographic drawing SVG...",this,&MainWindow::exportDrawingSvg);
     file->addSeparator();
     auto* exitAction = file->addAction("E&xit",this,&QWidget::close);
 
@@ -171,6 +181,7 @@ void MainWindow::buildUi() {
     auto* renameAction = edit->addAction("Rename selected...",this,&MainWindow::renameObject,QKeySequence("F2"));
     auto* colorAction = edit->addAction("Body color...",this,&MainWindow::recolorObject);
     auto* materialAction = edit->addAction("Assign material...",this,&MainWindow::assignMaterial);
+    auto* metadataAction = edit->addAction("Part number / description / revision...",this,&MainWindow::editPartMetadata);
     auto* deleteAction = edit->addAction("Delete selected",this,&MainWindow::removeSelected,QKeySequence::Delete);
 
     auto* create = menuBar()->addMenu("&Create");
@@ -349,6 +360,10 @@ void MainWindow::buildUi() {
     auto* edgeLengthAction = inspect->addAction("Measure selected edge length...",this,&MainWindow::measureSelectedEdgeLength);
     auto* vertexCoordinatesAction = inspect->addAction("Measure selected vertex coordinates...",this,&MainWindow::measureSelectedVertexCoordinates);
     auto* vertexDistanceAction = inspect->addAction("Measure distance between vertices...",this,&MainWindow::measureSelectedVertexDistance);
+    inspect->addSeparator();
+    auto* partsReportAction = inspect->addAction("BOM and parts list...",this,&MainWindow::showPartsReports);
+    auto* standardsCheckAction = inspect->addAction("Run BOM / ISO / ASME checks...",this,&MainWindow::runStandardsCheck);
+    auto* drawingCheckAction = inspect->addAction("Check exported drawing SVG...",this,&MainWindow::checkDrawingSheet);
 
     auto* select = menuBar()->addMenu("&Select");
     auto* group = new QActionGroup(this);
@@ -420,7 +435,7 @@ void MainWindow::buildUi() {
     addRibbonTab("File",{
         {"Document",{newAction,openAction,saveAction,saveAsAction,exitAction}},
         {"Import",{importStepAction}},
-        {"Export",{exportStepAction,exportStlAction,exportBodyScheduleAction}},
+        {"Export",{exportStepAction,exportStlAction,exportBodyScheduleAction,exportBomAction,exportPartsListAction,exportDrawingAction}},
         {"History",{undoAction_,redoAction_}}
     });
     addRibbonTab("Create",{
@@ -440,10 +455,11 @@ void MainWindow::buildUi() {
         {"Combine",{fuseAction,cutAction,commonAction}},
         {"Pattern",{patternAction,vectorPatternAction,rectangularPatternAction,vectorRectangularPatternAction,circularPatternAction,axisPatternAction}},
         {"Features",{holeAction,holeGridAction,circularHolePatternAction,circularCountersinkPatternAction,circularCounterborePatternAction,linearCountersinkPatternAction,linearCounterborePatternAction,dovetailGrooveAction,tSlotGrooveAction,roundedSlotAction,keyholeSlotAction,roundedSlotPatternAction,linearKeyholePatternAction,splitAction,shellAction,draftAction,filletAction,chamferAction,asymmetricChamferAction,filletAllAction,chamferAllAction}},
-        {"Manage",{renameAction,colorAction,materialAction,deleteAction}}
+        {"Manage",{renameAction,colorAction,materialAction,metadataAction,deleteAction}}
     });
     addRibbonTab("Inspect",{
         {"Measure",{massPropertiesAction,clearanceAction,interferenceAction,diagnosticsAction,sectionAction,surfaceSummaryAction,faceAreaAction,edgeLengthAction,vertexCoordinatesAction,vertexDistanceAction}},
+        {"Parts data",{partsReportAction,standardsCheckAction,drawingCheckAction}},
         {"Selection",{bodyAction_,faceAction,edgeAction,vertexAction}}
     });
     addRibbonTab("View",{
@@ -506,8 +522,11 @@ void MainWindow::updateInspector(const QStringList& ids) {
     if (!box.IsVoid()) box.Get(xmin,ymin,zmin,xmax,ymax,zmax);
     const QString materialText=part->materialName.isEmpty()?QStringLiteral("Unassigned"):
         QStringLiteral("%1 (%2 kg/m³)").arg(part->materialName).arg(part->materialDensityKgPerM3,0,'f',1);
-    detail_->setText(QString("%1\n\nVolume: %2 mmÂ³\nBounds X: %3 to %4 mm\nBounds Y: %5 to %6 mm\nBounds Z: %7 to %8 mm\nFaces: %9\nEdges: %10\nVisible: %11\nColor: %12\nMaterial: %13\n\nID: %14")
-        .arg(part->name).arg(props.Mass(),0,'f',3)
+    detail_->setText(QString("%1\n\nPart number: %2\nDescription: %3\nRevision: %4\nVolume: %5 mm^3\nBounds X: %6 to %7 mm\nBounds Y: %8 to %9 mm\nBounds Z: %10 to %11 mm\nFaces: %12\nEdges: %13\nVisible: %14\nColor: %15\nMaterial: %16\n\nID: %17")
+        .arg(part->name).arg(part->partNumber.isEmpty()?QStringLiteral("(not set)"):part->partNumber)
+        .arg(part->description.isEmpty()?QStringLiteral("(not set)"):part->description)
+        .arg(part->revision.isEmpty()?QStringLiteral("(not set)"):part->revision)
+        .arg(props.Mass(),0,'f',3)
         .arg(xmin,0,'f',2).arg(xmax,0,'f',2)
         .arg(ymin,0,'f',2).arg(ymax,0,'f',2)
         .arg(zmin,0,'f',2).arg(zmax,0,'f',2)
@@ -724,7 +743,7 @@ void MainWindow::refresh(bool fit) {
     undoAction_->setEnabled(document_.canUndo());
     redoAction_->setEnabled(document_.canRedo());
     const QString title = document_.path().isEmpty() ? "Untitled" : QFileInfo(document_.path()).fileName();
-    setWindowTitle(QString("CADWorkbench v1.10.0 â€¢ %1%2").arg(title,document_.dirty() ? " *" : ""));
+    setWindowTitle(QString("CADWorkbench v1.27.0 â€¢ %1%2").arg(title,document_.dirty() ? " *" : ""));
     statusBar()->showMessage(QString("%1 bodies  |  millimeters  |  %2")
                              .arg(document_.parts().size()).arg(document_.dirty() ? "Unsaved changes" : "Saved"),5000);
 }
@@ -2317,6 +2336,159 @@ void MainWindow::assignMaterial() {
     if(!document_.setMaterial(ids,materialName,density,&error))reportError("Assign material",error);
     else refresh();
 }
+void MainWindow::editPartMetadata() {
+    if (!requireBodyMode("Edit part metadata")) return;
+    const auto ids=selectedIds();
+    if(ids.size()!=1){reportError("Part metadata","Select exactly one body.");return;}
+    const cad::Part* part=document_.find(ids.first());if(!part)return;
+    QDialog dialog(this);dialog.setWindowTitle("Part and assembly information");
+    auto* form=new QFormLayout(&dialog);
+    auto* number=new QLineEdit(part->partNumber,&dialog);number->setMaxLength(32);number->setPlaceholderText("e.g. PLATE-001");
+    auto* description=new QLineEdit(part->description,&dialog);description->setMaxLength(200);
+    auto* revision=new QLineEdit(part->revision,&dialog);revision->setMaxLength(16);revision->setPlaceholderText("e.g. A");
+    auto* assemblyPath=new QLineEdit(part->assemblyPath,&dialog);assemblyPath->setMaxLength(200);assemblyPath->setPlaceholderText("e.g. Pump/Drive");
+    auto* procurementType=new QComboBox(&dialog);procurementType->addItems({"Manufactured","Purchased"});procurementType->setCurrentText(part->procurementType);
+    auto* supplier=new QLineEdit(part->supplier,&dialog);supplier->setMaxLength(80);supplier->setPlaceholderText("Required for purchased items");
+    auto* supplierPartNumber=new QLineEdit(part->supplierPartNumber,&dialog);supplierPartNumber->setMaxLength(64);supplierPartNumber->setPlaceholderText("Supplier catalogue number");
+    form->addRow("Part number:",number);form->addRow("Description:",description);form->addRow("Revision:",revision);form->addRow("Assembly path:",assemblyPath);
+    form->addRow("Procurement type:",procurementType);form->addRow("Supplier:",supplier);form->addRow("Supplier part number:",supplierPartNumber);
+    auto* note=new QLabel("Part numbers use uppercase letters, numbers, dots, underscores, or hyphens in the standards check.",&dialog);
+    note->setWordWrap(true);form->addRow(note);
+    auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);form->addWidget(buttons);
+    connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);
+    connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+    if(dialog.exec()!=QDialog::Accepted)return;
+    QString error;
+    if(!document_.setPartMetadata(ids.first(),number->text(),description->text(),revision->text(),assemblyPath->text(),
+                                  procurementType->currentText(),supplier->text(),supplierPartNumber->text(),&error))reportError("Part metadata",error);
+    else refresh();
+}
+void MainWindow::showPartsReports() {
+    QString error;
+    const auto bom=document_.billOfMaterials(&error);
+    if(bom.isEmpty()){reportError("BOM",error.isEmpty()?"The document has no bodies.":error);return;}
+    const auto list=document_.partsList(&error);
+    if(list.isEmpty()){reportError("Parts list",error);return;}
+    QDialog dialog(this);dialog.setWindowTitle("Bill of materials and parts list");dialog.resize(1050,560);
+    auto* layout=new QVBoxLayout(&dialog);auto* tabs=new QTabWidget(&dialog);layout->addWidget(tabs);
+    auto makeTable=[&](const QStringList& headers,int rows){
+        auto* table=new QTableWidget(rows,headers.size(),tabs);table->setHorizontalHeaderLabels(headers);
+        table->setEditTriggers(QAbstractItemView::NoEditTriggers);table->setSelectionBehavior(QAbstractItemView::SelectRows);
+        table->setAlternatingRowColors(true);table->horizontalHeader()->setStretchLastSection(true);
+        return table;
+    };
+    auto* bomTable=makeTable({"Item","Part number","Description","Revision","Material","Qty","Unit volume mm³","Total volume mm³","Unit mass kg","Total mass kg","Assembly path","Procurement type","Supplier","Supplier part number"},bom.size());
+    for(int r=0;r<bom.size();++r){const auto& x=bom[r];const QStringList values={QString::number(x.itemNumber),x.partNumber,x.description,x.revision,x.materialName,QString::number(x.quantity),QString::number(x.unitVolumeMm3,'f',3),QString::number(x.totalVolumeMm3,'f',3),x.unitMassKg>0?QString::number(x.unitMassKg,'f',6):QString(),x.totalMassKg>0?QString::number(x.totalMassKg,'f',6):QString(),x.assemblyPath,x.procurementType,x.supplier,x.supplierPartNumber};for(int c=0;c<values.size();++c)bomTable->setItem(r,c,new QTableWidgetItem(values[c]));}
+    tabs->addTab(bomTable,"BOM (grouped quantities)");
+    auto* partsTable=makeTable({"Item","Body name","Part number","Description","Revision","Material","Qty","Volume mm³","Mass kg","Body ID","Assembly path","Procurement type","Supplier","Supplier part number"},list.size());
+    for(int r=0;r<list.size();++r){const auto& x=list[r];const QStringList values={QString::number(x.itemNumber),x.bodyName,x.partNumber,x.description,x.revision,x.materialName,"1",QString::number(x.volumeMm3,'f',3),x.massKg>0?QString::number(x.massKg,'f',6):QString(),x.bodyId,x.assemblyPath,x.procurementType,x.supplier,x.supplierPartNumber};for(int c=0;c<values.size();++c)partsTable->setItem(r,c,new QTableWidgetItem(values[c]));}
+    tabs->addTab(partsTable,"Parts list (one row per body)");
+    auto* assemblyTree=new QTreeWidget(tabs);
+    assemblyTree->setColumnCount(7);
+    assemblyTree->setHeaderLabels({"Assembly / item","Part number","Description","Qty","Total volume mm³","Total mass kg","Material"});
+    assemblyTree->setAlternatingRowColors(true);
+    assemblyTree->setSelectionBehavior(QAbstractItemView::SelectRows);
+    assemblyTree->header()->setStretchLastSection(true);
+    QHash<QString,QTreeWidgetItem*> assemblyNodes;
+    for(const auto& row:bom){
+        QTreeWidgetItem* parent=nullptr;
+        QString prefix;
+        const QStringList segments=row.assemblyPath.split('/',Qt::SkipEmptyParts);
+        for(const QString& segment:segments){
+            prefix=prefix.isEmpty()?segment:prefix+'/'+segment;
+            auto it=assemblyNodes.find(prefix);
+            if(it==assemblyNodes.end()){
+                auto* node=parent?new QTreeWidgetItem(parent,{segment}):new QTreeWidgetItem(assemblyTree,{segment});
+                node->setText(2,"Assembly roll-up");
+                assemblyNodes.insert(prefix,node);
+                it=assemblyNodes.find(prefix);
+            }
+            parent=it.value();
+            parent->setData(3,Qt::UserRole,parent->data(3,Qt::UserRole).toInt()+row.quantity);
+            parent->setData(4,Qt::UserRole,parent->data(4,Qt::UserRole).toDouble()+row.totalVolumeMm3);
+            parent->setData(5,Qt::UserRole,parent->data(5,Qt::UserRole).toDouble()+row.totalMassKg);
+        }
+        const QString itemName=row.partNumber.isEmpty()?row.description:row.partNumber;
+        QStringList values={itemName,row.partNumber,row.description,QString::number(row.quantity),
+            QString::number(row.totalVolumeMm3,'f',3),row.totalMassKg>0?QString::number(row.totalMassKg,'f',6):QString(),row.materialName};
+        if(parent)new QTreeWidgetItem(parent,values);
+        else new QTreeWidgetItem(assemblyTree,values);
+    }
+    for(QTreeWidgetItem* node:assemblyNodes){
+        node->setText(3,QString::number(node->data(3,Qt::UserRole).toInt()));
+        node->setText(4,QString::number(node->data(4,Qt::UserRole).toDouble(),'f',3));
+        const double mass=node->data(5,Qt::UserRole).toDouble();
+        node->setText(5,mass>0.0?QString::number(mass,'f',6):QString());
+    }
+    assemblyTree->expandAll();
+    tabs->addTab(assemblyTree,"Assembly structure (hierarchical roll-up)");
+    auto* buttons=new QDialogButtonBox(QDialogButtonBox::Close,&dialog);layout->addWidget(buttons);
+    connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);
+    dialog.exec();
+}
+void MainWindow::runStandardsCheck() {
+    const QStringList choices={"BOM data quality","ISO drawing readiness","ASME drawing readiness","All available checks"};
+    bool accepted=false;const QString choice=QInputDialog::getItem(this,"Standards and data checks","Check profile:",choices,0,false,&accepted);
+    if(!accepted)return;
+    const QVector<QPair<QString,cad::StandardsProfile>> profiles={
+        {choices[0],cad::StandardsProfile::BomData},
+        {choices[1],cad::StandardsProfile::IsoDrawingReadiness},
+        {choices[2],cad::StandardsProfile::AsmeDrawingReadiness}
+    };
+    const bool runAll=choice==choices[3];
+    int errors=0,warnings=0;
+    bool passed=true;
+    QStringList details;
+    for(const auto& [profileName,profile]:profiles){
+        if(!runAll&&choice!=profileName)continue;
+        const auto report=document_.checkStandards(profile);
+        errors+=report.errors;warnings+=report.warnings;passed=passed&&report.passed();
+        if(runAll)details.append(QStringLiteral("%1").arg(profileName));
+        if(report.findings.isEmpty())details.append("No findings.");
+        for(const auto& finding:report.findings){
+            const QString level=finding.severity==cad::FindingSeverity::Error?"ERROR":
+                (finding.severity==cad::FindingSeverity::Warning?"WARNING":"INFO");
+            details.append(QStringLiteral("%1  %2  %3").arg(level,finding.code,finding.message));
+        }
+        if(runAll)details.append(QString());
+    }
+    const QString headline=QStringLiteral("%1\n\nErrors: %2    Warnings: %3\nResult: %4")
+        .arg(choice).arg(errors).arg(warnings).arg(passed?"Passed current checks":"Failed");
+    QMessageBox box(passed?QMessageBox::Information:QMessageBox::Warning,"Standards check",headline,QMessageBox::Ok,this);
+    box.setDetailedText(details.join('\n'));box.exec();
+}
+void MainWindow::checkDrawingSheet() {
+    const QString path=QFileDialog::getOpenFileName(this,"Check exported drawing SVG",QString(),"SVG drawings (*.svg)");
+    if(path.isEmpty())return;
+    QFile file(path);
+    if(!file.open(QIODevice::ReadOnly)){reportError("Drawing readiness",QStringLiteral("Could not read the drawing file: %1").arg(file.errorString()));return;}
+    const QByteArray svg=file.readAll();
+    const QStringList choices={"ISO drawing readiness","ASME drawing readiness","All available checks"};
+    bool accepted=false;const QString choice=QInputDialog::getItem(this,"Drawing readiness","Check profile:",choices,0,false,&accepted);
+    if(!accepted)return;
+    const QVector<QPair<QString,cad::StandardsProfile>> profiles={
+        {choices[0],cad::StandardsProfile::IsoDrawingReadiness},
+        {choices[1],cad::StandardsProfile::AsmeDrawingReadiness}
+    };
+    const bool runAll=choice==choices[2];
+    int errors=0,warnings=0;QStringList details;
+    for(const auto& [profileName,profile]:profiles){
+        if(!runAll&&choice!=profileName)continue;
+        const auto report=cad::checkDrawingSvg(svg,profile);
+        errors+=report.errors;warnings+=report.warnings;
+        if(runAll)details.append(profileName);
+        for(const auto& finding:report.findings){
+            const QString level=finding.severity==cad::FindingSeverity::Error?"ERROR":
+                (finding.severity==cad::FindingSeverity::Warning?"WARNING":"INFO");
+            details.append(QStringLiteral("%1  %2  %3").arg(level,finding.code,finding.message));
+        }
+        if(runAll)details.append(QString());
+    }
+    const QString headline=QStringLiteral("%1\n%2\n\nErrors: %3    Warnings: %4\nResult: %5")
+        .arg(choice,QFileInfo(path).fileName()).arg(errors).arg(warnings).arg(errors==0?"No structural errors":"Drawing structure needs attention");
+    QMessageBox box(errors==0?QMessageBox::Information:QMessageBox::Warning,"Drawing readiness",headline,QMessageBox::Ok,this);
+    box.setDetailedText(details.join('\n'));box.exec();
+}
 void MainWindow::runBoolean(cad::BooleanOp op) {
     if (!requireBodyMode("Boolean")) return;
     const auto ids = selectedIds();
@@ -2467,6 +2639,73 @@ void MainWindow::exportBodyScheduleCsv() {
     QString error;
     if(!document_.exportBodyScheduleCsv(path,&error)){reportError("Export body schedule",error);return;}
     statusBar()->showMessage(QString("Body schedule exported: %1").arg(QFileInfo(path).fileName()),8000);
+}
+void MainWindow::exportBillOfMaterialsCsv() {
+    const QString path=QFileDialog::getSaveFileName(this,"Export bill of materials",{},"CSV files (*.csv)");
+    if(path.isEmpty())return;
+    QString error;
+    if(!document_.exportBillOfMaterialsCsv(path,&error)){reportError("Export bill of materials",error);return;}
+    statusBar()->showMessage(QString("Bill of materials exported: %1").arg(QFileInfo(path).fileName()),8000);
+}
+void MainWindow::exportPartsListCsv() {
+    const QString path=QFileDialog::getSaveFileName(this,"Export parts list",{},"CSV files (*.csv)");
+    if(path.isEmpty())return;
+    QString error;
+    if(!document_.exportPartsListCsv(path,&error)){reportError("Export parts list",error);return;}
+    statusBar()->showMessage(QString("Parts list exported: %1").arg(QFileInfo(path).fileName()),8000);
+}
+void MainWindow::exportDrawingSvg() {
+    const QStringList ids=selectedIds();
+    if(ids.size()!=1){reportError("Export orthographic drawing","Select exactly one body.");return;}
+    const cad::Part* part=document_.find(ids.first());
+    if(!part){reportError("Export orthographic drawing","The selected body could not be found.");return;}
+    bool accepted=false;
+    const QString projectionName=QInputDialog::getItem(this,"Drawing projection","Projection convention",
+        {"Third-angle projection","First-angle projection"},0,false,&accepted);
+    if(!accepted)return;
+    const auto projection=projectionName.startsWith("First-angle")
+        ? cad::OrthographicProjection::FirstAngle : cad::OrthographicProjection::ThirdAngle;
+    const QString sheetName=QInputDialog::getItem(this,"Drawing sheet","Sheet size",
+        {"A4 landscape (297 x 210 mm)","A3 landscape (420 x 297 mm)"},0,false,&accepted);
+    if(!accepted)return;
+    const auto sheetSize=sheetName.startsWith("A3")
+        ? cad::DrawingSheetSize::A3Landscape : cad::DrawingSheetSize::A4Landscape;
+    const QString auxiliaryName=QInputDialog::getItem(this,"Drawing auxiliary view","Auxiliary view",
+        {"Isometric view","Section A-A at body mid-depth"},0,false,&accepted);
+    if(!accepted)return;
+    const auto auxiliaryView=auxiliaryName.startsWith("Section")
+        ? cad::DrawingAuxiliaryView::SectionA : cad::DrawingAuxiliaryView::Isometric;
+    double sectionDepthFraction=0.5;
+    if(auxiliaryView==cad::DrawingAuxiliaryView::SectionA){
+        const double percent=QInputDialog::getDouble(this,"Section A-A","Section plane through body Y depth (%):",
+            50.0,1.0,99.0,1,&accepted);
+        if(!accepted)return;
+        sectionDepthFraction=percent/100.0;
+    }
+    const QString notesText=QInputDialog::getMultiLineText(this,"General drawing notes",
+        "Optional notes (one per line, up to 5 lines of 60 characters):",{},&accepted);
+    if(!accepted)return;
+    QStringList generalNotes;
+    for(const QString& line:notesText.split('\n',Qt::SkipEmptyParts))generalNotes.append(line.trimmed());
+    QDialog titleBlockDialog(this);titleBlockDialog.setWindowTitle("Drawing title block");titleBlockDialog.setMinimumWidth(390);
+    auto* titleForm=new QFormLayout(&titleBlockDialog);
+    auto* drawingNumber=new QLineEdit(part->partNumber,&titleBlockDialog);drawingNumber->setMaxLength(32);drawingNumber->setPlaceholderText("Defaults to part number");
+    auto* drawnBy=new QLineEdit(&titleBlockDialog);drawnBy->setMaxLength(40);drawnBy->setPlaceholderText("Optional");
+    auto* checkedBy=new QLineEdit(&titleBlockDialog);checkedBy->setMaxLength(40);checkedBy->setPlaceholderText("Optional");
+    auto* drawingRevision=new QLineEdit(part->revision,&titleBlockDialog);drawingRevision->setMaxLength(16);drawingRevision->setPlaceholderText("Defaults to part revision");
+    auto* issueDate=new QDateEdit(QDate::currentDate(),&titleBlockDialog);issueDate->setCalendarPopup(true);issueDate->setDisplayFormat("yyyy-MM-dd");
+    titleForm->addRow("Drawing number:",drawingNumber);titleForm->addRow("Drawn by:",drawnBy);
+    titleForm->addRow("Checked by:",checkedBy);titleForm->addRow("Revision:",drawingRevision);titleForm->addRow("Issue date:",issueDate);
+    auto* titleButtons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&titleBlockDialog);titleForm->addWidget(titleButtons);
+    connect(titleButtons,&QDialogButtonBox::accepted,&titleBlockDialog,&QDialog::accept);
+    connect(titleButtons,&QDialogButtonBox::rejected,&titleBlockDialog,&QDialog::reject);
+    if(titleBlockDialog.exec()!=QDialog::Accepted)return;
+    cad::DrawingTitleBlock titleBlock{drawingNumber->text(),drawnBy->text(),checkedBy->text(),issueDate->date().toString(Qt::ISODate),drawingRevision->text()};
+    const QString path=QFileDialog::getSaveFileName(this,"Export orthographic drawing",{},"SVG drawings (*.svg)");
+    if(path.isEmpty())return;
+    QString error;
+    if(!cad::exportOrthographicDrawingSvg(*part,path,&error,projection,sheetSize,auxiliaryView,sectionDepthFraction,generalNotes,titleBlock)){reportError("Export orthographic drawing",error);return;}
+    statusBar()->showMessage(QString("Orthographic drawing exported: %1").arg(QFileInfo(path).fileName()),8000);
 }
 bool MainWindow::saveFile(bool as) {
     QString path = document_.path();

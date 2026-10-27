@@ -55,6 +55,10 @@ private:
     void renameObject();
     void recolorObject();
     void assignMaterial();
+    void editPartMetadata();
+    void showPartsReports();
+    void runStandardsCheck();
+    void checkDrawingSheet();
     void runBoolean(cad::BooleanOp operation);
     void filletSelectedEdge();
     void chamferSelectedEdge();
@@ -101,6 +105,9 @@ private:
     void openFile();
     void importSTEPFile();
     void exportBodyScheduleCsv();
+    void exportBillOfMaterialsCsv();
+    void exportPartsListCsv();
+    void exportDrawingSvg();
     bool saveFile(bool as = false);
     void exportFile(bool step);
     bool maybeSave();

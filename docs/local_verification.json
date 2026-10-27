@@ -1,10 +1,10 @@
 {
-  "version": "1.10.0",
+  "version": "1.27.0",
   "date": "2026-10-27",
   "platform": "Windows x64 Visual Studio 18 2026 Release",
-  "build": "passed; Windows x64 Release CADWorkbench.exe and cadcore_tests.exe rebuilt in build_materials_round/Release; app launched successfully as CADWorkbench v1.10.0",
+  "build": "passed; Windows x64 Release CADWorkbench.exe and cadcore_tests.exe rebuilt for drawing issue-date validation; prior v1.26 hierarchical assembly report remains included",
   "ctest": {
-    "passed": 41,
+    "passed": 43,
     "failed": 0,
     "names": [
       "cadcore_modeling_tools",
@@ -47,15 +47,17 @@
       "cadcore_vertex_distance",
       "cadcore_body_schedule_csv",
       "cadcore_custom_plane_extrusion",
-      "cadcore_custom_axis_revolve"
+      "cadcore_custom_axis_revolve",
+      "cadcore_bom_parts_standards",
+      "cadcore_orthographic_drawing"
     ]
   },
   "direct_core_assertions": null,
   "source_audit_checks": {
-    "passed": 145,
+    "passed": 215,
     "failed": 0,
-    "public_api_operations": 115,
-    "public_api_referenced_by_regression": 115
+    "public_api_operations": 118,
+    "public_api_referenced_by_regression": 118
   },
   "component_templates": {
     "total": 405,
@@ -117,10 +119,27 @@
       "surface_type_summary_cylinder",
       "picked_face_area",
       "picked_edge_length",
-      "picked_vertex_coordinates"
+      "picked_vertex_coordinates",
+      "part_metadata_edit",
+      "material_aware_grouped_bom",
+      "per_body_parts_list",
+      "bom_csv_save_and_contents",
+      "parts_list_csv_save_and_contents",
+      "duplicate_bom_quantity_and_mass_aggregation",
+      "bom_quality_checker",
+      "iso_readiness_checker_scope_review",
+      "asme_readiness_checker_scope_review",
+      "orthographic_svg_export_with_front_top_right_views",
+      "first_angle_projection_svg_export",
+      "third_angle_projection_svg_export",
+      "rendered_review_of_both_projection_layouts",
+      "A3_landscape_first_angle_svg_export",
+      "rendered_review_of_A3_first_angle_layout",
+      "A3_third_angle_isometric_svg_export",
+      "rendered_review_of_four_view_A3_drawing"
     ],
     "individually_opened_every_component_dialog": false,
-    "build_folder_executable_launch": "passed; rebuilt Release executable opened successfully; window title CADWorkbench v1.10.0",
+    "build_folder_executable_launch": "passed; rebuilt Release executable opened successfully; window title CADWorkbench v1.15.0",
     "individual_dialogs_tested": [
       "rotate_world_origin",
       "uniform_scale",
@@ -134,18 +153,23 @@
       "selected_edge_chamfer"
     ],
     "individual_dialogs_tested_every_command": false,
-    "boolean_union_and_circular_pattern_undo": "passed; six bodies restored after each undo"
+    "boolean_union_and_circular_pattern_undo": "passed; six bodies restored after each undo",
+    "drawing_title_block_svg_export": "PASS; final v1.27 live Windows export to title_block_ui_test_v127.svg included drawing number PUMP-BOX-001, author CADWorkbench QA, checker QA Review, revision A, and issue date 2026-10-27. Parsed values confirmed; both ISO and ASME screens returned 0 errors / 0 warnings.",
+    "iso_svg_check": "PASS; final v1.27 valid revision-A SVG returned 0 errors / 0 warnings. Malformed-date SVG returned 0 structural errors and 1 DRAWING_ISSUE_DATE_FORMAT warning; detail text states structural readiness only.",
+    "asme_svg_check": "PASS; final v1.27 valid revision-A SVG returned 0 errors / 0 warnings. Malformed-date SVG returned 0 structural errors and 1 DRAWING_ISSUE_DATE_FORMAT warning; detail text states structural readiness only.",
+    "bom_assembly_hierarchy": "PASS; v1.26 live report displayed Powertrain > Drive > Drive housing. A single 24,000 mm^3 body rolled up as quantity 1; after duplicating, the parent nodes and leaf showed quantity 2 and 48,000 mm^3. Temporary duplicate was discarded.",
+    "issue_date_format_screen": "PASS; v1.27 live ISO and ASME checks on malformed 27/10/2026 each returned 0 structural errors and 1 DRAWING_ISSUE_DATE_FORMAT warning; the valid final export (2026-10-27) returned 0 errors / 0 warnings under both profiles. Details disclaim standards certification."
   },
   "feature_gap_benchmark": {
     "total_capability_areas": 30,
     "implemented": 6,
-    "partial": 4,
-    "not_implemented": 20
+    "partial": 8,
+    "not_implemented": 16
   },
-  "verification_status": "Windows x64 Release app rebuilt and launched as v1.10.0; full CTest suite passed 41/41; source audit passed 145 checks with all 115 public core operations referenced. Custom-plane extrusion, custom-axis revolve, and material workflows passed live Windows UI verification.",
+  "verification_status": "Windows x64 Release v1.27.0 build passed; focused drawing regression passed 64 assertions; BOM/parts/standards regression passed 69 assertions; full CTest passed 43/43; source audit passed 222 checks with all 118 public core operations referenced. Final live v1.27 SVG export retained drawing number, author, checker, revision A, and date 2026-10-27; ISO and ASME each returned 0 errors / 0 warnings. Imported malformed date 27/10/2026 produced 1 DRAWING_ISSUE_DATE_FORMAT warning under both profiles, with explicit non-certification details. Assembly tree rolled two parts to quantity 2 / 48,000 mm^3. Clause-level ISO/ASME, tolerance, datum, and GD&T conformance remain unimplemented.",
   "public_core_api_coverage": {
-    "declared_operations": 115,
-    "referenced_by_regression": 115,
+    "declared_operations": 118,
+    "referenced_by_regression": 118,
     "uncovered": []
   },
   "current_feature_verification": {
@@ -211,6 +235,60 @@
       "ctest": "passed 41/41 full suite",
       "source_audit": "passed 145 checks; 115/115 public core operations referenced",
       "live_ui": "PASS: arbitrary axis (1,1,1), cylinder 6283.185 mm^3, three faces, six edges; undo/redo passed"
+    },
+    "bom_parts_standards": {
+      "focused_assertions": 69,
+      "ctest": "passed 43/43 full Windows x64 Release suite using CTest -C Release",
+      "source_audit": "passed 222 checks; all 118 public core operations referenced",
+      "core": "metadata and assembly-path normalization, purchased/manufactured validation, supplier field limits, duplicate inheritance, assembly/supplier-aware grouping, volume/mass, CSV fields, completeness findings, conflicts, scope, schema-v4 migration, schema-v5 roundtrip, and scene reopen",
+      "live_ui": "PASS; opened schema-v4 scene, edited PUMP-BOX-001 to Purchased / ACME UI Supply / UI-420; both BOM and parts-list tabs showed purchasing fields; quality check returned 0 errors and 2 expected revision/material warnings; saved schema-v5 scene. v1.26 Assembly structure tab displayed nested paths and quantity/volume roll-up; two copies showed quantity 2 and 48,000 mm^3 at each assembly level.",
+      "standards_scope": "BOM data, ISO drawing readiness, and ASME drawing readiness profiles are available individually and together. They validate model/BOM fields and solid validity; a separate exported-SVG structural screen validates basic sheet content. These checks do not claim standards compliance.",
+      "not_implemented": "ISO 129-1/22081 clause-level drawing validation, ISO 7200 title-block conformance, ASME Y14.100/Y14.5 drawing and GD&T validation",
+      "combined_checks_ui": "PASS; v1.18 live All available checks ran on a cylinder with missing metadata; 0 errors and 12 missing-metadata warnings; expanded report showed distinct profile headings and clearly stated exported drawings are not inspected.",
+      "exported_svg_profiles_live_ui": "PASS (readiness only); ISO and ASME each reported 0 structural errors and 3 expected title-block metadata warnings on the saved SVG.",
+      "scene_format": "new files use cadworkbench.scene.v5; v1-v4 scenes remain supported and default procurement to Manufactured"
+    },
+    "orthographic_drawing": {
+      "source_audit": "passed 168 checks; 118/118 public core operations referenced",
+      "limitations": "One selected body; fixed Y mid-depth section only; envelope dimensions only; no editable drawing objects, feature dimensions, projection symbol, tolerances, datums, or standards validation",
+      "ctest": "passed 43/43 full suite after first-angle/third-angle layout changes",
+      "focused_assertions": 19,
+      "live_ui": "PASS; projection picker exercised; exported first-angle and third-angle A4 SVGs from selected 40 x 30 x 20 mm body; both status messages confirmed success; XML inspection confirmed all views, metadata, envelope dimensions, and 24 model-edge polylines",
+      "rendered_layouts": "PASS; local raster previews confirm the first-angle and third-angle placement and title-block layout"
+    },
+    "orthographic_drawing_export": {
+      "focused_assertions": 64,
+      "core": "passed A4/A3, both projection conventions, symbol identity/placement, orthographic layout, section depth, cylindrical centerlines and diameter callouts, XML/readiness screening, note validation/escaping, editable title-block fields including revision, field limits, XML escaping, and drawing-number presence checks; issue date format validation and malformed imported-date finding",
+      "ctest": "passed 43/43 full Windows x64 Release suite",
+      "source_audit": "passed 222 source checks; all 118/118 public core operations referenced by regression",
+      "live_ui": "PASS; final v1.27 exported title_block_ui_test_v127.svg with drawing number PUMP-BOX-001, author CADWorkbench QA, checker QA Review, revision A, and issue date 2026-10-27. Parsed values confirmed; both ISO and ASME content screens returned 0 errors and 0 warnings. Malformed 27/10/2026 imported SVG returned 0 structural errors and 1 DRAWING_ISSUE_DATE_FORMAT warning under both profiles.",
+      "rendered_review": "Both SVG structures checked; separate raster rendering not performed in this update.",
+      "limitations": "flat SVG; one body; notes/dimensions are exported text, not editable drawing objects; no feature dimensions, tolerances, datums, GD&T, ISO 7200 conformance, or standards certification",
+      "exported_svg_readiness_live_ui": "PASS; CADWorkbench Inspect > Check exported drawing SVG was run separately with ISO and ASME profiles on both projection-first-angle-v1.21.svg and projection-third-angle-v1.21.svg. All four runs reported 0 structural errors and 3 warnings for missing part number, revision, and material; detail text disclaimed clause-level validation, tolerances, datums, and GD&T.",
+      "projection_symbol_scope": "schematic drafting aid only; not certified to ISO or ASME symbol requirements",
+      "combined_bom_iso_asme_live_ui": "PASS; Inspect > Run BOM / ISO / ASME checks > All available checks on the active cylinder reported 0 errors and 12 warnings. Expanded details showed four missing-metadata warnings under each BOM, ISO, and ASME heading, plus scope notes for all profiles."
+    },
+    "orthographic_drawing_title_block": {
+      "focused_assertions": 64,
+      "ctest": "passed 43/43 full Windows x64 Release suite",
+      "source_audit": "passed 222 checks; 118/118 public core operations referenced",
+      "fields": "drawing number (defaults to part number), drawn-by, checked-by, drawing revision (defaults to part revision), issue date; printable text only with field limits and XML escaping; issue date must use YYYY-MM-DD",
+      "live_ui": "PASS; final v1.27 live export contained drawing number PUMP-BOX-001, author CADWorkbench QA, checker QA Review, revision A, and issue date 2026-10-27; XML values parsed correctly. ISO and ASME each returned 0 errors and 0 warnings.",
+      "limits": "metadata block only; not ISO 7200 certified; no editable drawing entities or feature/GD&T dimensioning"
+    },
+    "assembly_hierarchy_report": {
+      "build": "Windows x64 Release CADWorkbench.exe and cadcore_tests.exe built successfully; app title v1.26.0",
+      "ctest": "passed 43/43",
+      "source_audit": "passed 222 checks; all 118 public core operations referenced",
+      "live_ui": "PASS; Powertrain > Drive > Drive housing tree built from path labels. One 24,000 mm^3 body showed quantity 1; duplicate produced quantity 2 and 48,000 mm^3 roll-ups at parent and leaf nodes. Test duplicate was discarded.",
+      "limits": "display-only hierarchy derived from slash-separated labels; no persistent assembly objects or independently defined subassemblies"
+    },
+    "drawing_issue_date_validation": {
+      "focused_assertions": 64,
+      "core": "nonempty issue dates outside YYYY-MM-DD rejected during export; imported malformed SVG dates produce DRAWING_ISSUE_DATE_FORMAT warning",
+      "ctest": "passed 43/43 Windows x64 Release suite",
+      "source_audit": "passed 222 checks; all 118 public core operations referenced",
+      "live_ui": "PASS; malformed 27/10/2026 SVG checked in ISO and ASME profiles; each returned 0 errors, 1 DRAWING_ISSUE_DATE_FORMAT warning, and explicit non-certification scope details. Valid v1.27 export with 2026-10-27 returned 0 errors / 0 warnings under both profiles."
     }
   },
   "body_schedule_csv_follow_up": {
@@ -222,5 +300,29 @@
     "ctest": "passed 39/39 full suite; cadcore_body_materials passed",
     "assertions": 50,
     "ui": "PASS: live Windows UI verified Aluminum 6061 at 2700 kg/m^3 and custom UI Test Alloy at 7850 kg/m^3; mass properties returned 0.064800 kg and 0.188400 kg respectively for a 24000 mm^3 box. Save/reload was not tested live."
+  },
+  "bom_parts_standards_follow_up": {
+    "ctest": "passed 43/43 full Windows x64 Release suite",
+    "focused_assertions": 69,
+    "live_ui": "PASS; v1.23 purchased-item metadata edited; BOM and parts list displayed supplier fields; BOM quality check 0 errors / 2 expected revision and material warnings; schema-v5 file saved and inspected.",
+    "remaining": "Supplier pricing, stock management, purchase orders, ERP/MRP, clause-level ISO, ISO 7200 title-block certification, and ASME Y14/GD&T checks remain unimplemented.",
+    "combined_ui": "PASS; all three profiles ran together; 0 errors and 12 expected missing-metadata warnings; scope notes separate BOM data validation from unimplemented ISO/ASME drawing validation.",
+    "schema": "cadworkbench.scene.v5; confirmed migrated from schema v4"
+  },
+  "assembly_path_update": {
+    "focused_assertions": 69,
+    "ctest": "passed 43/43 Windows x64 Release",
+    "source_audit": "passed 222 checks; 118/118 public core operations referenced",
+    "scene_format": "new files use cadworkbench.scene.v5; v1-v4 remain supported",
+    "live_ui": "PASS; schema-v4 scene opened; path Powertrain/Drive retained; purchased metadata appeared in BOM and parts list; schema-v5 saved and inspected.",
+    "limits": "assembly tree is a derived report from path labels with quantity/volume/mass roll-ups; no persistent assembly entities or independent subassembly definitions"
+  },
+  "procurement_metadata_update": {
+    "focused_assertions": 69,
+    "ctest": "passed 43/43 Windows x64 Release",
+    "scene_format": "schema v5; schema v1-v4 load with Manufactured defaults",
+    "core": "purchased/manufactured metadata, supplier and supplier number validation, duplicate inheritance/grouping, CSV reports, and targeted missing-field findings",
+    "live_ui": "PASS; supplier ACME UI Supply and supplier number UI-420 visible in both live report tabs; check screen returned 0 errors / 2 metadata warnings for revision and material; saved scene was valid schema v5.",
+    "limits": "no prices, sourcing catalogs, inventory, purchase orders, or ERP integration"
   }
 }

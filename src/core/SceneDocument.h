@@ -21,6 +21,63 @@ struct Part {
     QString geometryToken = QUuid::createUuid().toString(QUuid::WithoutBraces);
     QString materialName;
     double materialDensityKgPerM3 = 0.0;
+    QString partNumber;
+    QString description;
+    QString revision;
+    QString assemblyPath;
+    QString procurementType = QStringLiteral("Manufactured");
+    QString supplier;
+    QString supplierPartNumber;
+};
+
+struct BillOfMaterialsRow {
+    int itemNumber = 0;
+    QString partNumber;
+    QString description;
+    QString revision;
+    QString materialName;
+    int quantity = 0;
+    double unitVolumeMm3 = 0.0;
+    double totalVolumeMm3 = 0.0;
+    double unitMassKg = 0.0;
+    double totalMassKg = 0.0;
+    QString assemblyPath;
+    QString procurementType;
+    QString supplier;
+    QString supplierPartNumber;
+};
+
+struct PartsListRow {
+    int itemNumber = 0;
+    QString bodyId;
+    QString bodyName;
+    QString partNumber;
+    QString description;
+    QString revision;
+    QString materialName;
+    int quantity = 1;
+    double volumeMm3 = 0.0;
+    double massKg = 0.0;
+    QString assemblyPath;
+    QString procurementType;
+    QString supplier;
+    QString supplierPartNumber;
+};
+
+enum class StandardsProfile { BomData, IsoDrawingReadiness, AsmeDrawingReadiness };
+enum class FindingSeverity { Info, Warning, Error };
+struct StandardsFinding {
+    FindingSeverity severity = FindingSeverity::Info;
+    QString code;
+    QString bodyId;
+    QString message;
+};
+struct StandardsCheckReport {
+    StandardsProfile profile = StandardsProfile::BomData;
+    QVector<StandardsFinding> findings;
+    int errors = 0;
+    int warnings = 0;
+    bool passed() const noexcept { return errors == 0; }
 };
 
 struct MinimumDistanceResult {
@@ -633,6 +690,18 @@ public:
     bool exportSTEP(const QString& path, QString* error = nullptr) const;
     bool exportSTL(const QString& path, QString* error = nullptr) const;
     bool exportBodyScheduleCsv(const QString& path, QString* error = nullptr) const;
+    bool setPartMetadata(const QString& id, const QString& partNumber, const QString& description,
+                         const QString& revision, QString* error = nullptr);
+    bool setPartMetadata(const QString& id, const QString& partNumber, const QString& description,
+                         const QString& revision, const QString& assemblyPath, QString* error = nullptr);
+    bool setPartMetadata(const QString& id, const QString& partNumber, const QString& description,
+                         const QString& revision, const QString& assemblyPath, const QString& procurementType,
+                         const QString& supplier, const QString& supplierPartNumber, QString* error = nullptr);
+    QVector<BillOfMaterialsRow> billOfMaterials(QString* error = nullptr) const;
+    QVector<PartsListRow> partsList(QString* error = nullptr) const;
+    bool exportBillOfMaterialsCsv(const QString& path, QString* error = nullptr) const;
+    bool exportPartsListCsv(const QString& path, QString* error = nullptr) const;
+    StandardsCheckReport checkStandards(StandardsProfile profile) const;
 
 private:
     struct Snapshot { QVector<Part> parts; quint64 revision; };

@@ -533,3 +533,216 @@ See [`MATERIAL_ASSIGNMENTS.md`](MATERIAL_ASSIGNMENTS.md) for behavior and scope.
 
 See [`FEATURES_V1_10.md`](FEATURES_V1_10.md), [`CUSTOM_PLANE_EXTRUSION.md`](CUSTOM_PLANE_EXTRUSION.md), and [`CUSTOM_AXIS_REVOLVE.md`](CUSTOM_AXIS_REVOLVE.md).
 
+## CADWorkbench v1.11.0 BOM and parts data (2026-10-27)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | `CADWorkbench.exe` and `cadcore_tests.exe` rebuilt in `build_materials_round/Release` |
+| BOM/parts/standards regression | PASS (42 assertions) | Metadata, inheritance, quantities, volume/mass, CSV escaping and failures, quality findings, conflict detection, and v3 persistence |
+| Full CTest | PASS (42/42) | All configured Windows Release tests, including `cadcore_bom_parts_standards` |
+| Live BOM and parts list | PASS | Aluminum 6061 box: 24,000 mm³, 0.064800 kg; duplicated part grouped to quantity 2, 48,000 mm³, 0.129600 kg; two rows in parts list |
+| Live CSV exports | PASS | BOM and parts-list dialogs saved files; both CSV contents inspected and matched the UI values |
+| Live BOM data profile | PASS | Populated test model; 0 current errors and 0 warnings |
+| Live ISO readiness profile | PASS with scope limit | 0 current model/BOM errors and warnings; details say ISO title block, projection, dimensions, and tolerance rules are not checked before drawings |
+| Live ASME readiness profile | PASS with scope limit | 0 current model/BOM errors and warnings; details say Y14 title-block, dimensioning, and GD&T rules are not checked before drawings |
+| ISO dimensional tolerances / ASME drawing and GD&T | NOT IMPLEMENTED | Requires the 2D drawing entities and a specified tolerance convention; see `STANDARDS_CHECKS.md` |
+
+See [`BOM_PARTS_LIST.md`](BOM_PARTS_LIST.md) and [`STANDARDS_CHECKS.md`](STANDARDS_CHECKS.md).
+
+## CADWorkbench v1.12.0 orthographic drawing export (2026-10-27)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | Application and test target rebuilt in `build_materials_round/Release`; live app title reports v1.12.0 |
+| Drawing export regression | PASS (16 assertions) | A4 SVG, orthographic views, visible/hidden edges, metadata, X/Y/Z envelope dimensions and error cases |
+| Full CTest | PASS (43/43) | All configured Windows Release tests |
+| Live Windows UI export | PASS | Exported selected 40 × 30 × 20 mm box; status bar confirmed success |
+| Live SVG artifact | PASS | XML parsed; front, top, right, `PLATE-001`, revision B, three dimension annotations, and 24 model-edge polylines present |
+| Overall-envelope dimensions | PASS | Live 40 × 30 × 20 mm box export and regression both confirm X 40.000, Y 30.000, Z 20.000 mm labels |
+| Standards scope | PARTIAL | Only bounding-envelope dimensions; no feature dimensions, tolerances, datums, projection symbol, or GD&T; ISO/ASME drawing checks remain unimplemented |
+
+See [`ORTHOGRAPHIC_DRAWINGS.md`](ORTHOGRAPHIC_DRAWINGS.md) for details and limits.
+
+## CADWorkbench v1.13.0 projection layouts (2026-10-27)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | App and test executable built; app title reports v1.13.0 |
+| Focused drawing regression | PASS (19 assertions) | First/third-angle labels and view placement, A4 SVG, envelope dimensions, metadata, and export failures |
+| Full CTest | PASS (43/43) | All configured Windows Release tests |
+| Live projection picker | PASS | UI offered both conventions; exported one of each from the selected test body |
+| Projection SVG artifacts | PASS | Both XML files contain front/top/right, X/Y/Z envelope dimensions and 24 model-edge polylines |
+| Rendered layout review | PASS | Both SVG previews inspected; view placement and title-block positions match each projection convention |
+| Standards scope | PARTIAL | No standardized projection symbol, feature dimensions, tolerances, datums, GD&T or standards validation |
+
+See [`ORTHOGRAPHIC_DRAWINGS.md`](ORTHOGRAPHIC_DRAWINGS.md) for detailed scope.
+
+## CADWorkbench v1.21 projection-convention symbol (2026-10-27)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | Rebuilt v1.21.0 CADWorkbench.exe and cadcore_tests.exe in build_materials_round/Release |
+| Focused drawing regression | PASS (41 assertions) | Covers projection-symbol identity and circular-end-view placement for both conventions, along with prior drawing features |
+| Full CTest | PASS (43/43) | Windows x64 Release configuration |
+| Live Windows SVG export | PASS | Exported first-angle and third-angle A4 drawings from a 10 mm radius × 35 mm cylinder; saved SVGs contain matching symbols at cx=282 and cx=261, and Ø20.000 mm callouts |
+| Standards scope | LIMITED | Schematic projection marker only; standards conformance is not claimed |
+
+See [`ORTHOGRAPHIC_DRAWINGS.md`](ORTHOGRAPHIC_DRAWINGS.md) for supported drawing content and limits.
+
+## CADWorkbench v1.20 cylindrical feature diameter callouts (2026-10-27)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | Rebuilt CADWorkbench.exe and cadcore_tests.exe in build_materials_round/Release |
+| Focused drawing regression | PASS (40 assertions) | Includes true diameter annotation on an end-on cylindrical feature |
+| Full CTest | PASS (43/43) | Windows Release configuration |
+| Source audit | PASS | Updated drawing-source coverage; public SceneDocument API references remain 118/118 |
+| Live Windows export | PASS | 10 mm radius × 35 mm cylinder exported to A4 third-angle sheet; SVG contains `Ø20.000 mm` |
+| BOM and parts-list live verification | PASS | 40 × 30 × 20 mm box produced one BOM row and one parts-list row with 24,000 mm³ volume |
+| ISO/ASME exported SVG screens | PASS (readiness only) | Each profile returned 0 structural errors and 3 missing title-block metadata warnings |
+| Standards scope | LIMITED | No clause-level ISO/ASME tolerance, datums, or GD&T certification |
+
+See [`ORTHOGRAPHIC_DRAWINGS.md`](ORTHOGRAPHIC_DRAWINGS.md), [`BOM_PARTS_LIST.md`](BOM_PARTS_LIST.md), and [`STANDARDS_CHECKS.md`](STANDARDS_CHECKS.md).
+
+## CADWorkbench v1.19 exported drawing readiness screen (2026-10-27)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | v1.19.0 CADWorkbench.exe and cadcore_tests.exe rebuilt in build_materials_round/Release |
+| Focused drawing regression | PASS (39 assertions) | Complete/malformed SVG, missing view, metadata, sheet/viewBox mismatch, and unsupported-profile cases |
+| Full CTest | PASS (43/43) | Windows Release using CTest -C Release |
+| Source audit | PASS | 190 source checks; all 118 public core operations referenced by regression |
+| Live ISO/ASME SVG screen | PARTIAL | Earlier UI run on the saved A4 cylinder: 0 errors and 3 expected blank metadata warnings per profile. Final v1.19 relaunch not verified because Computer Use stopped on physical Escape |
+| Combined drawing profiles | PASS | Earlier UI run showed 0 errors and 6 warnings, with separate ISO/ASME details and scope notes |
+| Standards scope | LIMITED | Structural drawing readiness only; clause-level ISO/ASME, tolerances, datums, and GD&T are not checked |
+
+## CADWorkbench v1.14.0 drawing sheet sizes (2026-10-27)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | Rebuilt application and test targets in `build_materials_round/Release`; live app title reports v1.14.0 |
+| Focused drawing regression | PASS (22 assertions) | A4/A3 dimensions and scale, both projection layouts, metadata, envelope dimensions, and error cases |
+| Full CTest | PASS (43/43) | All configured Windows Release tests, including A3 paper-size assertions |
+| Live Windows UI export | PASS | Selected First-angle and A3 landscape for the 40 × 30 × 20 mm `PLATE-001` test body; status bar confirmed export |
+| Live SVG validation | PASS | Parsed XML; 420 × 297 mm canvas, all views, X/Y/Z dimensions, `SCALE 1.41:1`, and 24 model-edge polylines |
+| Rendered A3 sheet review | PASS | Headless SVG render inspected; views, dimensions, and title block fit on the landscape sheet |
+| Standards scope | PARTIAL | Feature dimensions, tolerances, datums, projection symbol, GD&T, and ISO/ASME drawing validation remain unimplemented |
+
+See [`ORTHOGRAPHIC_DRAWINGS.md`](ORTHOGRAPHIC_DRAWINGS.md) for scope and limitations.
+
+## CADWorkbench v1.18.0 cylindrical centerlines (2026-10-27)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | Rebuilt CADWorkbench.exe and cadcore_tests.exe in build_materials_round/Release |
+| Focused drawing regression | PASS | 32 assertions, including cylindrical-axis and end-view center marks |
+| Full CTest | PASS | 43/43 Windows Release tests |
+| Source audit | PASS | 186 source checks; all 118 public core operations referenced by regression tests |
+| Live Windows UI export | PASS | Created and selected a 10 mm × 35 mm cylinder; exported third-angle A4 isometric drawing; status bar confirmed success |
+| Live SVG validation | PASS | XML parsed as 297 × 210 mm; 31 polylines, including five centerline/center-mark strokes |
+| Rendered sheet review | PASS | A4 preview inspected: top-view center mark, front/right centerlines, and isometric axis line are visible; sheet geometry and title block fit. See `docs/evidence/orthographic-cylinder-centerlines-v1.18.png` |
+| Standards scope regression and live UI | PASS | BOM/standards regression passed 44 assertions; combined UI on a metadata-incomplete cylinder showed 0 errors, 12 warnings, three separate profiles, and the updated drawing-inspection scope note |
+| Standards scope | PARTIAL | Actual feature dimensions, tolerances, datums, GD&T, and ISO/ASME validation remain unimplemented |
+
+See [`ORTHOGRAPHIC_DRAWINGS.md`](ORTHOGRAPHIC_DRAWINGS.md) for detailed scope.
+
+The combined “All available checks” UI was also exercised on the test box: 0 errors, 12 expected missing-metadata warnings, and separate BOM, ISO, and ASME readiness findings.
+
+
+
+## CADWorkbench v1.21 ISO and ASME live UI verification (2026-10-27)
+
+| Check | Result | Evidence |
+|---|---|---|
+| ISO drawing readiness, first-angle SVG | PASS | 0 errors, 3 warnings; blank part number, revision, and material |
+| ASME drawing readiness, first-angle SVG | PASS | 0 errors, 3 warnings; profile detail includes its scope limitation |
+| ISO drawing readiness, third-angle SVG | PASS | 0 errors, 3 warnings; no structural errors |
+| ASME drawing readiness, third-angle SVG | PASS | 0 errors, 3 warnings; profile detail includes its scope limitation |
+| Combined BOM / ISO / ASME model check | PASS | Active cylinder: 0 errors, 12 expected missing-metadata warnings; expanded view shows separate profile headings and four warnings per profile |
+| Standards scope | LIMITED | Readiness/content screening only; no clause-level ISO/ASME, tolerance-table, datum, or GD&T compliance verification |
+
+See [standards check limits](STANDARDS_CHECKS.md) and the [v1.21 exported drawing evidence](ORTHOGRAPHIC_DRAWINGS.md#verification).
+
+## CADWorkbench v1.27 issue-date validation (2026-10-27)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | `CADWorkbench.exe` and `cadcore_tests.exe` rebuilt; app version is v1.27.0 |
+| Focused drawing regression | PASS (64 assertions) | Valid date accepted; malformed export date rejected; imported malformed date produces `DRAWING_ISSUE_DATE_FORMAT` |
+| Full CTest | PASS (43/43) | Windows x64 Release suite |
+| Source audit | PASS (222 checks) | All 118 public core operations referenced |
+| Final v1.27 SVG export | PASS | Revision A, date `2026-10-27`; XML parsed; ISO and ASME each 0 errors / 0 warnings |
+| Live malformed-date screen | PASS | ISO and ASME each reported 0 structural errors and 1 `DRAWING_ISSUE_DATE_FORMAT` warning; non-certification details verified |
+| Standards scope | LIMITED | Date-format check only; no ISO/ASME clause-level certification |
+
+See [`ORTHOGRAPHIC_DRAWINGS.md`](ORTHOGRAPHIC_DRAWINGS.md) and [`STANDARDS_CHECKS.md`](STANDARDS_CHECKS.md).
+
+## CADWorkbench v1.26 assembly hierarchy report (2026-10-27)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | `CADWorkbench.exe` and `cadcore_tests.exe` built; window reports v1.26.0 |
+| Full CTest | PASS (43/43) | Windows x64 Release suite |
+| Source audit | PASS (219 checks) | All 118 public core operations referenced by regression |
+| Live report tree | PASS | `Powertrain → Drive → Drive housing` displayed from assembly path metadata |
+| Live assembly roll-up | PASS | One 24,000 mm³ part showed quantity 1; after duplicate, parent and leaf showed quantity 2 and 48,000 mm³ |
+| Cleanup | PASS | Temporary duplicate discarded; saved scene left unchanged |
+| Remaining scope | LIMITED | Tree is derived from path labels, not persistent editable assembly entities or subassembly definitions |
+
+See [`BOM_PARTS_LIST.md`](BOM_PARTS_LIST.md) for the report behavior and limitations.
+
+## CADWorkbench v1.25 drawing revision field (2026-10-27)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | Rebuilt `CADWorkbench.exe` and `cadcore_tests.exe`; app title reports v1.25.0 |
+| Focused drawing regression | PASS (61 assertions) | Revision override and XML escaping, default part revision, and 16-character validation |
+| Focused BOM/parts/standards regression | PASS (69 assertions) | Procurement metadata, assembly paths, grouping, CSV, migration, and readiness checks |
+| Full CTest | PASS (43/43) | Windows x64 Release test suite |
+| Live title-block export | PASS | Exported `title_block_ui_test_v125.svg` with revision A, author, checker, drawing number, and date; XML parsed and values confirmed |
+| Live ISO and ASME drawing screens | PASS (0 errors, 0 warnings each) | Revision warning cleared; scope remains basic drawing-content screening, not clause-level conformance |
+| Source audit | PASS (217 checks) | All 118 public core operations referenced by regression |
+
+See [`ORTHOGRAPHIC_DRAWINGS.md`](ORTHOGRAPHIC_DRAWINGS.md) and [`STANDARDS_CHECKS.md`](STANDARDS_CHECKS.md) for implemented scope and remaining work.
+
+## CADWorkbench v1.24 drawing title-block metadata (2026-10-27)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | Rebuilt `CADWorkbench.exe` and `cadcore_tests.exe` with the title-block fields and v1.24 app version |
+| Focused drawing regression | PASS (60 assertions) | Metadata, XML escaping, optional part-number fallback, missing drawing-number finding, and field-length validation |
+| Focused BOM/parts/standards regression | PASS (69 assertions) | Procurement metadata, assembly paths, grouping, CSV, migration, and standard-readiness checks |
+| Full CTest | PASS (43/43) | Full Windows Release test suite |
+| Live SVG export | PASS | `title_block_ui_test.svg` includes entered general note, author, checker, issue date, and default part-based drawing number; XML parsed successfully |
+| Live ISO and ASME drawing screens | PASS (0 errors, 1 warning each) | Both screens found no structural errors; the sole warning is the test body's missing revision. Scope details disclaim standards certification. |
+| Standards coverage | LIMITED | No ISO 7200 conformance, clause-level checks, tolerance lookup, ASME Y14, datum, or GD&T verification |
+
+See [`ORTHOGRAPHIC_DRAWINGS.md`](ORTHOGRAPHIC_DRAWINGS.md) and [`STANDARDS_CHECKS.md`](STANDARDS_CHECKS.md) for current scope and limits.
+
+## CADWorkbench v1.22 assembly-aware BOM paths (2026-10-27)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | Rebuilt `CADWorkbench.exe` and `cadcore_tests.exe` in `build_materials_round/Release` |
+| BOM/parts/standards regression | PASS (53 assertions) | Path normalization and validation, duplicate inheritance, path-sensitive BOM rows, CSV fields, and schema-v4 save/reopen |
+| Drawing regression | PASS (54 assertions) | Existing orthographic/projection checks plus note escaping, length, line-count, and control-character validation |
+| Live metadata editor | PASS | Entered part number `PUMP-BOX-001`, description `Drive housing`, and path `Powertrain/Drive` |
+| Live BOM and parts list | PASS | Both report tabs displayed `Powertrain/Drive` in the assembly-path column |
+| Live scene persistence | PASS | Save As wrote `assembly_path_ui_test.cadscene`; inspected scene identifies schema v4 and retains the part number and assembly path |
+| Live drawing notes with ISO and ASME screens | PASS | Exported two user-entered notes into SVG; both screens returned 0 errors and 2 missing-metadata warnings |
+| Full CTest and source audit | PASS | 43/43 Windows Release tests; 205 static checks; 118/118 public operations referenced |
+| Scope | LIMITED | Slash-separated ancestry labels guide flat BOM grouping; no editable tree or recursive subassembly quantity rollups |
+
+## CADWorkbench v1.23 procurement-aware BOM (2026-10-27)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | `CADWorkbench.exe` and `cadcore_tests.exe` rebuilt in `build_materials_round/Release` |
+| BOM/parts/standards regression | PASS (69 assertions) | Supplier validation, grouping, duplicate inheritance, missing-supplier findings, CSV fields, and schema-v5 roundtrip |
+| Drawing regression | PASS (54 assertions) | Orthographic/projection, section, readiness, and general-note validation |
+| Live part editor | PASS | Schema-v4 scene opened; part edited as Purchased with supplier `ACME UI Supply` and supplier number `UI-420` |
+| Live BOM and parts list | PASS | Both report tabs showed assembly path, procurement type, supplier, and supplier part number |
+| Live BOM quality check | PASS | 0 errors and 2 expected warnings for unset revision and material; expanded details inspected |
+| Live scene persistence | PASS | Saved and inspected `purchased_item_ui_test.cadscene`; schema v5 retained purchasing and assembly-path fields |
+| Full CTest and source audit | PASS | 43/43 Windows Release tests; 209 static checks and 118/118 public core operations referenced |
+| Scope | LIMITED | No supplier catalog, prices, inventory, purchase orders, ERP links, or recursive assembly rollups |

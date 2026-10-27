@@ -1,6 +1,7 @@
-/build/
+/build*/
 /dist/
 /vcpkg_installed/
+/Testing/
 /.vs/
 /out/
 .vscode/
