@@ -6,7 +6,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 checks = {
-    'version': ('CMakeLists.txt', 'VERSION 1.9.0'),
+    'version': ('CMakeLists.txt', 'VERSION 1.10.0'),
     'qt': ('CMakeLists.txt', 'Qt6::Widgets'),
     'occt': ('CMakeLists.txt', 'find_package(OpenCASCADE'),
     'core_geometry': ('src/core/SceneDocument.cpp', 'BRepCheck_Analyzer'),
@@ -95,6 +95,15 @@ checks = {
     'step_import_ui': ('src/ui/MainWindow.cpp', 'Import STEP...'),
     'step_import_regression': ('tests/cadcore_tests.cpp', 'STEP import undo did not restore the existing document'),
     'step_import_documentation': ('docs/STEP_IMPORT.md', 'two-body STEP fixture'),
+    'body_schedule_csv_core': ('src/core/SceneDocument.cpp', 'bool SceneDocument::exportBodyScheduleCsv'),
+    'body_schedule_csv_ui': ('src/ui/MainWindow.cpp', 'Export body schedule CSV...'),
+    'body_schedule_csv_ribbon': ('src/ui/MainWindow.cpp', 'exportBodyScheduleAction}}'),
+    'body_schedule_csv_regression': ('tests/cadcore_tests.cpp', 'testBodyScheduleCsv()'),
+    'body_schedule_csv_documentation': ('docs/BODY_SCHEDULE_CSV.md', 'Full CTest passed 38/38'),
+    'body_material_assignment_core': ('src/core/SceneDocument.cpp', 'bool SceneDocument::setMaterial'),
+    'body_material_assignment_ui': ('src/ui/MainWindow.cpp', 'Assign material...'),
+    'body_material_assignment_regression': ('tests/cadcore_tests.cpp', 'testBodyMaterialAssignment()'),
+    'body_material_assignment_documentation': ('docs/MATERIAL_ASSIGNMENTS.md', 'Assignments are stored in the native scene file'),
     'circular_sweep_core': ('src/core/SceneDocument.cpp', 'bool SceneDocument::sweepCircularProfile'),
     'rectangular_sweep_core': ('src/core/SceneDocument.cpp', 'bool SceneDocument::sweepRectangularProfile'),
     'sweep_menu_and_ribbon': ('src/ui/MainWindow.cpp', 'Sweep circular profile...'),
@@ -140,7 +149,7 @@ checks = {
     'circular_hole_pattern_ctest': ('CMakeLists.txt', 'cadcore_circular_hole_pattern'),
     'circular_hole_pattern_documentation': ('docs/CIRCULAR_HOLE_PATTERN.md', '15 assertions'),
     'elliptical_sweep_ctest_coverage': ('CMakeLists.txt', 'cadcore_sweeps'),
-    'feature_gap_counts': ('docs/FEATURE_GAP_COMPARISON.md', '6 capability areas implemented, 3 partial, and **21 not yet implemented**'),
+    'feature_gap_counts': ('docs/FEATURE_GAP_COMPARISON.md', '6 capability areas implemented, 4 partial, and **20 not yet implemented**'),
     'feature_gap_30th_area': ('docs/FEATURE_GAP_COMPARISON.md', '30 | CAD standards and standards checking'),
 }
 problems=[]

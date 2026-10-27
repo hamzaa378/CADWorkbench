@@ -79,8 +79,10 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLocale>
 #include <QSaveFile>
 #include <QSet>
+#include <QTextStream>
 #include <QUuid>
 
 #include <cmath>
@@ -102,6 +104,10 @@ const QString kSchema2 = QStringLiteral("cadworkbench.scene.v2");
 
 bool finitePositive(double v) { return std::isfinite(v) && v > 1e-5 && v <= 1e6; }
 bool finiteOffset(double v) { return std::isfinite(v) && std::abs(v) <= 1e6; }
+void inheritMaterial(Part& destination, const Part& source) {
+    destination.materialName = source.materialName;
+    destination.materialDensityKgPerM3 = source.materialDensityKgPerM3;
+}
 QString generatedId() { return QUuid::createUuid().toString(QUuid::WithoutBraces); }
 const char* primitiveName(Primitive kind) {
     switch(kind) {
@@ -733,7 +739,8 @@ bool SceneDocument::duplicate(const QString& id, double dx, double dy, double dz
         trsf.SetTranslation(gp_Vec(dx,dy,dz));
         const TopoDS_Shape result = BRepBuilderAPI_Transform(part->shape, trsf, true).Shape();
         if (!validShape(result, error)) return false;
-        const Part copied{generatedId(), uniqueName(part->name + " Copy"), result, part->visible, part->color};
+        Part copied{generatedId(), uniqueName(part->name + " Copy"), result, part->visible, part->color};
+        inheritMaterial(copied, *part);
         checkpoint();
         parts_.append(copied);
         return true;
@@ -769,11 +776,19 @@ bool SceneDocument::booleanOperation(BooleanOp op, const QString& firstId, const
         const QString label = op == BooleanOp::Fuse ? "Union" : op == BooleanOp::Cut ? "Cut" : "Intersection";
         const QString name = uniqueName(label);
         const QString color = a->color;
+        const QString commonMaterial = (!a->materialName.isEmpty() && a->materialName == b->materialName &&
+                                        a->materialDensityKgPerM3 == b->materialDensityKgPerM3) ? a->materialName : QString();
+        const double commonDensity = commonMaterial.isEmpty() ? 0.0 : a->materialDensityKgPerM3;
         checkpoint();
         for (int i = parts_.size()-1; i >= 0; --i) {
             if (parts_[i].id == firstId || parts_[i].id == secondId) parts_.removeAt(i);
         }
-        parts_.append({generatedId(), name, result, true, color});
+        Part fused{generatedId(), name, result, true, color};
+        if (!commonMaterial.isEmpty()) {
+            fused.materialName = commonMaterial;
+            fused.materialDensityKgPerM3 = commonDensity;
+        }
+        parts_.append(fused);
         return true;
     } catch (const Standard_Failure& e) { setError(error, QStringLiteral("CAD kernel error: %1").arg(e.what())); }
       catch (const std::exception& e) { setError(error, QString::fromUtf8(e.what())); }
@@ -1449,6 +1464,23 @@ bool SceneDocument::prepareRoundedRectangleExtrusion(double originX,double origi
 ExtrusionPreview SceneDocument::buildExtrusionPreview(const ExtrusionCommand& command) {
     ExtrusionPreview preview;
     try {
+        gp_Dir customNormal(0,0,1),customU(1,0,0),customV(0,1,0);
+        if(command.sketchPlane==SketchPlane::Custom){
+            const double frameValues[]={command.customOriginX,command.customOriginY,command.customOriginZ,
+                command.customNormalX,command.customNormalY,command.customNormalZ,
+                command.customUAxisX,command.customUAxisY,command.customUAxisZ};
+            for(double value:frameValues)if(!std::isfinite(value)||std::abs(value)>1e6){
+                preview.error="The custom sketch frame must contain finite values within +/-1,000,000.";return preview;
+            }
+            const gp_Vec normal(command.customNormalX,command.customNormalY,command.customNormalZ);
+            const gp_Vec uInput(command.customUAxisX,command.customUAxisY,command.customUAxisZ);
+            if(normal.Magnitude()<=1e-9){preview.error="The custom sketch-plane normal cannot be zero.";return preview;}
+            customNormal=gp_Dir(normal);
+            const gp_Vec projectedU=uInput-normal*(uInput.Dot(normal)/normal.SquareMagnitude());
+            if(projectedU.Magnitude()<=1e-9){preview.error="The custom U axis cannot be parallel to the sketch-plane normal.";return preview;}
+            customU=gp_Dir(projectedU);
+            customV=customNormal.Crossed(customU);
+        }
         if (!finiteOffset(command.originX) || !finiteOffset(command.originY) || !finiteOffset(command.planeOffset) ||
             !finitePositive(command.widthOrDiameter) || !finitePositive(command.height) ||
             ((command.profile == SketchProfile::Rectangle || command.profile == SketchProfile::Ellipse ||
@@ -1464,7 +1496,8 @@ ExtrusionPreview SceneDocument::buildExtrusionPreview(const ExtrusionCommand& co
               std::floor(command.depth) != command.depth)) ||
             !std::isfinite(command.taperDegrees)||std::abs(command.taperDegrees)>45.0||
             (command.symmetric&&command.taperDegrees!=0.0)||
-            (command.sketchPlane!=SketchPlane::XY&&command.sketchPlane!=SketchPlane::XZ&&command.sketchPlane!=SketchPlane::YZ)) {
+            (command.sketchPlane!=SketchPlane::XY&&command.sketchPlane!=SketchPlane::XZ&&
+             command.sketchPlane!=SketchPlane::YZ&&command.sketchPlane!=SketchPlane::Custom)) {
             preview.error = "The sketch extrusion parameters are invalid.";
             return preview;
         }
@@ -1481,7 +1514,15 @@ ExtrusionPreview SceneDocument::buildExtrusionPreview(const ExtrusionCommand& co
             double xmin=0,ymin=0,zmin=0,xmax=0,ymax=0,zmax=0;
             targetBounds.Get(xmin,ymin,zmin,xmax,ymax,zmax);
             double low=0,high=0,start=0,worldDirection=0;
-            if(command.sketchPlane==SketchPlane::XY){low=zmin;high=zmax;start=command.planeOffset;worldDirection=1;}
+            if(command.sketchPlane==SketchPlane::Custom){
+                low=std::numeric_limits<double>::infinity();high=-low;start=command.planeOffset;worldDirection=1;
+                const gp_Pnt origin(command.customOriginX,command.customOriginY,command.customOriginZ);
+                for(int x=0;x<2;++x)for(int y=0;y<2;++y)for(int z=0;z<2;++z){
+                    const gp_Pnt corner(x?xmax:xmin,y?ymax:ymin,z?zmax:zmin);
+                    const double projection=gp_Vec(origin,corner).Dot(gp_Vec(customNormal));
+                    low=std::min(low,projection);high=std::max(high,projection);
+                }
+            }else if(command.sketchPlane==SketchPlane::XY){low=zmin;high=zmax;start=command.planeOffset;worldDirection=1;}
             else if(command.sketchPlane==SketchPlane::XZ){low=ymin;high=ymax;start=-command.planeOffset;worldDirection=-1;}
             else {low=xmin;high=xmax;start=command.planeOffset;worldDirection=1;}
             worldDirection*=command.reverseDirection?-1.0:1.0;
@@ -1621,7 +1662,14 @@ ExtrusionPreview SceneDocument::buildExtrusionPreview(const ExtrusionCommand& co
             offsetTransform.SetTranslation(gp_Vec(0,0,command.planeOffset));
             tool=BRepBuilderAPI_Transform(tool,offsetTransform,true).Shape();
         }
-        if(command.sketchPlane!=SketchPlane::XY){
+        if(command.sketchPlane==SketchPlane::Custom){
+            const gp_Pnt frameOrigin(command.customOriginX,command.customOriginY,command.customOriginZ);
+            gp_Trsf frameTransform;
+            frameTransform.SetValues(customU.X(),customV.X(),customNormal.X(),frameOrigin.X(),
+                                     customU.Y(),customV.Y(),customNormal.Y(),frameOrigin.Y(),
+                                     customU.Z(),customV.Z(),customNormal.Z(),frameOrigin.Z());
+            tool=BRepBuilderAPI_Transform(tool,frameTransform,true).Shape();
+        }else if(command.sketchPlane!=SketchPlane::XY){
             gp_Trsf planeTransform;
             if(command.sketchPlane==SketchPlane::XZ)
                 planeTransform.SetRotation(gp_Ax1(gp_Pnt(0,0,0),gp_Dir(1,0,0)),std::numbers::pi/2.0);
@@ -1739,16 +1787,42 @@ bool SceneDocument::prepareRevolveAboutAxis(double radialOffset,double axialOrig
     return true;
 }
 
+bool SceneDocument::prepareRevolveAboutCustomAxis(double radialOffset,double axialOrigin,double radialWidth,double axialHeight,
+                                                   double angleDegrees,double originX,double originY,double originZ,
+                                                   double directionX,double directionY,double directionZ,
+                                                   RevolveCommand* command,QString* error) const {
+    const double directionLength=std::hypot(directionX,directionY,directionZ);
+    if(!finiteOffset(originX)||!finiteOffset(originY)||!finiteOffset(originZ)||
+       !std::isfinite(directionX)||!std::isfinite(directionY)||!std::isfinite(directionZ)||
+       std::abs(directionX)>1e6||std::abs(directionY)>1e6||std::abs(directionZ)>1e6||
+       !std::isfinite(directionLength)||directionLength<1e-8){
+        setError(error,"Enter a finite axis origin and a non-zero custom axis direction.");return false;
+    }
+    if(!prepareRevolve(radialOffset,axialOrigin,radialWidth,axialHeight,angleDegrees,command,error))return false;
+    command->axisIndex=3;command->axisOriginX=originX;command->axisOriginY=originY;command->axisOriginZ=originZ;
+    command->axisDirectionX=directionX;command->axisDirectionY=directionY;command->axisDirectionZ=directionZ;
+    return true;
+}
+
 RevolvePreview SceneDocument::buildRevolvePreview(const RevolveCommand& command) {
     RevolvePreview preview;
     try {
         if (!std::isfinite(command.radialOffset) || command.radialOffset < 0.0 || command.radialOffset > 1e6 ||
             !finiteOffset(command.axialOrigin) || !finitePositive(command.radialWidth) ||
             !finitePositive(command.axialHeight) || !std::isfinite(command.angleDegrees) ||
-            command.angleDegrees < 1.0 || command.angleDegrees > 360.0 || command.axisIndex<0 || command.axisIndex>2 ||
+            command.angleDegrees < 1.0 || command.angleDegrees > 360.0 || command.axisIndex<0 || command.axisIndex>3 ||
             !finiteOffset(command.axisOriginX)||!finiteOffset(command.axisOriginY)||!finiteOffset(command.axisOriginZ)) {
             preview.error = "The revolve profile parameters are invalid.";
             return preview;
+        }
+        if(command.axisIndex==3){
+            const double directionLength=std::hypot(command.axisDirectionX,command.axisDirectionY,command.axisDirectionZ);
+            if(!std::isfinite(command.axisDirectionX)||!std::isfinite(command.axisDirectionY)||
+               !std::isfinite(command.axisDirectionZ)||std::abs(command.axisDirectionX)>1e6||
+               std::abs(command.axisDirectionY)>1e6||std::abs(command.axisDirectionZ)>1e6||
+               !std::isfinite(directionLength)||directionLength<1e-8){
+                preview.error="The custom revolve axis direction must be finite and non-zero.";return preview;
+            }
         }
         BRepBuilderAPI_MakePolygon boundary;
         boundary.Add(gp_Pnt(command.radialOffset,0.0,command.axialOrigin));
@@ -1766,7 +1840,17 @@ RevolvePreview SceneDocument::buildRevolvePreview(const RevolveCommand& command)
         revolver.Build();
         if (!revolver.IsDone()) { preview.error = "The kernel could not revolve the rectangular profile."; return preview; }
         preview.shape = revolver.Shape();
-        if(command.axisIndex!=2||command.axisOriginX!=0||command.axisOriginY!=0||command.axisOriginZ!=0){
+        if(command.axisIndex==3){
+            const gp_Dir axisDirection(command.axisDirectionX,command.axisDirectionY,command.axisDirectionZ);
+            const gp_Vec reference=std::abs(axisDirection.Z())<0.9?gp_Vec(0,0,1):gp_Vec(0,1,0);
+            const gp_Dir radialDirection(reference.Crossed(gp_Vec(axisDirection)));
+            const gp_Dir transverseDirection=axisDirection.Crossed(radialDirection);
+            gp_Trsf placement;
+            placement.SetValues(radialDirection.X(),transverseDirection.X(),axisDirection.X(),command.axisOriginX,
+                                radialDirection.Y(),transverseDirection.Y(),axisDirection.Y(),command.axisOriginY,
+                                radialDirection.Z(),transverseDirection.Z(),axisDirection.Z(),command.axisOriginZ);
+            preview.shape=BRepBuilderAPI_Transform(preview.shape,placement,true).Shape();
+        }else if(command.axisIndex!=2||command.axisOriginX!=0||command.axisOriginY!=0||command.axisOriginZ!=0){
             gp_Trsf placement;
             if(command.axisIndex==0)placement.SetRotation(gp_Ax1(gp_Pnt(0,0,0),gp_Dir(0,1,0)),std::numbers::pi/2.0);
             else if(command.axisIndex==1)placement.SetRotation(gp_Ax1(gp_Pnt(0,0,0),gp_Dir(1,0,0)),-std::numbers::pi/2.0);
@@ -1810,7 +1894,8 @@ bool SceneDocument::mirror(const QString& id, Axis planeNormal, double planeOffs
         transform.SetMirror(gp_Ax2(point,normal));
         const TopoDS_Shape reflected = BRepBuilderAPI_Transform(source->shape,transform,true).Shape();
         if (!validShape(reflected,error)) return false;
-        const Part copy{generatedId(),uniqueName(sourceName+QStringLiteral(" Mirror")),reflected,visible,color};
+        Part copy{generatedId(),uniqueName(sourceName+QStringLiteral(" Mirror")),reflected,visible,color};
+        inheritMaterial(copy, *source);
         checkpoint();
         parts_.append(copy);
         return true;
@@ -1837,7 +1922,8 @@ bool SceneDocument::mirrorAcrossPlane(const QString& id,double nx,double ny,doub
         transform.SetMirror(gp_Ax2(point,normal));
         const TopoDS_Shape reflected=BRepBuilderAPI_Transform(source->shape,transform,true).Shape();
         if (!validShape(reflected,error)) return false;
-        const Part copy{generatedId(),uniqueName(sourceName+QStringLiteral(" Plane Mirror")),reflected,visible,color};
+        Part copy{generatedId(),uniqueName(sourceName+QStringLiteral(" Plane Mirror")),reflected,visible,color};
+        inheritMaterial(copy, *source);
         checkpoint(); parts_.append(copy); return true;
     } catch (const Standard_Failure& e) { setError(error,QStringLiteral("CAD kernel error: %1").arg(e.what())); }
       catch (const std::exception& e) { setError(error,QString::fromUtf8(e.what())); }
@@ -1902,6 +1988,7 @@ bool SceneDocument::linearPattern(const QString& id, Axis axis, int instanceCoun
             }
             reservedNames.insert(name.toCaseFolded());
             copies.append({generatedId(),name,result,visible,color});
+            inheritMaterial(copies.last(), *source);
         }
         checkpoint();
         for (const Part& copy : copies) parts_.append(copy);
@@ -1945,6 +2032,7 @@ bool SceneDocument::linearPatternAlongVector(const QString& id,double directionX
             while(reservedNames.contains(name.toCaseFolded()))name=uniqueName(baseName+QStringLiteral(" %1").arg(suffix++));
             reservedNames.insert(name.toCaseFolded());
             copies.append({generatedId(),name,result,visible,color});
+            inheritMaterial(copies.last(), *source);
         }
         checkpoint();
         for(const Part& copy:copies)parts_.append(copy);
@@ -1994,6 +2082,7 @@ bool SceneDocument::rectangularPattern(const QString& id,Axis firstAxis,int firs
             while(reservedNames.contains(name.toCaseFolded())) name=uniqueName(baseName+QStringLiteral(" %1").arg(suffix++));
             reservedNames.insert(name.toCaseFolded());
             copies.append({generatedId(),name,result,visible,color});
+            inheritMaterial(copies.last(), *source);
         }
         checkpoint(); for(const Part& copy:copies) parts_.append(copy); return true;
     } catch(const Standard_Failure& e) { setError(error,QStringLiteral("CAD kernel error: %1").arg(e.what())); }
@@ -2054,6 +2143,7 @@ bool SceneDocument::rectangularPatternAlongVectors(const QString& id,double firs
             while(reservedNames.contains(name.toCaseFolded()))name=uniqueName(baseName+QStringLiteral(" %1").arg(suffix++));
             reservedNames.insert(name.toCaseFolded());
             copies.append({generatedId(),name,result,visible,color});
+            inheritMaterial(copies.last(), *source);
         }
         checkpoint();for(const Part& copy:copies)parts_.append(copy);return true;
     }catch(const Standard_Failure& e){setError(error,QStringLiteral("CAD kernel error: %1").arg(e.what()));}
@@ -2840,6 +2930,7 @@ bool SceneDocument::circularPattern(const QString& id, Axis axis, double centerU
             while (reservedNames.contains(name.toCaseFolded())) name=uniqueName(baseName+QStringLiteral(" %1").arg(suffix++));
             reservedNames.insert(name.toCaseFolded());
             copies.append({generatedId(),name,result,visible,color});
+            inheritMaterial(copies.last(), *source);
         }
         checkpoint();
         for (const Part& copy:copies) parts_.append(copy);
@@ -2880,6 +2971,7 @@ bool SceneDocument::circularPatternAboutAxis(const QString& id,double originX,do
             QString name=uniqueName(baseName);int suffix=2;
             while(reservedNames.contains(name.toCaseFolded()))name=uniqueName(baseName+QStringLiteral(" %1").arg(suffix++));
             reservedNames.insert(name.toCaseFolded());copies.append({generatedId(),name,result,visible,color});
+            inheritMaterial(copies.last(), *source);
         }
         checkpoint();for(const Part& copy:copies)parts_.append(copy);return true;
     }catch(const Standard_Failure& e){setError(error,QStringLiteral("CAD kernel error: %1").arg(e.what()));}
@@ -3052,6 +3144,32 @@ bool SceneDocument::setColor(const QString& id, const QString& color, QString* e
     setError(error, "Object not found."); return false;
 }
 
+bool SceneDocument::setMaterial(const QString& id,const QString& materialName,double densityKgPerM3,QString* error) {
+    return setMaterial(QStringList{id},materialName,densityKgPerM3,error);
+}
+
+bool SceneDocument::setMaterial(const QStringList& ids,const QString& materialName,double densityKgPerM3,QString* error) {
+    QSet<QString> requested;
+    for(const QString& id:ids)requested.insert(id);
+    if(requested.isEmpty()){setError(error,"Select at least one body.");return false;}
+    for(const QString& id:requested)if(!find(id)){setError(error,"One or more selected bodies no longer exist.");return false;}
+    const QString name=materialName.trimmed();
+    const bool clearing=name.isEmpty()&&densityKgPerM3==0.0;
+    if(!clearing&&(name.isEmpty()||name.size()>80||!std::isfinite(densityKgPerM3)||
+                   densityKgPerM3<0.00001||densityKgPerM3>1000000.0)){
+        setError(error,"Choose a material name and a finite density from 0.00001 to 1,000,000 kg/m^3, or clear both.");return false;
+    }
+    bool changed=false;
+    for(const QString& id:requested){
+        const Part* part=find(id);
+        if(part&&(part->materialName!=name||part->materialDensityKgPerM3!=densityKgPerM3)){changed=true;break;}
+    }
+    if(!changed)return true;
+    checkpoint();
+    for(Part& item:parts_)if(requested.contains(item.id)){item.materialName=name;item.materialDensityKgPerM3=densityKgPerM3;}
+    return true;
+}
+
 bool SceneDocument::erase(const QString& id, QString* error) { return eraseMany({id}, error); }
 bool SceneDocument::eraseMany(const QStringList& ids, QString* error) {
     QSet<QString> requested;
@@ -3097,6 +3215,8 @@ bool SceneDocument::saveAs(const QString& path, QString* error) {
             item.insert("id",part.id); item.insert("name",part.name);
             item.insert("brep",brepToText(part.shape));
             item.insert("visible",part.visible); item.insert("color",part.color);
+            item.insert("material",part.materialName);
+            item.insert("density_kg_per_m3",part.materialDensityKgPerM3);
             array.append(item);
         }
         QJsonObject root;
@@ -3148,16 +3268,32 @@ bool SceneDocument::load(const QString& path, QString* error) {
             }
             bool visible = true;
             QString color = "#6c9dc2";
+            QString materialName;
+            double materialDensityKgPerM3=0.0;
             if (schema == kSchema2) {
                 if (!item.value("visible").isBool() || !item.value("color").isString()) {
                     setError(error,"Invalid v2 appearance fields."); return false;
                 }
                 visible = item.value("visible").toBool(); color = item.value("color").toString();
                 if (!isHexColor(color)) { setError(error,"Invalid body color."); return false; }
+                if(item.contains("material")||item.contains("density_kg_per_m3")){
+                    if(!item.value("material").isString()||!item.value("density_kg_per_m3").isDouble()){
+                        setError(error,"Invalid body material fields.");return false;
+                    }
+                    materialName=item.value("material").toString().trimmed();
+                    materialDensityKgPerM3=item.value("density_kg_per_m3").toDouble();
+                    const bool unassigned=materialName.isEmpty()&&materialDensityKgPerM3==0.0;
+                    if(!unassigned&&(materialName.isEmpty()||materialName.size()>80||!std::isfinite(materialDensityKgPerM3)||
+                                     materialDensityKgPerM3<0.00001||materialDensityKgPerM3>1000000.0)){
+                        setError(error,"Invalid body material name or density.");return false;
+                    }
+                }
             }
             const TopoDS_Shape shape = brepFromText(payload);
             if (!validShape(shape,error)) return false;
             candidate.append({id,name,shape,visible,color});
+            candidate.last().materialName=materialName;
+            candidate.last().materialDensityKgPerM3=materialDensityKgPerM3;
             ids.insert(id); names.insert(name.toLower());
         }
     } catch (const Standard_Failure& e) { setError(error,QStringLiteral("Invalid B-rep: %1").arg(e.what())); return false; }
@@ -3250,6 +3386,41 @@ bool SceneDocument::exportSTL(const QString& path, QString* error) const {
         if (!writer.Write(compound,QFile::encodeName(path).constData())) { setError(error,"STL write failed."); return false; }
         return true;
     } catch (const Standard_Failure& e) { setError(error,QStringLiteral("STL kernel error: %1").arg(e.what())); return false; }
+}
+
+bool SceneDocument::exportBodyScheduleCsv(const QString& path,QString* error) const {
+    if(path.trimmed().isEmpty()){setError(error,"Provide a CSV output path.");return false;}
+    if(parts_.isEmpty()){setError(error,"No bodies are available for the schedule.");return false;}
+    QByteArray csv;
+    QTextStream stream(&csv,QIODevice::WriteOnly);
+    stream.setLocale(QLocale::c());
+    const auto field=[](const QString& value){
+        QString escaped=value;
+        escaped.replace('"',"\"\"");
+        return QStringLiteral("\"")+escaped+QStringLiteral("\"");
+    };
+    const auto number=[](double value){return QString::number(value,'g',15);};
+    stream << "Body ID,Name,Visible,Volume (mm^3),Surface area (mm^2),Size X (mm),Size Y (mm),Size Z (mm),Center X (mm),Center Y (mm),Center Z (mm)\r\n";
+    for(const Part& part:parts_){
+        BodyDiagnostics geometry;
+        QString geometryError;
+        if(!diagnoseBody(part.id,&geometry,&geometryError)||!geometry.valid){
+            setError(error,QStringLiteral("Could not export body '%1': %2").arg(part.name,geometryError));
+            return false;
+        }
+        stream << field(part.id) << ',' << field(part.name) << ',' << (part.visible?"true":"false") << ','
+               << number(geometry.volume) << ',' << number(geometry.surfaceArea) << ','
+               << number(geometry.maxX-geometry.minX) << ',' << number(geometry.maxY-geometry.minY) << ','
+               << number(geometry.maxZ-geometry.minZ) << ',' << number(geometry.centerX) << ','
+               << number(geometry.centerY) << ',' << number(geometry.centerZ) << "\r\n";
+    }
+    stream.flush();
+    if(stream.status()!=QTextStream::Ok){setError(error,"Could not format the body schedule CSV.");return false;}
+    QSaveFile output(path);
+    if(!output.open(QIODevice::WriteOnly)){setError(error,QStringLiteral("Could not create CSV file: %1").arg(output.errorString()));return false;}
+    if(output.write(csv)!=csv.size()){setError(error,QStringLiteral("Could not write CSV file: %1").arg(output.errorString()));output.cancelWriting();return false;}
+    if(!output.commit()){setError(error,QStringLiteral("Could not finalize CSV file: %1").arg(output.errorString()));return false;}
+    return true;
 }
 } // namespace cad
 

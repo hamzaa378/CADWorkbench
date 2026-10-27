@@ -5,17 +5,20 @@ CADWorkbench is a native Windows 3D CAD application built with C++20, Qt 6, and 
 ## Current capabilities
 
 - Create and inspect solids, profiles, and dimensioned component templates.
-- Extrude a sketch profile on the XY, XZ, or YZ plane with local U/V positioning, signed plane offset W, and reversible direction.
+- Extrude sketch profiles on XY, XZ, YZ, or a user-defined 3D plane with local U/V positioning, signed plane offset W, reverse/symmetric directions, and through-all cuts.
+- Revolve a rectangular profile around world or arbitrary 3D axes with an editable axis origin, direction, and sweep angle.
 - Edit models with Boolean operations, holes, patterns, mirror, single- or multi-face shell, split, draft, fillet, chamfer, and transforms.
 - Scale selected bodies independently along X, Y, and Z, or use uniform scaling.
 - Pattern selected bodies around an arbitrary 3D axis with an editable origin, direction, instance count, and sweep angle.
 - Inspect the minimum clearance between two selected bodies and read a closest-point pair.
 - Measure the shared solid volume and centroid of two selected bodies to inspect geometric interference.
 - Inspect selected face area, selected edge length, and picked vertex coordinates in the viewport.
+- Assign persistent material and density presets to bodies; mass-property inspection uses the assigned density by default.
 - Measure straight-line distance between two vertex references; the core test passes, while numeric live UI verification awaits a Ctrl-click capable desktop input path.
 - Navigate with mouse orbit, pan, zoom, and standard camera views.
 - Save and reopen native `.cadscene` documents; use undo and redo.
 - Import and export multi-body STEP files; export STL.
+- Export a CSV body schedule with stable body IDs, names, visibility, volume, area, extents, and center coordinates.
 - Create a dimensioned Wing rib with an airfoil outline, spar opening, and two lightening holes.
 - Sweep circular or rectangular profiles along a smooth generated 3D path.
 - Sweep elliptical profiles along a smooth generated 3D path.
@@ -192,7 +195,9 @@ ctest --test-dir build -C Release --output-on-failure
 
 The app uses Open CASCADE for solid construction and validity checks. A passing build or core test suite does not by itself confirm every menu workflow or a clean-machine installation. See [`docs/QA_MATRIX.md`](docs/QA_MATRIX.md) and [`docs/manual_qa_results.md`](docs/manual_qa_results.md) for tested workflows and remaining release checks.
 
-Current Windows verification snapshot (2026-10-26): the Windows x64 Release app and test targets built in `build_resume/Release`; full CTest passed 37/37; the source audit passed 136 checks and all 112 public `SceneDocument` operations have regression references. Live UI verified planar section contour, surface summaries, selected face area, selected edge length, and selected vertex coordinates. The vertex-distance core regression passed, and its Inspect command and insufficient-selection guard were verified; numeric two-vertex UI verification is pending because the desktop input path cannot Ctrl-click a second subshape. Earlier live XY, XZ, and YZ extrusion workflows, Through All Cut, multi-face Shell, and two-vector rectangular pattern were verified. The W01-W24 release checklist, clean-VM deployment, and approver sign-off remain outstanding. See [`docs/local_verification.json`](docs/local_verification.json) for the structured snapshot and [`docs/QA_MATRIX.md`](docs/QA_MATRIX.md) for feature details.
+Current Windows verification snapshot (2026-10-27): Windows x64 Release build passed; the complete CTest suite passed 41/41. The source audit passes 145 checks with all 115 public core operations referenced by regression. Live UI verified arbitrary-plane sketch extrusion and custom-axis revolution, including preview, solid properties, undo, and redo. Live UI also verified preset/custom material assignment and density-based mass calculations; save/reload remains core-tested but was not repeated in that UI pass. The body-schedule CSV save workflow remains unverified, and numeric two-vertex distance UI verification remains pending because the desktop input path cannot Ctrl-click a second subshape. The W01-W24 release checklist, clean-VM deployment, and approver sign-off remain outstanding. See [`docs/local_verification.json](docs/local_verification.json) for the structured snapshot and [`docs/QA_MATRIX.md](docs/QA_MATRIX.md) for feature details.
+
+Body-schedule CSV verification: Windows Release app and test targets rebuilt; full CTest passed 38/38, including 14 CSV assertions; source audit passed 141 checks with all 113 public core operations covered by regression references. Live UI confirmed the File menu command and CSV save dialog appear for a test box; saving a CSV through the UI remains unverified. See [`docs/BODY_SCHEDULE_CSV.md`](docs/BODY_SCHEDULE_CSV.md).
 
 ## Upload the source to GitHub
 

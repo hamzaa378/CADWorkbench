@@ -399,7 +399,7 @@ No source code was changed in this pass. Build warnings and the component-fideli
 
 ## Scope and comparison
 
-The 100 Production commands generate illustrative dimensioned direct-solid templates using nine reusable geometry families. See `FEATURES_V1_9.md` for the catalog. The comparison benchmark defines 30 capability areas: 6 implemented, 3 partial, and 21 not implemented. Threads, seals, certified profiles, internal mechanisms, joints, load ratings, tolerances, and manufacturing details may be simplified or omitted.
+The 100 Production commands generate illustrative dimensioned direct-solid templates using nine reusable geometry families. See `FEATURES_V1_9.md` for the catalog. The comparison benchmark defines 30 capability areas: 6 implemented, 4 partial, and 20 not implemented. Threads, seals, certified profiles, internal mechanisms, joints, load ratings, tolerances, and manufacturing details may be simplified or omitted.
 
 ## Profile sweep verification (2026-10-25)
 
@@ -492,3 +492,44 @@ The rebuilt Windows Release app was exercised in an empty, disposable Untitled d
 | Circular hole pattern | Four through-all holes cut the selected prism; volume changed from 16,964.600 to 16,116.370 mm³ and face/edge counts from 3/6 to 7/30 |
 
 This verifies these dialogs and default UI workflows. The Create ribbon showed all eight related commands, and the Modify ribbon showed the vector and circular hole pattern buttons. Ribbon buttons were not individually activated; the 100 Production Component dialogs were not each opened. The broader W01-W24 release checklist and clean-VM install remain outstanding.
+## Body schedule CSV export (2026-10-26)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | `CADWorkbench.exe` and `cadcore_tests.exe` rebuilt in `build_resume/Release` |
+| Focused regression | PASS (14 assertions) | CSV metrics, escaped names, visibility, row count, invalid path and empty-document handling |
+| Focused CTest | PASS (1/1) | `cadcore_body_schedule_csv` |
+| Full CTest | PASS (38/38) | Complete configured Windows Release suite |
+| Source audit | PASS | 141 checks; all 113 public core operations referenced by regression |
+| Live UI | PARTIAL | File menu command and CSV save dialog opened for a test box; saving through the dialog is pending |
+
+See [`BODY_SCHEDULE_CSV.md`](BODY_SCHEDULE_CSV.md) for the exported columns and limitation.
+
+## Per-body material presets (2026-10-26)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | `CADWorkbench.exe` and `cadcore_tests.exe` rebuilt in `build_materials_round/Release` |
+| Focused regression | PASS (50 assertions) | Preset/custom and multi-body assignment, history, persistence, density, invalid input, duplicate/mirror/pattern inheritance, matching and mixed-material unions |
+| Focused CTest | PASS (1/1) | `cadcore_body_materials` |
+| Full CTest | PASS (39/39) | Complete Windows Release suite |
+| Source audit | PASS | 145 checks; all 114 public core operations referenced by regression |
+| Live UI | PASS | Assigned Aluminum 6061 to a 40 × 30 × 20 mm box; properties showed 2,700 kg/m³ and mass dialog defaulted to 2,700 kg/m³. A custom UI Test Alloy at 7,850 kg/m³ remained visible in body properties and mass inspection reported 0.188400 kg for 24,000 mm³. |
+
+See [`MATERIAL_ASSIGNMENTS.md`](MATERIAL_ASSIGNMENTS.md) for behavior and scope.
+
+## CADWorkbench v1.10.0 custom-plane modeling (2026-10-27)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | Application and core-test target rebuilt in `build_materials_round/Release` |
+| Custom-plane extrusion regression | PASS (24 assertions) | Oblique frame, centroid and volume, non-mutation, commit/undo/redo, invalid frame, forward/reverse through-all Cut |
+| Custom-axis revolve regression | PASS (18 assertions) | Oblique axis, analytical volume/centroid, partial 90° sweep, invalid direction, undo/redo |
+| Existing oriented extrusion regression | PASS (249 assertions) | XY/XZ/YZ modes, reverse, offsets, taper, Through All Cut and history behavior retained |
+| Full CTest | PASS (41/41) | All configured Windows Release tests |
+| Source audit | PASS | 145 checks; all 115 public core operations referenced by regression |
+| Live custom-plane UI | PASS | Angled 40 × 30 × 20 mm rectangle created; 24,000 mm³, six faces, 24 edges; undo/redo verified |
+| Live custom-axis revolve UI | PASS | Cylinder around (1, 1, 1); 6,283.185 mm³, three faces, six edges; undo/redo verified |
+
+See [`FEATURES_V1_10.md`](FEATURES_V1_10.md), [`CUSTOM_PLANE_EXTRUSION.md`](CUSTOM_PLANE_EXTRUSION.md), and [`CUSTOM_AXIS_REVOLVE.md`](CUSTOM_AXIS_REVOLVE.md).
+

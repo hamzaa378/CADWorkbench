@@ -4,7 +4,7 @@
 
 There is no fixed, authoritative count of every feature in a full CAD system: products group and split tools differently, and the scope changes by edition. This comparison therefore uses a stated benchmark of 30 broad capability areas drawn from the design, electronics, generative design, rendering, animation, simulation, manufacturing, and drawing workspaces documented for Autodesk Fusion, plus AutoCAD's drafting, 3D, collaboration, and customization areas. The official product pages describe those areas at different levels of detail, so this is a planning benchmark, not a feature-by-feature parity score.
 
-**Current tally:** 6 capability areas implemented, 3 partial, and **21 not yet implemented** in CADWorkbench v1.9, out of these 30 benchmark areas.
+**Current tally:** 6 capability areas implemented, 4 partial, and **20 not yet implemented** in CADWorkbench v1.9, out of these 30 benchmark areas. The body-schedule CSV export provides a first data-extraction workflow, but it is not a structured BOM with component quantities or drawing sheets.
 
 Separately, v1.9 adds 100 component templates. Across v1.3–v1.9, the release catalog contains 405 dimensioned component templates (30 + 30 + 35 + 70 + 70 + 70 + 100). Component templates are counted separately from modeling-workflow capabilities below.
 
@@ -25,7 +25,7 @@ Separately, v1.9 adds 100 component templates. Across v1.3–v1.9, the release c
 | 11 | 2D technical drawings and projected views | Not implemented | No drawing-sheet workspace. |
 | 12 | Drawing dimensions, annotations, and tolerances | Not implemented | No drafting annotation or GD&T toolset. |
 | 13 | Photorealistic rendering | Not implemented | No material, lighting, or render workspace. |
-| 14 | Appearance and material library | Partial | Body color is supported; physical material properties and appearance library are absent. |
+| 14 | Appearance and material library | Partial | Body color, saved per-body preset or custom name/density assignments, and mass-property density defaults are supported; extended physical properties and a broad appearance library are absent. |
 | 15 | Measurement, selection, and mass properties | Implemented | Body/subshape selection, properties, and mass-property inspection. |
 | 16 | 3D camera navigation and standard views | Implemented | Mouse navigation and standard camera views. |
 | 17 | Native document save/load and undo/redo | Implemented | Native scene persistence and edit history. |
@@ -40,7 +40,7 @@ Separately, v1.9 adds 100 component templates. Across v1.3–v1.9, the release c
 | 26 | Cloud sharing and team collaboration | Not implemented | No cloud project or shared review workflow. |
 | 27 | Version comparison and change review | Not implemented | Undo/redo exists, but no document revision comparison. |
 | 28 | Automation API, macros, and plugins | Not implemented | No user-facing automation or extension API. |
-| 29 | BOM, drawing sheets, and data extraction | Not implemented | No BOM/table extraction workflow. |
+| 29 | BOM, drawing sheets, and data extraction | Partial | Body-schedule CSV exports body ID, name, visibility, volume, area, bounds, and center; no component quantity aggregation, BOM metadata, or drawing sheets. |
 | 30 | CAD standards and standards checking | Not implemented | No configurable drafting/model standards checker. |
 
 ## Suggested remaining-work order

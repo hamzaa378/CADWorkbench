@@ -476,7 +476,7 @@ void testOrientedExtrusion() {
     cad::ExtrusionCommand invalid;
     cad::SceneDocument doc;
     require(doc.prepareExtrusion(cad::SketchProfile::Rectangle,0,0,10,8,5,&invalid,&error),"Invalid-plane fixture failed");
-    invalid.sketchPlane=static_cast<cad::SketchPlane>(3);
+    invalid.sketchPlane=static_cast<cad::SketchPlane>(4);
     require(cad::SceneDocument::buildExtrusionPreview(invalid).shape.IsNull(),"Invalid sketch plane accepted");
       require(doc.prepareExtrusion(cad::SketchProfile::Rectangle,0,0,10,8,5,&invalid,&error),"Offset invalid-case fixture failed");
       invalid.planeOffset=std::numeric_limits<double>::quiet_NaN();
@@ -525,6 +525,106 @@ void testVariablePitchHelicalSweep() {
     require(doc.redo()&&doc.parts().size()==1&&doc.parts().first().name=="Variable Pitch Helix",
             "Variable-pitch helix redo failed");
 }
+void testCustomPlaneExtrusion() {
+    QString error;
+    cad::SceneDocument doc;
+    cad::ExtrusionCommand command;
+    require(doc.prepareExtrusion(cad::SketchProfile::Rectangle,2,3,8,4,6,&command,&error),
+            "Custom-plane extrusion preparation failed");
+    command.sketchPlane=cad::SketchPlane::Custom;
+    command.customOriginX=10;command.customOriginY=20;command.customOriginZ=30;
+    command.customNormalX=1;command.customNormalY=2;command.customNormalZ=2;
+    command.customUAxisX=1;command.customUAxisY=0;command.customUAxisZ=0;
+    command.planeOffset=2;
+    const auto preview=cad::SceneDocument::buildExtrusionPreview(command);
+    require(!preview.shape.IsNull()&&BRepCheck_Analyzer(preview.shape).IsValid(),
+            ("Custom-plane preview invalid: "+preview.error.toStdString()).c_str());
+    closeTo(volume(preview.shape),192);
+    GProp_GProps props;BRepGProp::VolumeProperties(preview.shape,props);
+    const double invSqrt18=1.0/std::sqrt(18.0),invSqrt2=1.0/std::sqrt(2.0);
+    const double expectedX=10+6*4*invSqrt18+5*0+5.0/3.0;
+    const double expectedY=20-6*invSqrt18+5*invSqrt2+10.0/3.0;
+    const double expectedZ=30-6*invSqrt18-5*invSqrt2+10.0/3.0;
+    closeTo(props.CentreOfMass().X(),expectedX);closeTo(props.CentreOfMass().Y(),expectedY);
+    closeTo(props.CentreOfMass().Z(),expectedZ);
+    require(doc.parts().isEmpty(),"Custom-plane preview mutated the scene");
+    require(doc.commitExtrusion(command,preview.shape,&error),"Custom-plane extrusion commit failed");
+    require(doc.parts().size()==1,"Custom-plane extrusion did not create one body");
+    validate(doc.parts().first());
+    require(doc.undo()&&doc.parts().isEmpty(),"Custom-plane extrusion undo failed");
+    require(doc.redo()&&doc.parts().size()==1,"Custom-plane extrusion redo failed");
+
+    command.customNormalX=0;command.customNormalY=0;command.customNormalZ=0;
+    require(cad::SceneDocument::buildExtrusionPreview(command).shape.IsNull(),
+            "Zero custom plane normal was accepted");
+    command.customNormalX=1;command.customNormalY=0;command.customNormalZ=0;
+    command.customUAxisX=2;command.customUAxisY=0;command.customUAxisZ=0;
+    require(cad::SceneDocument::buildExtrusionPreview(command).shape.IsNull(),
+            "U direction parallel to custom normal was accepted");
+    command.customUAxisX=0;command.customUAxisY=1;command.customUAxisZ=0;
+    command.customOriginZ=std::numeric_limits<double>::infinity();
+    require(cad::SceneDocument::buildExtrusionPreview(command).shape.IsNull(),
+            "Non-finite custom origin was accepted");
+
+    cad::SceneDocument target;
+    require(target.addPrimitive(cad::Primitive::Box,{40,30,20},&error),
+            "Custom through-all target fixture failed");
+    cad::ExtrusionCommand cut;
+    const QString targetId=target.parts().first().id;
+    require(target.prepareExtrusion(cad::SketchProfile::Rectangle,-100,-100,200,200,1,
+                cad::ExtrusionMode::Cut,targetId,&cut,&error),
+            "Custom through-all cut preparation failed");
+    cut.sketchPlane=cad::SketchPlane::Custom;cut.customOriginX=20;cut.customOriginY=15;cut.customOriginZ=10;
+    cut.customNormalX=1;cut.customNormalY=1;cut.customNormalZ=1;
+    cut.customUAxisX=1;cut.customUAxisY=-1;cut.customUAxisZ=0;cut.throughAll=true;
+    const auto cutPreview=cad::SceneDocument::buildExtrusionPreview(cut);
+    require(!cutPreview.shape.IsNull()&&BRepCheck_Analyzer(cutPreview.shape).IsValid(),
+            ("Custom-plane through-all preview failed: "+cutPreview.error.toStdString()).c_str());
+    require(volume(cutPreview.shape)<24000,"Custom-plane through-all Cut did not remove material");
+    require(target.commitExtrusion(cut,cutPreview.shape,&error),"Custom-plane through-all commit failed");
+    require(target.undo()&&std::abs(volume(target.parts().first().shape)-24000)<1e-5,
+            "Custom-plane through-all undo failed");
+    cut.reverseDirection=true;
+    const auto reversePreview=cad::SceneDocument::buildExtrusionPreview(cut);
+    require(!reversePreview.shape.IsNull()&&BRepCheck_Analyzer(reversePreview.shape).IsValid(),
+            "Reverse custom-plane through-all preview failed");
+    require(volume(reversePreview.shape)<24000,"Reverse custom-plane through-all Cut did not remove material");
+}
+
+void testCustomAxisRevolve() {
+    QString error;cad::SceneDocument doc;cad::RevolveCommand command;
+    require(doc.prepareRevolveAboutCustomAxis(5,2,3,10,360,4,-3,8,1,2,2,&command,&error),
+            "Custom-axis revolve preparation failed");
+    const auto preview=cad::SceneDocument::buildRevolvePreview(command);
+    require(!preview.shape.IsNull()&&BRepCheck_Analyzer(preview.shape).IsValid(),
+            ("Custom-axis revolve preview invalid: "+preview.error.toStdString()).c_str());
+    const double expectedVolume=390*std::numbers::pi;
+    closeTo(volume(preview.shape),expectedVolume);
+    GProp_GProps props;BRepGProp::VolumeProperties(preview.shape,props);
+    closeTo(props.CentreOfMass().X(),4+7/std::sqrt(9.0));
+    closeTo(props.CentreOfMass().Y(),-3+14/std::sqrt(9.0));
+    closeTo(props.CentreOfMass().Z(),8+14/std::sqrt(9.0));
+    require(doc.parts().isEmpty(),"Custom-axis revolve preview mutated the scene");
+    require(doc.commitRevolve(command,preview.shape,&error),"Custom-axis revolve commit failed");
+    require(doc.parts().size()==1,"Custom-axis revolve did not create one body");validate(doc.parts().first());
+    require(doc.undo()&&doc.parts().isEmpty(),"Custom-axis revolve undo failed");
+    require(doc.redo()&&doc.parts().size()==1,"Custom-axis revolve redo failed");
+
+    cad::RevolveCommand partial;
+    require(doc.prepareRevolveAboutCustomAxis(5,0,3,10,90,-2,4,1,1,2,2,&partial,&error),
+            "Partial custom-axis revolve preparation failed");
+    const auto quarter=cad::SceneDocument::buildRevolvePreview(partial);
+    require(!quarter.shape.IsNull()&&BRepCheck_Analyzer(quarter.shape).IsValid(),
+            "90-degree custom-axis revolve was invalid");
+    closeTo(volume(quarter.shape),expectedVolume/4.0);
+
+    require(!doc.prepareRevolveAboutCustomAxis(5,0,3,10,360,0,0,0,0,0,0,&partial,&error),
+            "Zero custom revolution axis was accepted");
+    partial.axisDirectionX=std::numeric_limits<double>::quiet_NaN();
+    require(cad::SceneDocument::buildRevolvePreview(partial).shape.IsNull(),
+            "Non-finite custom revolution axis was accepted");
+}
+
 void testTaperedHelicalSweep() {
     QString error;
     cad::SceneDocument doc;
@@ -734,6 +834,100 @@ void testDensityMassProperties() {
     require(!doc.measureMassFromDensity("missing",7850,&result,&error),"Missing body was accepted");
     require(!doc.measureMassFromDensity(id,7850,nullptr,&error),"Null mass-properties output was accepted");
     require(doc.parts().size()==1&&doc.canUndo()==undoBefore,"Mass query mutated scene history");
+}
+void testBodyScheduleCsv() {
+    cad::SceneDocument doc;QString error;
+    require(doc.addPrimitive(cad::Primitive::Box,{10,12,14},&error),"Could not create CSV schedule box");
+    require(doc.addPrimitive(cad::Primitive::Sphere,{3},&error),"Could not create CSV schedule sphere");
+    const QString firstId=doc.parts().first().id;
+    require(doc.rename(firstId,"Base, \"upper\" plate",&error),"Could not rename CSV schedule test body");
+    require(doc.setVisibility(doc.parts().last().id,false,&error),"Could not hide CSV schedule sphere");
+    QTemporaryDir dir;require(dir.isValid(),"Could not create CSV temporary folder");
+    const QString path=dir.filePath("body_schedule.csv");
+    require(doc.exportBodyScheduleCsv(path,&error),("Body schedule export failed: "+error.toStdString()).c_str());
+    const QByteArray csv=readBytes(path);
+    require(csv.startsWith("Body ID,Name,Visible,Volume (mm^3),Surface area (mm^2),"),"CSV schedule header is incorrect");
+    require(csv.contains("\"Base, \"\"upper\"\" plate\""),"CSV schedule did not quote comma/quote characters correctly");
+    require(csv.contains(",true,1680,856,"),"CSV schedule omitted box volume or surface area");
+    require(csv.contains(",false,"),"CSV schedule omitted hidden-body visibility");
+    require(csv.count('\n')==3,"CSV schedule should contain one header and two body rows");
+    require(!doc.exportBodyScheduleCsv({},&error),"Empty CSV path was accepted");
+    require(!cad::SceneDocument{}.exportBodyScheduleCsv(path,&error),"Empty document produced a CSV schedule");
+    QFile asDirectory(dir.path());
+    require(!doc.exportBodyScheduleCsv(dir.path(),&error),"Directory path was accepted as a CSV output file");
+}
+void testBodyMaterialAssignment() {
+    cad::SceneDocument doc;QString error;
+    require(doc.addPrimitive(cad::Primitive::Box,{10,12,14},&error),"Could not create material test body");
+    const QString id=doc.parts().first().id;
+    require(doc.setMaterial(id," Aluminum 6061 ",2700.0,&error),"Could not assign aluminum material");
+    require(doc.find(id)->materialName=="Aluminum 6061","Material name was not normalized");
+    closeTo(doc.find(id)->materialDensityKgPerM3,2700.0);
+    require(doc.undo()&&doc.find(id)->materialName.isEmpty(),"Material assignment undo failed");
+    require(doc.redo()&&doc.find(id)->materialName=="Aluminum 6061","Material assignment redo failed");
+    cad::DensityMassProperties mass;
+    require(doc.measureMassFromDensity(id,doc.find(id)->materialDensityKgPerM3,&mass,&error),"Assigned density mass query failed");
+    closeTo(mass.massKg,0.004536,1e-10);
+    QTemporaryDir dir;require(dir.isValid(),"Could not create material test folder");
+    const QString path=dir.filePath("material.cadscene");
+    require(doc.saveAs(path,&error),"Material document save failed");
+    cad::SceneDocument loaded;require(loaded.load(path,&error),"Material document load failed");
+    require(loaded.parts().first().materialName=="Aluminum 6061","Saved material name did not round-trip");
+    closeTo(loaded.parts().first().materialDensityKgPerM3,2700.0);
+    require(loaded.setMaterial(id,"Ti-6Al-4V",4430.0,&error),"Custom material assignment failed");
+    require(loaded.find(id)->materialName=="Ti-6Al-4V","Custom material name was not retained");
+    closeTo(loaded.find(id)->materialDensityKgPerM3,4430.0);
+    require(loaded.undo()&&loaded.find(id)->materialName=="Aluminum 6061","Custom material assignment undo failed");
+    require(loaded.duplicate(id,20,0,0,&error),"Material body duplicate failed");
+    require(loaded.parts().last().materialName=="Aluminum 6061","Duplicate did not inherit its source material");
+    closeTo(loaded.parts().last().materialDensityKgPerM3,2700.0);
+    require(loaded.linearPatternAlongVector(id,0,1,0,3,20,&error),"Material body vector pattern failed");
+    require(loaded.parts().last().materialName=="Aluminum 6061","Pattern instance did not inherit its source material");
+    closeTo(loaded.parts().last().materialDensityKgPerM3,2700.0);
+    require(loaded.mirror(id,cad::Axis::X,0,&error),"Material body mirror failed");
+    require(loaded.parts().last().materialName=="Aluminum 6061","Mirror did not inherit its source material");
+    closeTo(loaded.parts().last().materialDensityKgPerM3,2700.0);
+    require(!loaded.setMaterial(id,"Steel",0.0,&error),"Zero-density assigned material was accepted");
+    require(!loaded.setMaterial(id,"",2700.0,&error),"Density without a material name was accepted");
+    require(!loaded.setMaterial(id,"Steel",std::numeric_limits<double>::infinity(),&error),"Infinite material density was accepted");
+    require(!loaded.setMaterial("missing","Steel",7850,&error),"Missing body material assignment was accepted");
+    require(loaded.setMaterial(id,"",0.0,&error)&&loaded.find(id)->materialName.isEmpty(),"Material clear failed");
+    require(loaded.undo()&&loaded.find(id)->materialName=="Aluminum 6061","Material clear undo failed");
+
+    cad::SceneDocument fusion;
+    require(fusion.addPrimitive(cad::Primitive::Box,{10,10,10},&error),"Material fusion box setup failed");
+    const QString first=fusion.parts().first().id;
+    require(fusion.setMaterial(first,"Aluminum 6061",2700,&error),"Material fusion assignment failed");
+    require(fusion.duplicate(first,10,0,0,&error),"Material fusion duplicate failed");
+    const QString second=fusion.parts().last().id;
+    require(fusion.booleanOperation(cad::BooleanOp::Fuse,first,second,&error),"Same-material union failed");
+    require(fusion.parts().size()==1&&fusion.parts().first().materialName=="Aluminum 6061",
+            "Union of matching materials did not retain the assignment");
+    closeTo(fusion.parts().first().materialDensityKgPerM3,2700.0);
+    const QString fusedId=fusion.parts().first().id;
+    require(fusion.duplicate(fusedId,20,0,0,&error),"Mixed-material fusion duplicate failed");
+    const QString mixedId=fusion.parts().last().id;
+    require(fusion.setMaterial(mixedId,"Stainless steel 304",8000,&error),"Second union material setup failed");
+    require(fusion.booleanOperation(cad::BooleanOp::Fuse,fusedId,mixedId,&error),"Mixed-material union failed");
+    require(fusion.parts().size()==1&&fusion.parts().first().materialName.isEmpty(),
+            "Union of different materials retained an incorrect assignment");
+
+    cad::SceneDocument multi;
+    require(multi.addPrimitive(cad::Primitive::Box,{5,5,5},&error),"Multi-material first body setup failed");
+    require(multi.addPrimitive(cad::Primitive::Sphere,{3},&error),"Multi-material second body setup failed");
+    const QString firstMulti=multi.parts()[0].id,secondMulti=multi.parts()[1].id;
+    require(!multi.setMaterial(QStringList{firstMulti,"missing"},"Brass",8500,&error),
+            "Multi-material assignment accepted a missing body");
+    require(multi.parts()[0].materialName.isEmpty()&&multi.parts()[1].materialName.isEmpty(),
+            "Failed multi-material assignment partially changed bodies");
+    require(multi.setMaterial(QStringList{firstMulti,secondMulti},"Brass",8500,&error),
+            "Multi-body material assignment failed");
+    require(multi.parts()[0].materialName=="Brass"&&multi.parts()[1].materialName=="Brass",
+            "Multi-body material assignment did not update every body");
+    require(multi.undo()&&multi.parts()[0].materialName.isEmpty()&&multi.parts()[1].materialName.isEmpty(),
+            "One undo did not revert the full multi-body assignment");
+    require(multi.redo()&&multi.parts()[0].materialName=="Brass"&&multi.parts()[1].materialName=="Brass",
+            "One redo did not restore the full multi-body assignment");
 }
 void testPlanarSectionMeasurement() {
     cad::SceneDocument doc;QString error;
@@ -2227,6 +2421,8 @@ int main(int argc,char** argv) {
         if(argc==2&&std::string(argv[1])=="--asymmetric-chamfer") { testAsymmetricChamfer(); std::cout<<"PASS: "<<checks<<" asymmetric-chamfer assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--multi-edge-blends") { testMultiEdgeBlends(); std::cout<<"PASS: "<<checks<<" multi-edge-blend assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--oriented-extrusion") { testOrientedExtrusion(); std::cout<<"PASS: "<<checks<<" oriented-extrusion assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--custom-plane-extrusion") { testCustomPlaneExtrusion(); std::cout<<"PASS: "<<checks<<" custom-plane-extrusion assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--custom-axis-revolve") { testCustomAxisRevolve(); std::cout<<"PASS: "<<checks<<" custom-axis-revolve assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--tapered-helix") { testTaperedHelicalSweep(); std::cout<<"PASS: "<<checks<<" tapered-helix assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--form-features") { testFormFeatures(); std::cout<<"PASS: "<<checks<<" form-feature assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--vector-pattern") { testVectorLinearPattern(); std::cout<<"PASS: "<<checks<<" vector-pattern assertions\n"; return 0; }
@@ -2235,6 +2431,8 @@ int main(int argc,char** argv) {
         if(argc==2&&std::string(argv[1])=="--interference") { testInterferenceMeasurement(); std::cout<<"PASS: "<<checks<<" interference assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--body-diagnostics") { testBodyDiagnostics(); std::cout<<"PASS: "<<checks<<" body-diagnostics assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--density-mass-properties") { testDensityMassProperties(); std::cout<<"PASS: "<<checks<<" density-mass-properties assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--body-materials") { testBodyMaterialAssignment(); std::cout<<"PASS: "<<checks<<" body-material assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--body-schedule-csv") { testBodyScheduleCsv(); std::cout<<"PASS: "<<checks<<" body-schedule-csv assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--planar-section") { testPlanarSectionMeasurement(); std::cout<<"PASS: "<<checks<<" planar-section assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--surface-summary") { testSurfaceTypeSummary(); std::cout<<"PASS: "<<checks<<" surface-summary assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--face-area") { testSelectedFaceArea(); std::cout<<"PASS: "<<checks<<" face-area assertions\n"; return 0; }

@@ -19,6 +19,8 @@ struct Part {
     // Changes only when the B-rep changes; lets transient subshape references
     // survive appearance edits and become invalid after topology mutations.
     QString geometryToken = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    QString materialName;
+    double materialDensityKgPerM3 = 0.0;
 };
 
 struct MinimumDistanceResult {
@@ -129,7 +131,7 @@ struct ChamferPreview {
 };
 
 enum class SketchProfile { Rectangle, Circle, Ellipse, Slot, Triangle, RegularPolygon, RoundedRectangle, Ring };
-enum class SketchPlane { XY, XZ, YZ };
+enum class SketchPlane { XY, XZ, YZ, Custom };
 enum class ExtrusionMode { NewBody, Join, Cut };
 
 struct ExtrusionCommand {
@@ -144,6 +146,17 @@ struct ExtrusionCommand {
     double originX = 0.0;
     double originY = 0.0;
     double planeOffset = 0.0;
+    // Custom sketch frame in world coordinates. The U direction is projected
+    // into the plane; V is derived as normal × U to form a right-handed frame.
+    double customOriginX = 0.0;
+    double customOriginY = 0.0;
+    double customOriginZ = 0.0;
+    double customNormalX = 0.0;
+    double customNormalY = 0.0;
+    double customNormalZ = 1.0;
+    double customUAxisX = 1.0;
+    double customUAxisY = 0.0;
+    double customUAxisZ = 0.0;
     double widthOrDiameter = 0.0;
     double depth = 0.0;
     double height = 0.0;
@@ -168,6 +181,9 @@ struct RevolveCommand {
     double axisOriginX = 0.0;
     double axisOriginY = 0.0;
     double axisOriginZ = 0.0;
+    double axisDirectionX = 0.0;
+    double axisDirectionY = 0.0;
+    double axisDirectionZ = 1.0;
     quint64 sourceRevision = 0;
 };
 
@@ -504,6 +520,10 @@ public:
     bool prepareRevolveAboutAxis(double radialOffset,double axialOrigin,double radialWidth,double axialHeight,
                                  double angleDegrees,int axisIndex,double originX,double originY,double originZ,
                                  RevolveCommand* command,QString* error = nullptr) const;
+    bool prepareRevolveAboutCustomAxis(double radialOffset,double axialOrigin,double radialWidth,double axialHeight,
+                                      double angleDegrees,double originX,double originY,double originZ,
+                                      double directionX,double directionY,double directionZ,
+                                      RevolveCommand* command,QString* error = nullptr) const;
     static RevolvePreview buildRevolvePreview(const RevolveCommand& command);
     bool commitRevolve(const RevolveCommand& command, const TopoDS_Shape& preview, QString* error = nullptr);
     bool mirror(const QString& id, Axis planeNormal, double planeOffset, QString* error = nullptr);
@@ -595,6 +615,10 @@ public:
     bool rename(const QString& id, const QString& name, QString* error = nullptr);
     bool setVisibility(const QString& id, bool visible, QString* error = nullptr);
     bool setColor(const QString& id, const QString& hexColor, QString* error = nullptr);
+    bool setMaterial(const QString& id,const QString& materialName,double densityKgPerM3,
+                     QString* error = nullptr);
+    bool setMaterial(const QStringList& ids,const QString& materialName,double densityKgPerM3,
+                     QString* error = nullptr);
     bool erase(const QString& id, QString* error = nullptr);
     bool eraseMany(const QStringList& ids, QString* error = nullptr);
     void clear();
@@ -608,6 +632,7 @@ public:
     bool importSTEP(const QString& path, QString* error = nullptr);
     bool exportSTEP(const QString& path, QString* error = nullptr) const;
     bool exportSTL(const QString& path, QString* error = nullptr) const;
+    bool exportBodyScheduleCsv(const QString& path, QString* error = nullptr) const;
 
 private:
     struct Snapshot { QVector<Part> parts; quint64 revision; };

@@ -1,3 +1,10 @@
+## v1.10.0 custom-axis modeling - 2026-10-27
+
+- Added sketch extrusion on arbitrary 3D planes, including world origin, normal, and projected U direction. Existing profiles, Join/Cut, taper, symmetric/reverse modes, and through-all cuts use the custom frame.
+- Added revolution of rectangular profiles about arbitrary 3D axes with a configurable axis origin, direction, and partial sweep angle.
+- Windows x64 Release build passed. Focused regressions passed 24 custom-plane assertions and 18 custom-axis revolve assertions; the existing oriented-extrusion regression passed 249 assertions. Full CTest passed 41/41 and the source audit passed 145 checks with all 115 public operations referenced.
+- Live UI verified both commands, their previews, resulting solid properties, and undo/redo. See `FEATURES_V1_10.md` for detailed results and `CUSTOM_PLANE_EXTRUSION.md` / `CUSTOM_AXIS_REVOLVE.md` for behavior.
+
 ## Distance between selected vertices - 2026-10-26
 
 - Added a read-only straight-line distance query and an Inspect menu/ribbon action for two picked vertices.
@@ -281,4 +288,22 @@
 - Added a read-only Inspect report that classifies unique B-rep faces as planar, cylindrical, conical, spherical, toroidal, or other and totals area by type.
 - Focused regression passed 22 assertions across box, cylinder, sphere, cone, and torus surfaces. Windows x64 Release build passed; full CTest passed 34/34; source audit passed 136 checks with all 109 public scene operations covered.
 - Live UI verified a box's 5,200 mm² planar area and a cylinder's cap and curved areas (628.319 and 2,199.115 mm²). See `SURFACE_TYPE_SUMMARY.md`.
+
+## Body schedule CSV export - 2026-10-26
+
+- Added **File → Export body schedule CSV...** with body ID/name, visibility, volume, surface area, X/Y/Z extents, and center of mass.
+- Windows Release application and test targets rebuilt; full CTest passed 38/38, including 14 focused CSV assertions; source audit passed 141 checks with all 113 public core operations referenced by regression.
+- Live UI confirmed the File menu command is visible; save-dialog workflow remains pending. This is a body schedule, not a quantity-aggregated BOM.
+
+## Per-body materials - 2026-10-26
+
+- Added saved material name and density fields, assignment/clear with undo-redo, a preset selector, body-property display, and assigned-density defaults for mass inspection.
+- Duplicated, mirrored, and patterned bodies inherit the source material. Boolean unions retain a material only when both inputs have matching assignments.
+- Native v2 scenes without these optional fields continue to load as unassigned.
+- Added custom material entry for name and density; custom assignments on any body can be reused elsewhere in that document.
+- Multiple selected bodies can receive one material in a single atomic, undoable edit.
+- Windows x64 Release application and test targets rebuilt; focused material regression passed 50 assertions, full CTest passed 39/39, and source audit passed 145 checks with all 114 public scene operations referenced. Live UI verification remains pending. See `MATERIAL_ASSIGNMENTS.md`.
+
+
+- Live Windows UI verification passed: preset and custom material names/densities appeared in body properties, and mass properties used the assigned densities (0.064800 kg at 2,700 kg/m³; 0.188400 kg at 7,850 kg/m³ for a 24,000 mm³ box).
 

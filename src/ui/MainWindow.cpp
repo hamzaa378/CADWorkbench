@@ -1,4 +1,4 @@
-﻿#include "MainWindow.h"
+#include "MainWindow.h"
 #include "CadViewport.h"
 
 #include <BRepGProp.hxx>
@@ -46,6 +46,7 @@
 #include <QtConcurrent/QtConcurrentRun>
 
 #include <optional>
+#include <algorithm>
 #include <utility>
 
 namespace {
@@ -159,6 +160,7 @@ void MainWindow::buildUi() {
     auto* importStepAction = file->addAction("Import STEP...",this,&MainWindow::importSTEPFile);
     auto* exportStepAction = file->addAction("Export STEP...",this,[this]{exportFile(true);});
     auto* exportStlAction = file->addAction("Export STL...",this,[this]{exportFile(false);});
+    auto* exportBodyScheduleAction=file->addAction("Export body schedule CSV...",this,&MainWindow::exportBodyScheduleCsv);
     file->addSeparator();
     auto* exitAction = file->addAction("E&xit",this,&QWidget::close);
 
@@ -168,6 +170,7 @@ void MainWindow::buildUi() {
     edit->addSeparator();
     auto* renameAction = edit->addAction("Rename selected...",this,&MainWindow::renameObject,QKeySequence("F2"));
     auto* colorAction = edit->addAction("Body color...",this,&MainWindow::recolorObject);
+    auto* materialAction = edit->addAction("Assign material...",this,&MainWindow::assignMaterial);
     auto* deleteAction = edit->addAction("Delete selected",this,&MainWindow::removeSelected,QKeySequence::Delete);
 
     auto* create = menuBar()->addMenu("&Create");
@@ -202,6 +205,7 @@ void MainWindow::buildUi() {
     auto* loftAction = create->addAction("Loft between rectangles...",this,&MainWindow::loftRectangles);
     auto* revolveAction = create->addAction("Revolve rectangle profile...",this,&MainWindow::revolveRectangleProfile);
     auto* axisRevolveAction = create->addAction("Revolve about X/Y/Z axis...",this,&MainWindow::revolveAboutWorldAxis);
+    create->addAction("Revolve about custom axis...",this,&MainWindow::revolveAboutCustomAxis);
     auto* mechanicalMenu=create->addMenu("Mechanical Components");
     QList<QAction*> mechanicalActions;
     for(int i=0;i<static_cast<int>(cad::EngineeringPart::Count);++i){
@@ -416,7 +420,7 @@ void MainWindow::buildUi() {
     addRibbonTab("File",{
         {"Document",{newAction,openAction,saveAction,saveAsAction,exitAction}},
         {"Import",{importStepAction}},
-        {"Export",{exportStepAction,exportStlAction}},
+        {"Export",{exportStepAction,exportStlAction,exportBodyScheduleAction}},
         {"History",{undoAction_,redoAction_}}
     });
     addRibbonTab("Create",{
@@ -436,7 +440,7 @@ void MainWindow::buildUi() {
         {"Combine",{fuseAction,cutAction,commonAction}},
         {"Pattern",{patternAction,vectorPatternAction,rectangularPatternAction,vectorRectangularPatternAction,circularPatternAction,axisPatternAction}},
         {"Features",{holeAction,holeGridAction,circularHolePatternAction,circularCountersinkPatternAction,circularCounterborePatternAction,linearCountersinkPatternAction,linearCounterborePatternAction,dovetailGrooveAction,tSlotGrooveAction,roundedSlotAction,keyholeSlotAction,roundedSlotPatternAction,linearKeyholePatternAction,splitAction,shellAction,draftAction,filletAction,chamferAction,asymmetricChamferAction,filletAllAction,chamferAllAction}},
-        {"Manage",{renameAction,colorAction,deleteAction}}
+        {"Manage",{renameAction,colorAction,materialAction,deleteAction}}
     });
     addRibbonTab("Inspect",{
         {"Measure",{massPropertiesAction,clearanceAction,interferenceAction,diagnosticsAction,sectionAction,surfaceSummaryAction,faceAreaAction,edgeLengthAction,vertexCoordinatesAction,vertexDistanceAction}},
@@ -500,13 +504,15 @@ void MainWindow::updateInspector(const QStringList& ids) {
     BRepBndLib::AddOptimal(part->shape,box,false,false);
     double xmin=0,ymin=0,zmin=0,xmax=0,ymax=0,zmax=0;
     if (!box.IsVoid()) box.Get(xmin,ymin,zmin,xmax,ymax,zmax);
-    detail_->setText(QString("%1\n\nVolume: %2 mmÂ³\nBounds X: %3 to %4 mm\nBounds Y: %5 to %6 mm\nBounds Z: %7 to %8 mm\nFaces: %9\nEdges: %10\nVisible: %11\nColor: %12\n\nID: %13")
+    const QString materialText=part->materialName.isEmpty()?QStringLiteral("Unassigned"):
+        QStringLiteral("%1 (%2 kg/m³)").arg(part->materialName).arg(part->materialDensityKgPerM3,0,'f',1);
+    detail_->setText(QString("%1\n\nVolume: %2 mmÂ³\nBounds X: %3 to %4 mm\nBounds Y: %5 to %6 mm\nBounds Z: %7 to %8 mm\nFaces: %9\nEdges: %10\nVisible: %11\nColor: %12\nMaterial: %13\n\nID: %14")
         .arg(part->name).arg(props.Mass(),0,'f',3)
         .arg(xmin,0,'f',2).arg(xmax,0,'f',2)
         .arg(ymin,0,'f',2).arg(ymax,0,'f',2)
         .arg(zmin,0,'f',2).arg(zmax,0,'f',2)
         .arg(numberOf(part->shape,TopAbs_FACE)).arg(numberOf(part->shape,TopAbs_EDGE))
-        .arg(part->visible ? "Yes" : "No").arg(part->color).arg(part->id));
+        .arg(part->visible ? "Yes" : "No").arg(part->color).arg(materialText).arg(part->id));
 }
 void MainWindow::showMassProperties() {
     if (!requireBodyMode("Measure body")) return;
@@ -515,7 +521,8 @@ void MainWindow::showMassProperties() {
     const cad::Part* part=document_.find(ids.first());
     if (!part) return;
     bool accepted=false;
-    const double density=QInputDialog::getDouble(this,"Mass properties","Material density (kg/m^3)",7850.0,0.00001,1000000.0,3,&accepted);
+    const double defaultDensity=part->materialDensityKgPerM3>0.0?part->materialDensityKgPerM3:7850.0;
+    const double density=QInputDialog::getDouble(this,"Mass properties","Material density (kg/m^3)",defaultDensity,0.00001,1000000.0,3,&accepted);
     if(!accepted)return;
     cad::DensityMassProperties massProperties;QString error;
     if(!document_.measureMassFromDensity(part->id,density,&massProperties,&error)){
@@ -531,12 +538,13 @@ void MainWindow::showMassProperties() {
     const QString report=QString(
         "%1\n\nBounding size\nX: %2 mm\nY: %3 mm\nZ: %4 mm\n\n"
         "Volume: %5 mm^3\nSurface area: %6 mm^2\nDensity: %7 kg/m^3\nMass: %8 kg\n"
-        "Center of mass\nX: %9 mm\nY: %10 mm\nZ: %11 mm")
+        "Material: %12\nCenter of mass\nX: %9 mm\nY: %10 mm\nZ: %11 mm")
         .arg(part->name)
         .arg(xmax-xmin,0,'f',3).arg(ymax-ymin,0,'f',3).arg(zmax-zmin,0,'f',3)
         .arg(volumeProperties.Mass(),0,'f',3).arg(areaProperties.Mass(),0,'f',3)
         .arg(massProperties.densityKgPerM3,0,'f',3).arg(massProperties.massKg,0,'f',6)
-        .arg(massProperties.centerX,0,'f',3).arg(massProperties.centerY,0,'f',3).arg(massProperties.centerZ,0,'f',3);
+        .arg(massProperties.centerX,0,'f',3).arg(massProperties.centerY,0,'f',3).arg(massProperties.centerZ,0,'f',3)
+        .arg(part->materialName.isEmpty()?QStringLiteral("Unassigned (density entered for this measurement)"):part->materialName);
     QMessageBox::information(this,"Mass properties",report);
 }
 
@@ -716,7 +724,7 @@ void MainWindow::refresh(bool fit) {
     undoAction_->setEnabled(document_.canUndo());
     redoAction_->setEnabled(document_.canRedo());
     const QString title = document_.path().isEmpty() ? "Untitled" : QFileInfo(document_.path()).fileName();
-    setWindowTitle(QString("CADWorkbench v1.9 â€¢ %1%2").arg(title,document_.dirty() ? " *" : ""));
+    setWindowTitle(QString("CADWorkbench v1.10.0 â€¢ %1%2").arg(title,document_.dirty() ? " *" : ""));
     statusBar()->showMessage(QString("%1 bodies  |  millimeters  |  %2")
                              .arg(document_.parts().size()).arg(document_.dirty() ? "Unsaved changes" : "Saved"),5000);
 }
@@ -966,7 +974,7 @@ void MainWindow::sketchExtrusion() {
     form->addRow("Profile", profile);
 
     auto* sketchPlane=new QComboBox(&dialog);
-    sketchPlane->addItems({"XY plane","XZ plane","YZ plane"});
+    sketchPlane->addItems({"XY plane","XZ plane","YZ plane","Custom 3D plane"});
     form->addRow("Sketch plane",sketchPlane);
 
     auto* operation = new QComboBox(&dialog);
@@ -1005,6 +1013,28 @@ void MainWindow::sketchExtrusion() {
     auto* sizeX = makeField(0.00001, 1e6, 1.0, 40.0);
     auto* depth = makeField(0.00001, 1e6, 1.0, 30.0);
     auto* height = makeField(0.00001, 1e6, 1.0, 20.0);
+    auto* customOriginX=makeField(-1e6,1e6,1.0,0.0);
+    auto* customOriginY=makeField(-1e6,1e6,1.0,0.0);
+    auto* customOriginZ=makeField(-1e6,1e6,1.0,0.0);
+    auto* customNormalX=makeField(-1e6,1e6,0.1,1.0);
+    auto* customNormalY=makeField(-1e6,1e6,0.1,1.0);
+    auto* customNormalZ=makeField(-1e6,1e6,0.1,1.0);
+    auto* customUAxisX=makeField(-1e6,1e6,0.1,1.0);
+    auto* customUAxisY=makeField(-1e6,1e6,0.1,0.0);
+    auto* customUAxisZ=makeField(-1e6,1e6,0.1,0.0);
+    QVector<QWidget*> customFrameFields;
+    for(const auto& row:QVector<QPair<QString,QDoubleSpinBox*>>{
+            {"Plane origin X (mm)",customOriginX},{"Plane origin Y (mm)",customOriginY},
+            {"Plane origin Z (mm)",customOriginZ},{"Normal X",customNormalX},
+            {"Normal Y",customNormalY},{"Normal Z",customNormalZ},
+            {"U direction X",customUAxisX},{"U direction Y",customUAxisY},{"U direction Z",customUAxisZ}}){
+        auto* label=new QLabel(row.first,&dialog);form->addRow(label,row.second);
+        customFrameFields.append(label);customFrameFields.append(row.second);
+        label->setVisible(false);row.second->setVisible(false);
+    }
+    connect(sketchPlane,qOverload<int>(&QComboBox::currentIndexChanged),&dialog,[customFrameFields](int index){
+        for(QWidget* field:customFrameFields)field->setVisible(index==3);
+    });
     auto* sizeLabel = new QLabel("Width (mm)",&dialog);
     auto* depthLabel = new QLabel("Depth (mm)",&dialog);
     form->addRow("Origin U (mm)",originX);
@@ -1092,7 +1122,13 @@ void MainWindow::sketchExtrusion() {
         prepared=document_.prepareExtrusion(profileKind,originX->value(),originY->value(),sizeX->value(),
             depth->value(),height->value(),operationKind,targetId,&command,&error);
     if(prepared&&symmetric->isChecked())command.symmetric=true;
-    if(prepared){command.sketchPlane=static_cast<cad::SketchPlane>(sketchPlane->currentIndex());command.planeOffset=planeOffset->value();command.reverseDirection=reverseDirection->isChecked();command.throughAll=throughAll->isChecked();}
+    if(prepared){
+        command.sketchPlane=static_cast<cad::SketchPlane>(sketchPlane->currentIndex());
+        command.planeOffset=planeOffset->value();command.reverseDirection=reverseDirection->isChecked();command.throughAll=throughAll->isChecked();
+        command.customOriginX=customOriginX->value();command.customOriginY=customOriginY->value();command.customOriginZ=customOriginZ->value();
+        command.customNormalX=customNormalX->value();command.customNormalY=customNormalY->value();command.customNormalZ=customNormalZ->value();
+        command.customUAxisX=customUAxisX->value();command.customUAxisY=customUAxisY->value();command.customUAxisZ=customUAxisZ->value();
+    }
     if (!prepared) {
         reportError("Sketch extrusion",error);
         return;
@@ -1198,6 +1234,28 @@ void MainWindow::revolveAboutWorldAxis() {
             [this,command,preview]{QString commitError;if(!document_.commitRevolve(command,preview.shape,&commitError))
                 reportError("Revolve",commitError);else refresh(true);});
     });
+}
+
+void MainWindow::revolveAboutCustomAxis() {
+    const auto values=valuesDialog(this,"Revolve profile about a custom 3D axis",
+        {"Radial offset (mm)","Axial origin (mm)","Radial width (mm)","Axial height (mm)",
+         "Sweep angle (degrees)","Axis origin X (mm)","Axis origin Y (mm)","Axis origin Z (mm)",
+         "Axis direction X","Axis direction Y","Axis direction Z"},
+        {0,0,10,20,360,0,0,0,1,1,1},-1e6,1e6);
+    if(!values)return;
+    cad::RevolveCommand command;QString error;
+    if(!document_.prepareRevolveAboutCustomAxis((*values)[0],(*values)[1],(*values)[2],(*values)[3],(*values)[4],
+        (*values)[5],(*values)[6],(*values)[7],(*values)[8],(*values)[9],(*values)[10],&command,&error)){
+        reportError("Revolve about custom axis",error);return;
+    }
+    runPreviewAsync<cad::RevolvePreview>(this,statusBar(),"Custom-axis revolve","Building custom-axis revolve preview...",
+        [command]{return cad::SceneDocument::buildRevolvePreview(command);},[this,command](const cad::RevolvePreview& preview){
+            confirmPreview("Preview custom-axis revolve","Inspect the solid around the custom axis. Add this revolved body?",
+                preview.shape,[this,command,preview]{QString commitError;
+                    if(!document_.commitRevolve(command,preview.shape,&commitError))reportError("Custom-axis revolve",commitError);
+                    else refresh(true);
+                });
+        });
 }
 
 void MainWindow::mirrorSelectedBody() {
@@ -2219,6 +2277,46 @@ void MainWindow::recolorObject() {
     if (!document_.setColor(ids.first(),color.name(),&error)) reportError("Color",error);
     else refresh();
 }
+void MainWindow::assignMaterial() {
+    if(!requireBodyMode("Assign material"))return;
+    const auto ids=selectedIds();
+    if(ids.isEmpty()){reportError("Assign material","Select one or more bodies.");return;}
+    const cad::Part* part=document_.find(ids.first());if(!part)return;
+    QVector<QPair<QString,double>> library={
+        {"Unassigned",0.0},{"Aluminum 6061",2700.0},{"Carbon steel",7850.0},
+        {"Stainless steel 304",8000.0},{"Brass",8500.0},{"Copper",8960.0},
+        {"ABS plastic",1040.0},{"Nylon 6",1150.0}
+    };
+    for(const cad::Part& body:document_.parts()){
+        if(body.materialName.isEmpty())continue;
+        const bool known=std::any_of(library.cbegin(),library.cend(),[&body](const auto& choice){return choice.first==body.materialName;});
+        if(!known)library.append({body.materialName,body.materialDensityKgPerM3});
+    }
+    library.append({"Custom...",-1.0});
+    QStringList labels;int current=0;
+    for(int i=0;i<library.size();++i){labels.append(library[i].first);if(library[i].first==part->materialName)current=i;}
+    bool accepted=false;
+    const QString selected=QInputDialog::getItem(this,"Assign material","Material:",labels,current,false,&accepted);
+    if(!accepted)return;
+    QString materialName=selected;
+    double density=0.0;
+    if(selected=="Custom..."){
+        materialName=QInputDialog::getText(this,"Custom material","Material name:",QLineEdit::Normal,{},&accepted).trimmed();
+        if(!accepted||materialName.isEmpty())return;
+        density=QInputDialog::getDouble(this,"Custom material density","Density (kg/m^3):",
+            part->materialName==materialName?part->materialDensityKgPerM3:1000.0,0.00001,1000000.0,4,&accepted);
+        if(!accepted)return;
+    }else if(selected=="Unassigned"){
+        materialName.clear();
+    }else{
+        const auto preset=std::find_if(library.cbegin(),library.cend(),[&selected](const auto& entry){return entry.first==selected;});
+        if(preset==library.cend()||preset->second<0.0)return;
+        density=preset->second;
+    }
+    QString error;
+    if(!document_.setMaterial(ids,materialName,density,&error))reportError("Assign material",error);
+    else refresh();
+}
 void MainWindow::runBoolean(cad::BooleanOp op) {
     if (!requireBodyMode("Boolean")) return;
     const auto ids = selectedIds();
@@ -2361,6 +2459,14 @@ void MainWindow::importSTEPFile() {
     if (!document_.importSTEP(path,&error)) { reportError("Import STEP",error); return; }
     refresh(true);
     statusBar()->showMessage(QString("Imported STEP: %1").arg(QFileInfo(path).fileName()),8000);
+}
+
+void MainWindow::exportBodyScheduleCsv() {
+    const QString path=QFileDialog::getSaveFileName(this,"Export body schedule",{},"CSV files (*.csv)");
+    if(path.isEmpty())return;
+    QString error;
+    if(!document_.exportBodyScheduleCsv(path,&error)){reportError("Export body schedule",error);return;}
+    statusBar()->showMessage(QString("Body schedule exported: %1").arg(QFileInfo(path).fileName()),8000);
 }
 bool MainWindow::saveFile(bool as) {
     QString path = document_.path();

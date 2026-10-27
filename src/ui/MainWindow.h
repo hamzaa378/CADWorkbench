@@ -46,6 +46,7 @@ private:
     void loftRectangles();
     void revolveRectangleProfile();
     void revolveAboutWorldAxis();
+    void revolveAboutCustomAxis();
     void moveObject();
     void rotateObject();
     void scaleObject();
@@ -53,6 +54,7 @@ private:
     void duplicateObject();
     void renameObject();
     void recolorObject();
+    void assignMaterial();
     void runBoolean(cad::BooleanOp operation);
     void filletSelectedEdge();
     void chamferSelectedEdge();
@@ -98,6 +100,7 @@ private:
     void newFile();
     void openFile();
     void importSTEPFile();
+    void exportBodyScheduleCsv();
     bool saveFile(bool as = false);
     void exportFile(bool step);
     bool maybeSave();

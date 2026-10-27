@@ -46,7 +46,7 @@ Launching `CADWorkbench.exe` directly from the build folder fails to locate the 
 
 ## Feature-gap comparison
 
-The benchmark has 30 stated capability areas: 6 implemented, 3 partial, and 21 not implemented. These figures describe the documented benchmark, not every capability in AutoCAD or Fusion 360. See `FEATURE_GAP_COMPARISON.md` for definitions and scope.
+The benchmark has 30 stated capability areas: 6 implemented, 4 partial, and 20 not implemented. These figures describe the documented benchmark, not every capability in AutoCAD or Fusion 360. See `FEATURE_GAP_COMPARISON.md` for definitions and scope.
 
 ## Extended reviewer pass (2026-10-25)
 
