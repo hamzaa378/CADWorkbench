@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(CADWorkbench VERSION 1.27.0 LANGUAGES CXX)
+project(CADWorkbench VERSION 1.48.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -10,7 +10,7 @@ if (NOT WIN32)
     message(FATAL_ERROR "v1.7 UI targets Windows (Win32 HWND). Run on Windows 10/11 with MSVC.")
 endif()
 
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets Concurrent)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets Concurrent Svg PrintSupport)
 find_package(OpenCASCADE 8.0.1 REQUIRED CONFIG)
 
 add_library(cadcore STATIC
@@ -18,6 +18,8 @@ add_library(cadcore STATIC
     src/core/SceneDocument.cpp
     src/core/PartsData.cpp
     src/core/DrawingSheet.cpp
+    src/core/SheetMetal.h
+    src/core/SheetMetal.cpp
     src/core/FormFeatures.cpp
     src/core/EngineeringComponents.cpp
     src/core/AdvancedComponents.cpp
@@ -30,10 +32,10 @@ add_library(cadcore STATIC
 )
 target_include_directories(cadcore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src ${OpenCASCADE_INCLUDE_DIR})
 target_link_libraries(cadcore PUBLIC
-    Qt6::Core Qt6::Gui
+    Qt6::Core Qt6::Gui Qt6::Svg Qt6::PrintSupport
     TKernel TKMath TKG2d TKG3d TKBRep TKGeomBase TKGeomAlgo
     TKPrim TKTopAlgo TKBO TKBool TKOffset TKFillet TKShHealing TKMesh TKHLR
-    TKDESTEP TKDESTL TKXSBase
+    TKDESTEP TKDEIGES TKDESTL TKXSBase TKCAF TKLCAF TKCDF TKXCAF
 )
 
 add_executable(CADWorkbench WIN32
@@ -47,7 +49,7 @@ target_link_libraries(CADWorkbench PRIVATE
     cadcore Qt6::Widgets Qt6::Gui Qt6::Concurrent
     TKV3d TKService TKOpenGl
 )
-target_compile_definitions(CADWorkbench PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_definitions(CADWorkbench PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN CADWORKBENCH_VERSION="${PROJECT_VERSION}")
 if(MSVC)
     # UTF-8 source includes the degree/delta symbols used in tool dialogs.
     target_compile_options(cadcore PRIVATE /utf-8 /W4)
@@ -73,6 +75,8 @@ if(BUILD_TESTING)
     add_test(NAME cadcore_planar_section COMMAND cadcore_tests --planar-section)
     add_test(NAME cadcore_surface_summary COMMAND cadcore_tests --surface-summary)
     add_test(NAME cadcore_face_area COMMAND cadcore_tests --face-area)
+    add_test(NAME cadcore_face_angle COMMAND cadcore_tests --face-angle)
+    add_test(NAME cadcore_cylindrical_face COMMAND cadcore_tests --cylindrical-face)
     add_test(NAME cadcore_edge_length COMMAND cadcore_tests --edge-length)
     add_test(NAME cadcore_vertex_coordinates COMMAND cadcore_tests --vertex-coordinates)
     add_test(NAME cadcore_vertex_distance COMMAND cadcore_tests --vertex-distance)
@@ -103,6 +107,14 @@ if(BUILD_TESTING)
     add_test(NAME cadcore_geometry_and_persistence COMMAND cadcore_tests)
     add_test(NAME cadcore_body_schedule_csv COMMAND cadcore_tests --body-schedule-csv)
     add_test(NAME cadcore_bom_parts_standards COMMAND cadcore_tests --bom-parts-standards)
+    add_test(NAME cadcore_persistent_assemblies COMMAND cadcore_tests --persistent-assemblies)
+    add_test(NAME cadcore_step_assembly_import COMMAND cadcore_tests --step-assembly-import)
+    add_test(NAME cadcore_stl_mesh_import COMMAND cadcore_tests --stl-mesh-import)
+    add_test(NAME cadcore_iges_exchange COMMAND cadcore_tests --iges-exchange)
+    add_test(NAME cadcore_obj_mesh_import COMMAND cadcore_tests --obj-mesh-import)
+    add_test(NAME cadcore_parametric_foundation COMMAND cadcore_tests --parametric-foundation)
+    add_test(NAME cadcore_assembly_joints COMMAND cadcore_tests --assembly-joints)
+    add_test(NAME cadcore_sheet_metal_flat_pattern COMMAND cadcore_tests --sheet-metal-flat-pattern)
     add_test(NAME cadcore_orthographic_drawing COMMAND cadcore_tests --orthographic-drawing)
 endif()
 

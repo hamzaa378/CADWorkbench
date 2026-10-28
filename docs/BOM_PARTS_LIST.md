@@ -2,6 +2,8 @@
 
 CADWorkbench v1.26.0 adds a derived assembly-structure report alongside per-body procurement metadata and slash-separated assembly paths. Set each part to **Manufactured** or **Purchased**; purchased parts can include a supplier and supplier catalogue number. BOM and parts-list views and CSV files include these fields. Native scene schema v5 stores procurement fields. Older v1-v4 scenes still load; legacy parts default to **Manufactured**. Duplicate, pattern, and mirror operations carry the source part metadata, assembly path, procurement details, and material assignment.
 
+In v1.29-v1.30, bodies can also be marked as reusable components and inserted as fixed XYZ occurrences. The grouped BOM reports the component-definition ID/name; the per-body parts list reports each occurrence ID and its coordinates. The native schema v7 stores these records together with optional drawing setup. See [`PERSISTENT_ASSEMBLIES.md`](PERSISTENT_ASSEMBLIES.md) for behavior and limits.
+
 ## Reports
 
 - **BOM and parts list** opens a grouped BOM tab and a per-body parts list tab.

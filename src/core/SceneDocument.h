@@ -2,6 +2,8 @@
 
 #include <QString>
 #include <QStringList>
+#include <QMap>
+#include <QPointF>
 #include <QUuid>
 #include <QVector>
 #include <TopoDS_Edge.hxx>
@@ -9,6 +11,82 @@
 #include <TopoDS_Shape.hxx>
 
 namespace cad {
+
+struct DrawingNoteAnnotation {
+    QString id;
+    QString text;
+    double xMm = 12.0;
+    double yMm = 180.0;
+};
+
+struct DrawingDimensionAnnotation {
+    QString id;
+    QString axis;
+    double offsetMm = 9.0;
+};
+
+struct DrawingPartsListAnnotation {
+    QString id;
+    bool visible = false;
+    double xMm = 12.0;
+    double yMm = 12.0;
+};
+
+struct DrawingBalloonAnnotation {
+    QString id;
+    QString sourceBodyId;
+    double xMm = 250.0;
+    double yMm = 170.0;
+};
+
+struct DrawingDetailAnnotation {
+    QString id;
+    QString sourceView = QStringLiteral("FRONT");
+    double sourceXmm = 0.0;
+    double sourceYmm = 0.0;
+    double captureRadiusMm = 8.0;
+    double xMm = 240.0;
+    double yMm = 85.0;
+    double radiusMm = 20.0;
+};
+
+struct DrawingSectionAnnotation {
+    QString id;
+    QString planeAxis = QStringLiteral("Y");
+    double depthFraction = 0.5;
+    double xMm = 240.0;
+    double yMm = 145.0;
+};
+
+struct DrawingSheetSettings {
+    // Persistent sheet/view identities and editable projected-view centers (paper mm).
+    QString sheetId;
+    QString sourceGeometryToken;
+    QStringList sourceBodyIds;
+    QMap<QString,QString> viewIds;
+    QMap<QString,QPointF> viewCenters;
+    QVector<DrawingNoteAnnotation> noteAnnotations;
+    QVector<DrawingDimensionAnnotation> dimensionAnnotations;
+    DrawingPartsListAnnotation partsListAnnotation;
+    QVector<DrawingBalloonAnnotation> balloonAnnotations;
+    QVector<DrawingDetailAnnotation> detailAnnotations;
+    QVector<DrawingSectionAnnotation> sectionAnnotations;
+    QString projection = QStringLiteral("Third-angle");
+    QString sheetSize = QStringLiteral("A4");
+    QString auxiliaryView = QStringLiteral("Isometric");
+    double sectionDepthFraction = 0.5;
+    QStringList generalNotes;
+    QString drawingNumber;
+    QString drawnBy;
+    QString checkedBy;
+    QString issueDate;
+    QString revision;
+};
+
+struct JointMotionKeyframe {
+    double timeSeconds = 0.0;
+    double value = 0.0; // degrees for revolute joints, millimetres for prismatic joints
+};
 
 struct Part {
     QString id;
@@ -28,6 +106,40 @@ struct Part {
     QString procurementType = QStringLiteral("Manufactured");
     QString supplier;
     QString supplierPartNumber;
+    // Persistent assembly identity. Bodies with the same definition ID are reusable component occurrences.
+    QString componentDefinitionId;
+    QString componentName;
+    QString occurrenceId;
+    double placementX = 0.0;
+    double placementY = 0.0;
+    double placementZ = 0.0;
+    QString assemblyJointType;
+    QString assemblyJointParentBodyId;
+    double jointOriginX = 0.0, jointOriginY = 0.0, jointOriginZ = 0.0;
+    double jointAxisX = 0.0, jointAxisY = 0.0, jointAxisZ = 1.0;
+    double jointAngleDegrees = 0.0;
+    double jointMinimumDegrees = -180.0, jointMaximumDegrees = 180.0;
+    double jointTranslationMm = 0.0;
+    double jointMinimumMm = 0.0, jointMaximumMm = 0.0;
+    QVector<JointMotionKeyframe> jointMotionKeyframes;
+    bool hasDrawingSettings = false;
+    DrawingSheetSettings drawingSettings;
+    // Focused editable history for a constrained rectangular XY sketch + extrusion.
+    bool hasParametricDefinition = false;
+    QString parametricGeometryToken;
+    QMap<QString,double> namedParameters;
+    QStringList sketchConstraints;
+    QStringList featureHistory;
+    QString holePatternAxis = QStringLiteral("X");
+};
+
+enum class DrawingSourceState { NoSavedSheet, Current, Stale, MissingBodies };
+struct DrawingSheetSourceStatus {
+    DrawingSourceState state = DrawingSourceState::NoSavedSheet;
+    QStringList sourceBodyIds;
+    QStringList missingSourceBodyIds;
+    QString storedGeometryToken;
+    QString currentGeometryToken;
 };
 
 struct BillOfMaterialsRow {
@@ -45,6 +157,9 @@ struct BillOfMaterialsRow {
     QString procurementType;
     QString supplier;
     QString supplierPartNumber;
+    QString componentDefinitionId;
+    QString componentName;
+    QStringList bodyIds;
 };
 
 struct PartsListRow {
@@ -62,6 +177,12 @@ struct PartsListRow {
     QString procurementType;
     QString supplier;
     QString supplierPartNumber;
+    QString componentDefinitionId;
+    QString componentName;
+    QString occurrenceId;
+    double placementX = 0.0;
+    double placementY = 0.0;
+    double placementZ = 0.0;
 };
 
 enum class StandardsProfile { BomData, IsoDrawingReadiness, AsmeDrawingReadiness };
@@ -78,6 +199,13 @@ struct StandardsCheckReport {
     int errors = 0;
     int warnings = 0;
     bool passed() const noexcept { return errors == 0; }
+};
+
+// Project-level drawing content checklist defaults. These drive structural
+// review only and do not represent ISO/ASME certification.
+struct DrawingReadinessPolicy {
+    QStringList requiredTitleBlockFields;
+    QStringList requiredAnnotationConventions;
 };
 
 struct MinimumDistanceResult {
@@ -137,6 +265,29 @@ struct SurfaceTypeSummary {
     double sphericalArea = 0.0;
     double toroidalArea = 0.0;
     double otherArea = 0.0;
+};
+
+struct FaceAngleMeasurement {
+    double angleDegrees = 0.0;
+    bool parallel = false;
+    double planeSeparationMm = 0.0;
+    double firstNormalX = 0.0;
+    double firstNormalY = 0.0;
+    double firstNormalZ = 0.0;
+    double secondNormalX = 0.0;
+    double secondNormalY = 0.0;
+    double secondNormalZ = 0.0;
+};
+
+struct CylindricalFaceMeasurement {
+    double radiusMm = 0.0;
+    double diameterMm = 0.0;
+    double axisX = 0.0;
+    double axisY = 0.0;
+    double axisZ = 0.0;
+    double originX = 0.0;
+    double originY = 0.0;
+    double originZ = 0.0;
 };
 
 struct FaceReference {
@@ -474,6 +625,8 @@ public:
     bool dirty() const noexcept { return revision_ != savedRevision_; }
     QString path() const { return path_; }
     const Part* find(const QString& id) const;
+    const DrawingReadinessPolicy& drawingReadinessPolicy() const noexcept { return drawingReadinessPolicy_; }
+    bool setDrawingReadinessPolicy(const DrawingReadinessPolicy& policy,QString* error = nullptr);
 
     bool addPrimitive(Primitive kind, const QVector<double>& dimensions, QString* error = nullptr);
     bool addEngineeringPart(EngineeringPart kind, const QVector<double>& dimensions, QString* error = nullptr);
@@ -520,6 +673,39 @@ public:
     bool scale(const QString& id, double factor, QString* error = nullptr);
     bool scaleNonUniform(const QString& id,double factorX,double factorY,double factorZ,QString* error = nullptr);
     bool duplicate(const QString& id, double dx, double dy, double dz, QString* error = nullptr);
+    bool makeComponent(const QString& id,const QString& componentName,QString* error = nullptr);
+    bool insertComponentOccurrence(const QString& sourceBodyId,double x,double y,double z,QString* error = nullptr);
+    bool synchronizeComponentOccurrences(const QString& sourceBodyId,QString* error = nullptr);
+    bool addRigidJoint(const QString& parentBodyId,const QString& childBodyId,QString* error = nullptr);
+    bool addRevoluteJoint(const QString& parentBodyId,const QString& childBodyId,
+                          double originX,double originY,double originZ,double axisX,double axisY,double axisZ,
+                          double minimumDegrees,double maximumDegrees,QString* error = nullptr);
+    bool driveRevoluteJoint(const QString& childBodyId,double angleDegrees,QString* error = nullptr);
+    bool addPrismaticJoint(const QString& parentBodyId,const QString& childBodyId,
+                           double axisX,double axisY,double axisZ,double minimumMm,double maximumMm,
+                           QString* error = nullptr);
+    bool drivePrismaticJoint(const QString& childBodyId,double offsetMm,QString* error = nullptr);
+    // Applies a set of revolute-angle (degrees) and prismatic-offset (mm) targets
+    // parent-first as one undoable assembly-pose solve.
+    bool solveAssemblyPose(const QMap<QString,double>& jointPositions,QString* error = nullptr);
+    bool setJointMotionKeyframes(const QString& childBodyId,const QVector<JointMotionKeyframe>& keyframes,
+                                 QString* error = nullptr);
+    bool evaluateAssemblyMotionStudy(double timeSeconds,QString* error = nullptr);
+    bool setDrawingSheetSettings(const QString& partId,const DrawingSheetSettings& settings,QString* error = nullptr);
+    DrawingSheetSourceStatus drawingSheetSourceStatus(const QString& partId) const;
+    bool refreshDrawingSheetSource(const QString& partId,QString* error = nullptr);
+    bool addParametricRectangularExtrusion(double width,double height,double depth,QString* error = nullptr);
+    bool addParametricRectangularExtrusionAt(double originX,double originY,double width,double height,double depth,QString* error = nullptr);
+    bool addParametricThroughHole(const QString& partId,double diameter,double centerX,double centerY,QString* error = nullptr);
+    bool addParametricLinearHolePattern(const QString& partId,int holeCount,double spacingMm,QString* error = nullptr);
+    bool addParametricLinearHolePattern(const QString& partId,int holeCount,double spacingMm,
+                                        const QString& axis,QString* error = nullptr);
+    bool setNamedParameter(const QString& partId,const QString& parameterName,double value,QString* error = nullptr);
+    bool setNamedParameters(const QString& partId,const QMap<QString,double>& values,QString* error = nullptr);
+    QMap<QString,double> namedParameters(const QString& partId) const;
+    QStringList sketchConstraints(const QString& partId) const;
+    QStringList featureHistory(const QString& partId) const;
+    bool parametricDefinitionCurrent(const QString& partId) const;
     bool booleanOperation(BooleanOp op, const QString& firstId, const QString& secondId, QString* error = nullptr);
     bool measureMinimumDistance(const QString& firstId,const QString& secondId,MinimumDistanceResult* result,
                                 QString* error = nullptr) const;
@@ -533,6 +719,10 @@ public:
     bool summarizeSurfaceTypes(const QString& id,SurfaceTypeSummary* result,
                                QString* error = nullptr) const;
     bool measureFaceArea(const FaceReference& face,double* area,QString* error = nullptr) const;
+    bool measureAngleBetweenPlanarFaces(const FaceReference& first,const FaceReference& second,
+                                        FaceAngleMeasurement* result,QString* error = nullptr) const;
+    bool measureCylindricalFace(const FaceReference& face,CylindricalFaceMeasurement* result,
+                                QString* error = nullptr) const;
     bool measureEdgeLength(const EdgeReference& edge,double* length,QString* error = nullptr) const;
     bool measureVertexCoordinates(const VertexReference& vertex,double* x,double* y,double* z,QString* error = nullptr) const;
     bool measureVertexDistance(const VertexReference& first,const VertexReference& second,double* distance,QString* error = nullptr) const;
@@ -687,7 +877,11 @@ public:
     bool saveAs(const QString& path, QString* error = nullptr);
     bool load(const QString& path, QString* error = nullptr);
     bool importSTEP(const QString& path, QString* error = nullptr);
+    bool importIGES(const QString& path,QString* error = nullptr);
+    bool importOBJ(const QString& path,double weldToleranceMm = 0.01,QString* error = nullptr);
+    bool importSTL(const QString& path,double weldToleranceMm = 0.01,QString* error = nullptr);
     bool exportSTEP(const QString& path, QString* error = nullptr) const;
+    bool exportIGES(const QString& path,QString* error = nullptr) const;
     bool exportSTL(const QString& path, QString* error = nullptr) const;
     bool exportBodyScheduleCsv(const QString& path, QString* error = nullptr) const;
     bool setPartMetadata(const QString& id, const QString& partNumber, const QString& description,
@@ -698,14 +892,16 @@ public:
                          const QString& revision, const QString& assemblyPath, const QString& procurementType,
                          const QString& supplier, const QString& supplierPartNumber, QString* error = nullptr);
     QVector<BillOfMaterialsRow> billOfMaterials(QString* error = nullptr) const;
+    QVector<BillOfMaterialsRow> billOfMaterials(const QStringList& bodyIds, QString* error = nullptr) const;
     QVector<PartsListRow> partsList(QString* error = nullptr) const;
     bool exportBillOfMaterialsCsv(const QString& path, QString* error = nullptr) const;
     bool exportPartsListCsv(const QString& path, QString* error = nullptr) const;
     StandardsCheckReport checkStandards(StandardsProfile profile) const;
 
 private:
-    struct Snapshot { QVector<Part> parts; quint64 revision; };
+    struct Snapshot { QVector<Part> parts; DrawingReadinessPolicy drawingReadinessPolicy; quint64 revision; };
     QVector<Part> parts_;
+    DrawingReadinessPolicy drawingReadinessPolicy_;
     QVector<Snapshot> undo_;
     QVector<Snapshot> redo_;
     QString path_;

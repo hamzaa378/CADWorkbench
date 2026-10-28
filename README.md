@@ -1,5 +1,7 @@
 # CADWorkbench
 
+Current source package: **v1.48.0**. See [`docs/QA_MATRIX.md`](docs/QA_MATRIX.md) for Windows build and regression status.
+
 CADWorkbench is a native Windows 3D CAD application built with C++20, Qt 6, and Open CASCADE Technology (OCCT). It focuses on direct solid modeling and dimensioned engineering templates.
 
 ## Current capabilities
@@ -13,15 +15,21 @@ CADWorkbench is a native Windows 3D CAD application built with C++20, Qt 6, and 
 - Inspect the minimum clearance between two selected bodies and read a closest-point pair.
 - Measure the shared solid volume and centroid of two selected bodies to inspect geometric interference.
 - Inspect selected face area, selected edge length, and picked vertex coordinates in the viewport.
+- Measure the oriented angle between two planar faces and the separation between their planes when parallel. See [`docs/FACE_ANGLE.md`](docs/FACE_ANGLE.md).
+- Measure the radius, diameter, and axis of a selected cylindrical face. See [`docs/CYLINDRICAL_FACE.md`](docs/CYLINDRICAL_FACE.md).
 - Assign persistent material and density presets to bodies; mass-property inspection uses the assigned density by default.
 - Measure straight-line distance between two vertex references; the core test passes, while numeric live UI verification awaits a Ctrl-click capable desktop input path.
 - Navigate with mouse orbit, pan, zoom, and standard camera views.
 - Save and reopen native `.cadscene` documents; use undo and redo.
-- Import and export multi-body STEP files; export STL.
+- Import/export STEP assemblies and IGES solids; import closed STL and OBJ meshes as faceted solids and export STL. See [`docs/NEUTRAL_FILE_EXCHANGE.md`](docs/NEUTRAL_FILE_EXCHANGE.md).
 - Export a CSV body schedule with stable body IDs, names, visibility, volume, area, extents, and center coordinates.
 - Maintain persistent part numbers, descriptions, revisions, purchased/manufactured status, supplier details, and assembly paths; view grouped BOM quantities, per-body parts lists, and a derived assembly tree with quantity/volume/mass roll-ups; export BOM and parts lists as CSV. See [`docs/BOM_PARTS_LIST.md`](docs/BOM_PARTS_LIST.md).
-- Run BOM data-quality and ISO/ASME drawing-readiness checks, plus a separate basic SVG content screen for exported drawings. These checks do not claim standards compliance; clause-level ISO validation and ASME GD&T checks are not implemented. See [`docs/STANDARDS_CHECKS.md`](docs/STANDARDS_CHECKS.md).
-- Export an initial A4 or A3 landscape SVG drawing for one selected solid with selectable first-angle or third-angle layout, front/top/right orthographic views, an isometric or section view, visible/hidden edges, cylindrical centerlines and diameter callouts, notes, editable title-block metadata, and overall X/Y/Z bounding dimensions. Issue dates use `YYYY-MM-DD`. Feature dimensions and standards validation are not included. See [`docs/ORTHOGRAPHIC_DRAWINGS.md`](docs/ORTHOGRAPHIC_DRAWINGS.md).
+- Store reusable component identities and fixed XYZ-offset occurrences in the scene; synchronize edited source geometry to its occurrences explicitly. Rigid, revolute, and prismatic parent-child joints persist; combined poses solve parent-first, and saved motion tracks interpolate angle/linear keyframes. STEP import/export uses OCCT XDE to retain names, nested assembly paths, reusable definitions, occurrence IDs, and placements where the STEP file provides them. Closed manifold STL meshes import as faceted solids. Drawing sheets store source IDs and aggregate revisions, projected views, positioned notes, overall dimensions, a source-scoped BOM table, and persistent BOM balloons with source/item identities. See [`docs/PERSISTENT_ASSEMBLIES.md`](docs/PERSISTENT_ASSEMBLIES.md), [`docs/STL_MESH_IMPORT.md`](docs/STL_MESH_IMPORT.md), and [`docs/ORTHOGRAPHIC_DRAWINGS.md`](docs/ORTHOGRAPHIC_DRAWINGS.md).
+- Create a focused parametric XY rectangle, base extrusion, and through-hole, then add an editable X- or Y-direction linear hole pattern. Named dimensions, constraints, and feature history persist and rebuild atomically with undo/redo. See [`docs/PARAMETRIC_FOUNDATION.md`](docs/PARAMETRIC_FOUNDATION.md).
+- Develop one-bend SVG and two-to-fifty-bend DXF flat patterns from per-bend rules; multi-bend DXF supports optional rectangular end reliefs at each bend station. Folded sheet solids, springback, and tooling are not implemented. See [`docs/SHEET_METAL.md`](docs/SHEET_METAL.md).
+- Run BOM data-quality and ISO/ASME drawing-readiness checks, plus configurable required title-block fields and annotation conventions for each drawing review. Saved-sheet checks flag missing requirements and stale/missing model sources; a source link can be refreshed before re-export. SVG exports remain snapshots. These checks do not claim standards compliance. See [`docs/STANDARDS_CHECKS.md`](docs/STANDARDS_CHECKS.md).
+- Export an A4 or A3 landscape SVG drawing from one to fifty selected solids as a composite source, with selectable first-angle or third-angle layout, front/top/right views, an isometric or section view, visible/hidden edges, cylindrical centerlines and diameter callouts, notes, title-block metadata, overall envelope dimensions, and a linked parts list scoped to the selected source bodies. Source IDs and aggregate revisions can be checked against current bodies. Issue dates use `YYYY-MM-DD`; SVGs remain export snapshots. See [`docs/ORTHOGRAPHIC_DRAWINGS.md`](docs/ORTHOGRAPHIC_DRAWINGS.md).
+- Saved scene sheets retain source-body IDs, aggregate geometry revision, stable view identities, editable paper-space centers, up to four selectable circular detail views, and up to four separately positioned X/Y/Z axis-aligned section cuts. Exported SVG/PDF files remain snapshots and do not update automatically with model changes. Feature-linked dimensions, arbitrary section planes/paths, and automatic drawing refresh are not implemented.
 - Create a dimensioned Wing rib with an airfoil outline, spar opening, and two lightening holes.
 - Sweep circular or rectangular profiles along a smooth generated 3D path.
 - Sweep elliptical profiles along a smooth generated 3D path.
@@ -44,18 +52,21 @@ CADWorkbench is a native Windows 3D CAD application built with C++20, Qt 6, and 
 - Cut linear arrays of through or blind countersinks with adjustable included angle.
 - Cut a linear array of keyhole slots with adjustable head and throat dimensions.
 
-## BOM, standards, and drawing status (v1.27)
+## BOM, standards, and drawing status (v1.43)
 
 | Area | Implemented and live-checked | Still missing |
 |---|---|---|
 | BOM | Persistent part and purchasing fields, supplier grouping, BOM quality findings, CSV export, and schema-v5 storage; UI editing, reporting, save/reopen, and checks exercised. | Pricing, inventory, purchase orders, and ERP/MRP integration. |
-| Parts list | Per-body list plus a derived assembly tree with quantity, volume, and mass roll-ups; hierarchy and duplicate roll-up exercised in the UI. | Persistent assembly/component instances and independently defined subassemblies. |
-| ISO/ASME checks | BOM/model readiness checks and an exported-SVG content screen; ISO and ASME profile workflows exercised live, including valid and malformed issue dates. | Clause-level ISO compliance, ISO 7200 title-block certification, ASME Y14/GD&T, tolerance, and datum validation. |
-| 2D drawings | One-body A4/A3 SVG export with first/third-angle layouts, orthographic and auxiliary views, basic envelope dimensions, notes, centerlines/callouts, and title-block fields; export and both content screens exercised live. | Persistent editable drawings, multi-part sheets, feature dimensions, and production-release standards validation. |
+| Parts list / assemblies | Per-body list, path-based assembly tree, reusable component IDs, fixed XYZ occurrences, persistent rigid/revolute parent-child joints, bounded revolute driving, BOM quantity links, scene persistence, and XDE STEP assembly import/export. v1.38 joint tests pass 32 focused assertions. | General six-degree transform editor, joint solver/assembly positioning, shared parametric definition edits, subassembly graph editor, motion/interference study. |
+| Parametric foundation | XY rectangle, extrusion and circular through-hole chain; named dimensions/location, recorded constraints, editable four-step history, undo/redo and stale-history protection; v1.37 focused regression passes 51 assertions. | General geometric constraint solver, expressions/equations, arbitrary sketch entities, downstream feature graph, arbitrary feature reorder/suppression. |
+| Sheet metal | One-bend outside-dimension flat-length calculation and SVG export with thickness, inside radius, bend angle, K-factor, and bend line; 14 focused assertions. | Folded sheet-solid modeling, multi-bend feature tree, corner reliefs, material libraries, DXF export, springback/tool compensation. |
+| Drawing checks / source link | Configurable per-project title-block/annotation checks and persistent sheets with view IDs/centers, notes, overall dimensions, source-scoped BOM parts list, BOM balloons, up to four projected detail views and four positioned X/Y/Z axis-aligned section cuts, composite source IDs and aggregate geometry revision; SVG and PDF export. | Automatically updating associative sheets, feature-linked dimensions, arbitrarily oriented section planes/paths, formal standards certification. |
+| ISO/ASME checks | BOM/model readiness checks and an exported-SVG content screen; required fields and annotation conventions can be saved as per-project checklist defaults. | Clause-level ISO compliance, ISO 7200 title-block certification, ASME Y14/GD&T, tolerance, and datum validation. |
+| 2D drawings | A4/A3 SVG and PDF export combines up to 50 selected bodies with first/third-angle layouts, orthographic and auxiliary views, title-block fields, source/revision identity, selectable groups, persistent view/note/overall-dimension/linked-parts-list/balloon/detail/section records, and geometry-linked cylindrical diameter callouts. The BOM table includes item, part number, description, quantity, material, per-unit mass, and revision. | User-attached dimensions on arbitrary edges/faces, automatic model-change updates, arbitrary section planes/paths, and formal standards validation. |
 
-The verification record and detailed limitations are in [`docs/local_verification.json`](docs/local_verification.json), [`docs/BOM_PARTS_LIST.md`](docs/BOM_PARTS_LIST.md), [`docs/STANDARDS_CHECKS.md`](docs/STANDARDS_CHECKS.md), and [`docs/ORTHOGRAPHIC_DRAWINGS.md`](docs/ORTHOGRAPHIC_DRAWINGS.md). These implemented areas are useful workflows, not full Fusion 360 or AutoCAD parity.
+The verification record and detailed limitations are in [`docs/local_verification.json`](docs/local_verification.json), [`docs/BOM_PARTS_LIST.md`](docs/BOM_PARTS_LIST.md), [`docs/STANDARDS_CHECKS.md`](docs/STANDARDS_CHECKS.md), and [`docs/ORTHOGRAPHIC_DRAWINGS.md`](docs/ORTHOGRAPHIC_DRAWINGS.md). These implemented areas are useful workflows, not full Fusion parity.
 
-Component templates are editable direct solids, not feature timelines or certified manufacturing designs. CADWorkbench does not claim feature parity with AutoCAD or Fusion 360. See [`docs/FEATURE_GAP_COMPARISON.md`](docs/FEATURE_GAP_COMPARISON.md) for the current scope and known gaps.
+Component templates are editable direct solids, not feature timelines or certified manufacturing designs. CADWorkbench does not claim feature parity with Fusion. See [`docs/FEATURE_GAP_COMPARISON.md`](docs/FEATURE_GAP_COMPARISON.md) for the current scope and known gaps.
 
 ## Selected geometry inspection
 
@@ -209,11 +220,11 @@ ctest --test-dir build -C Release --output-on-failure
 
 The app uses Open CASCADE for solid construction and validity checks. A passing build or core test suite does not by itself confirm every menu workflow or a clean-machine installation. See [`docs/QA_MATRIX.md`](docs/QA_MATRIX.md) and [`docs/manual_qa_results.md`](docs/manual_qa_results.md) for tested workflows and remaining release checks.
 
-## Current Windows verification (2026-10-27)
+## Current Windows verification (2026-10-28)
 
-The v1.27.0 Windows x64 Release build passed, and the full CTest suite passed **43/43**. Focused drawing checks passed 64 assertions; BOM/parts/standards checks passed 69 assertions. The source audit passed **222 checks**, with all 118 public core operations referenced by regression tests.
+The v1.44 update adds atomic batch editing for named parametric dimensions, parent-driven nested assembly transforms that preserve joint frames, and an in-app report for current, stale, or missing saved-drawing source bodies. It builds on v1.43 persistent section/detail views and cylindrical feature references, v1.42 A4/A3 PDF export, and the persistent assembly and parametric foundation. Windows Release build and all 50 regression targets pass; current focused counts are recorded in [`docs/QA_MATRIX.md`](docs/QA_MATRIX.md) and [`docs/local_verification.json`](docs/local_verification.json). Live UI testing was not run by request.
 
-Live UI verification covered BOM and parts-list reports, procurement metadata and schema-v5 save/reopen, assembly-tree quantity/volume/mass roll-ups, drawing export, and both ISO/ASME-labeled SVG content screens. A valid revision-A export passed both drawing screens with 0 errors and 0 warnings; an imported malformed issue date produced the expected warning. These screens do not certify standards compliance. See [`docs/local_verification.json`](docs/local_verification.json), [`docs/QA_MATRIX.md`](docs/QA_MATRIX.md), [`docs/BOM_PARTS_LIST.md`](docs/BOM_PARTS_LIST.md), and [`docs/ORTHOGRAPHIC_DRAWINGS.md`](docs/ORTHOGRAPHIC_DRAWINGS.md).
+Earlier live UI results documented below are historical and do not verify the v1.44 changes. The current update was checked with a Windows Release build and automated regression suite only; the drawing screens do not certify standards compliance. See [`docs/local_verification.json`](docs/local_verification.json), [`docs/QA_MATRIX.md`](docs/QA_MATRIX.md), [`docs/PARAMETRIC_FOUNDATION.md`](docs/PARAMETRIC_FOUNDATION.md), [`docs/PERSISTENT_ASSEMBLIES.md`](docs/PERSISTENT_ASSEMBLIES.md), [`docs/BOM_PARTS_LIST.md`](docs/BOM_PARTS_LIST.md), and [`docs/ORTHOGRAPHIC_DRAWINGS.md`](docs/ORTHOGRAPHIC_DRAWINGS.md).
 
 Some individual manual checks remain: the body-schedule CSV save dialog has not been exercised through a save in the UI, and the numeric two-vertex measurement has not been verified live because the available desktop input could not Ctrl-click the second subshape. See [`docs/BODY_SCHEDULE_CSV.md`](docs/BODY_SCHEDULE_CSV.md) and [`docs/VERTEX_DISTANCE.md`](docs/VERTEX_DISTANCE.md).
 

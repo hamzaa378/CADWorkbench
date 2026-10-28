@@ -11,6 +11,8 @@
 
 ## Live Windows UI checks
 
+The v1.48 Release executable launched with the correct `CADWorkbench v1.48.0` title. Parametric Y-axis hole pattern passed: a 40 × 30 × 20 mm extrusion with an 8 mm seed through-hole at (20, 15) accepted a 2-instance pattern at 8 mm spacing; the viewport showed two holes and Properties reported 21,989.381 mm³, 10 faces, and 48 edges. The named-parameter editor showed the pattern values and the feature-history view listed the constraints and all five operations.
+
 The packaged Windows x64 executable launched as `CADWorkbench v1.9`. The Create menu and Create ribbon each exposed all 100 Production Components commands, and the Precision & Utility group remained present.
 
 The following workflows were exercised in the packaged application:

@@ -1,3 +1,118 @@
+## v1.48.0 parametric Y-axis patterns and schema migration - 2026-10-28
+
+- Extended the focused parametric through-hole pattern to support X or Y. Pattern axis, constraints, history, containment checks, and parameter rebuilds now remain consistent when saved and reopened.
+- Bumped the scene schema to v19. Schema-v18 X-only patterns load as X patterns; earlier scene schemas remain supported.
+- Fixed the application title to use the CMake project version rather than a stale hard-coded v1.39.0 string.
+- Windows x64 Release build passed. The parametric foundation regression passed 113 assertions; full CTest passed 53/53 in 34.99 seconds on the latest rerun. Source audit passed 332 checks, covering all 145/145 public core operations. Live UI Y-pattern verification passed with two visible holes and the expected 21,989.381 mm³ volume; the rebuilt app launched as v1.48.0.
+
+## v1.47.0 parametric hole patterns, sheet-metal reliefs, and IGES exchange - 2026-10-28
+
+- Added an editable parametric linear through-hole pattern along +X. Count (2–100) and spacing persist in scene schema v18; geometry rebuilds validate containment and non-overlap as one undoable operation. Schemas v1–v17 remain readable.
+- Added optional rectangular end-relief notches to multi-bend DXF flat patterns, with geometric bounds checks and editable width/depth in the export dialog.
+- Added IGES solid import/export and File menu actions. Imports validate each solid and commit atomically; IGES exchange is flattened and does not preserve product hierarchy or PMI. Linked the current exchange-scope documentation.
+- Added closed OBJ polygon-mesh import as faceted solids, including positive/negative vertex indices, triangulation, sewing-tolerance validation, and rejection of open or malformed meshes.
+- Windows x64 Release build passed. Focused regressions passed: parametric foundation 96 assertions, sheet metal 41, IGES exchange 15, OBJ mesh import 17. Full CTest passed 53/53 in 45.64 seconds; source audit passed 332 checks with 145/145 public core operations referenced. Live UI tests were not run by request.
+
+## v1.46.0 assembly pose solving and motion tracks - 2026-10-28
+
+- Added prismatic joints with persisted normalized axes, travel limits, driven offsets, and full rigid-descendant translation. Revolute drives now carry complete rigid/revolute/prismatic descendants and transform nested joint frames.
+- Added a parent-first assembly pose solver that validates and applies mixed revolute/prismatic targets atomically as one undoable edit.
+- Added persistent joint motion keyframes with linear interpolation, range checking, undo/redo, and UI actions to edit tracks and evaluate a study time.
+- Added explicit synchronization of edited reusable component geometry to all occurrences while preserving XYZ placements.
+- Bumped the native scene schema to v17; schemas v1-v16 remain supported. Also fixed the missing Open CASCADE STL reader include and corrected the STL test's diagnostic field names so the existing closed-mesh import builds and tests.
+- Added **File → Refresh saved drawing source link...** with undo/redo. ISO/ASME model readiness checks now inspect project-configured fields and annotation conventions on saved sheets, and report stale/missing source warnings without claiming formal compliance.
+- Windows x64 Release build passed; full CTest passed 51/51 in 45.19 seconds. Focused regressions passed: assembly joints/motion 133, persistent assembly/drawing links 104, BOM/standards 93, orthographic drawings 120, STL import 17, parametric foundation 77, multi-bend sheet metal 34, and STEP assembly import 28. Source audit passed 332 checks with 141/141 public core operations covered. Live UI was not run by request.
+
+## v1.44.0 atomic parametric edits and drawing source status - 2026-10-28
+
+- Added `setNamedParameters` to validate and rebuild multiple values in the rectangle/extrusion/through-hole parametric chain in one transaction. Invalid combined values leave the solid and parameter map unchanged; undo/redo operates on the complete edit. The Edit menu now presents all named dimensions in one dialog.
+- Added **File → Check saved drawing source...** to report whether a sheet's linked bodies are current, stale, or missing. The check is read-only; SVG/PDF files remain export snapshots.
+- Parent translation and rotation now carry rigid/revolute descendants recursively, transform saved revolute axes/origins, and remain one undo/redo operation.
+- Windows x64 Release build passed. Focused regressions passed: parametric foundation 59 assertions, assembly joints 71, persistent assembly/drawing source status 101, and orthographic drawings 120. Full CTest passed 50/50 in 48.58 seconds. Source audit passed 309 checks with 132/132 public core operations covered. Live UI testing was not run by request.
+
+## v1.43.0 persistent drawing section and detail views - 2026-10-28
+
+- Added **File → Edit saved detail views...** to create, position, and remove up to four circular details linked to the sheet's TOP, FRONT, or RIGHT projected view. The SVG marks the source capture circle, clips enlarged projected edges into the detail circle, adds a leader when separated, and carries stable annotation/source-view metadata.
+- Added **File → Edit saved section views...** for up to four separately positioned X/Y/Z axis-aligned cuts, with independent depth/placement, source-view cut lines, section letters, and hatched projected geometry.
+- Cylindrical diameter callouts now include stable geometry-derived dimension IDs and source-feature references in the SVG. Re-exporting unchanged geometry preserves the identifiers, and moving/changing the source cylinder changes its feature reference and measured callout.
+- Scene schema v15 persists detail and section records. Schemas v1-v14 continue to load; v14 retains detail views and gets empty section defaults. Migration regressions preserve v13 balloons and project checklist policy.
+- Windows x64 Release build passed; the final full CTest run passed 50/50 in 45.94 seconds. Focused regressions passed: persistent assembly/drawing settings 92 and orthographic drawing/PDF/detail/section/feature-reference tests 120 assertions. Source audit passed 292 checks with all 131 public core operations referenced. Live UI testing was not run by request.
+
+## v1.42.0 orthographic drawing PDF export - 2026-10-28
+
+- Added **File → Export orthographic drawing PDF...**. It exports the same persisted sheet setup and source-scoped content as SVG to a single A4/A3 landscape PDF page using Qt SVG and PrintSupport.
+- PDF writing is atomic. The regression checks both paper sizes, PDF completeness, malformed SVG rejection, and preservation of an existing destination.
+- Windows x64 Release build passed; full CTest passed 50/50 in 46.44 seconds. Orthographic drawing regression passed 109 assertions. BOM/standards 83, STEP XDE 28, sheet metal 14, parametric foundation 51, joints 32, persistent assembly/drawing settings 81. Source audit passed 272 checks with 131/131 public core operations referenced. Live UI testing was not run by request.
+
+## v1.41.0 persistent project drawing checklist defaults - 2026-10-28
+
+- Project ISO/ASME drawing readiness requirements can now be saved in the scene, restored on reopen, and changed with undo/redo. The review dialog starts with the saved fields/conventions and offers an explicit save-as-project-defaults option.
+- Scene schema v13 stores the drawing checklist; schema v1-v12 load with empty defaults. Invalid or duplicate policy keys and malformed persisted settings are rejected transactionally.
+- Windows x64 Release build passed; full CTest passed 50/50 in 43.65 seconds. BOM/parts/standards regression passed 83 assertions; persistent assemblies 81; STEP XDE import 28; sheet-metal flat pattern 14; parametric foundation 51; joints 32; orthographic drawings 98. Live UI testing was not run by request.
+
+## v1.40.0 persistent BOM balloons for multi-body drawing sheets - 2026-10-28
+
+- Added stable-ID BOM balloon records to drawing sheets and scene schema v12, with schema-v1-v11 backward loading.
+- Added **File → Edit saved BOM balloons...** to add, position, and remove up to 50 source-linked balloons. Each exported balloon carries its source body ID and item number from the sheet's source-scoped BOM.
+- Windows x64 Release build passed; full CTest passed 50/50 in 43.22 seconds. Focused regressions passed: parametric foundation 51 assertions, assembly joints 32, persistent assembly/drawing settings 81, and orthographic drawings 98. Source audit passed 263 checks with 130/130 public core operations referenced. Live UI testing was not run by request. See `QA_MATRIX.md` and `local_verification.json`.
+
+## v1.39.0 parametric hole, assembly joints, and multi-body drawings - 2026-10-28
+
+- Extended the bounded parametric rectangle/extrusion chain with a constrained circle sketch and editable through-hole cut. Diameter and center coordinates are named parameters, and the four-step history rebuilds with undo/redo and stale-history protection.
+- Added persistent rigid and revolute parent-child joint records. Revolute joints store an axis and limits and can be driven; invalid references, cycles, self-joints, duplicates, and invalid limits are rejected.
+- Drawing export can use up to 50 selected bodies as a compound source. Per-sheet settings and SVG metadata carry source body IDs and an aggregate geometry revision. Existing exports remain snapshots.
+- Added multi-body source comparison to the drawing checker. It compares selected or persisted source-body IDs and the aggregate geometry revision, and reports source-set mismatch or stale geometry.
+- Windows x64 Release build passed; full CTest passed 50/50 in 44.07 seconds; focused regressions passed: parametric 51 assertions, persistent assemblies 75, joints 32, and orthographic drawings 97. Source audit passed 257 checks with 130/130 public core operations referenced. Live UI testing was not run by request. See `QA_MATRIX.md` and `local_verification.json`.
+
+## v1.36.0 linked drawing parts-list mass column - 2026-10-28
+
+- Added a per-unit mass (kg) column to the BOM-linked drawing table. The value comes from the BOM's unit mass, preserving material-density calculations already used by BOM and mass-property workflows.
+- SVG rows expose `data-bom-unit-mass-kg` alongside the item number and component-definition identity. No density assigned produces the BOM's existing zero-mass value; the drawing does not infer material density.
+- Windows x64 Release build passed; full CTest passed 49/49; source audit passed 250 checks (126/126 public core operations referenced). Live v1.36 export showed the mass column and a zero unit mass for occurrences without assigned material density. The regression fixture verifies a nonzero 0.024 kg value. See `docs/QA_MATRIX.md` and `docs/local_verification.json`.
+
+## v1.35.0 BOM-linked drawing parts list - 2026-10-28
+
+- Added stable-ID linked parts-list placement to drawing sheets and scene schema v11. Schema v1-v10 scenes remain loadable; schema-v10 migration preserves dimensions and adds a hidden default table record.
+- Added **File → Place linked drawing parts list...** to the menu and ribbon. The editor saves visibility and paper-space placement for a selected body's sheet.
+- SVG export rebuilds up to 18 table rows from the current grouped BOM, including item, part number, description, quantity, material, revision, and component-definition identity. Existing SVGs remain export snapshots.
+- Windows x64 Release build passed; full CTest passed 49/49; source audit passed 250 checks (126/126 public core operations referenced). Live Windows UI verified setup and a real SVG export. See `docs/QA_MATRIX.md` for the bounded result and output evidence.
+
+## v1.34.0 persistent editable overall drawing dimensions - 2026-10-27
+
+- Added stable-ID X/Y/Z overall dimension records to drawing sheets and scene schema v10. v1-v9 scenes remain loadable and receive default dimension records during migration.
+- Added **File → Edit saved drawing dimensions...** in the menu and ribbon to set each dimension-line offset from 5 to 60 mm. Dimension values remain derived from the linked body's overall projected envelope.
+- SVG output identifies each dimension annotation and records its saved paper-space offset. Dimensions remain associated with overall body bounds, not selectable feature edges or parametric features.
+- Windows x64 Release build passed. Focused regressions passed 68 persistent-assembly/drawing-setup assertions and 78 orthographic-drawing assertions; full CTest passed 49/49. Live UI was not run.
+
+## v1.33.0 persistent positioned drawing notes - 2026-10-27
+
+- Added stable-ID note records with printable text and paper-space X/Y placement to persistent drawing-sheet settings. Scene schema v9 stores each note and its position; v1.34 continues this in schema v10.
+- Added **File → Edit saved drawing notes...** in the menu and ribbon. The editor handles up to five notes and re-links the sheet to the body's current geometry when saved.
+- SVG output now includes each note's identity and placement, retains stable sheet/view identities, and escapes user text. Notes remain vector text; dimensions are still generated annotations.
+- Windows x64 Release build passed. Focused regressions passed 63 persistent-assembly/drawing-setup assertions and 77 orthographic-drawing assertions; full CTest passed 49/49. Live UI was not run.
+
+## v1.32.0 persistent placed-view drawing sheets - 2026-10-27
+
+- Added persistent drawing-sheet and projected-view identities to scene schema v9, including the source geometry token and editable paper-space centers for top, front, right, and auxiliary views.
+- Added **File → Arrange saved drawing views...** so users can reposition the four views and explicitly refresh a stale sheet link to the selected body's current geometry.
+- SVG export now uses saved placements and writes sheet/view IDs into the output. It remains a vector snapshot and does not live-update after later model edits.
+- Windows x64 Release build and full CTest passed 49/49 before the v1.33 note addition. The isolated v1.32 source audit and live UI were not run.
+
+## v1.31.0 parametric foundation, STEP assemblies, sheet-metal flat pattern - 2026-10-27
+
+- Added an origin-constrained XY rectangle + base extrusion with named width/height/depth parameters, a two-step editable history, schema-v8 persistence, parameter editing, undo/redo, and stale-history protection after direct geometry edits.
+- Switched STEP import/export to OCCT XDE. Assembly paths, names, reusable definitions, occurrence identities, and placements round-trip when present in the STEP data.
+- Added one-bend sheet-metal development and SVG flat-pattern export with thickness, inside radius, bend angle, K-factor, bend line, and clear calculation limits.
+- Added configurable required title-block and annotation checks per drawing review, plus stale/wrong-body source snapshot detection.
+- Focused regressions passed: STEP XDE 28 assertions, parametric foundation 33, sheet metal 14, and drawing checklist/source comparison 72. The Windows x64 Release build passed, full CTest passed 49/49, and source audit passed 250 checks with all 126 public core operations referenced. Live UI was not run for this update; see `QA_MATRIX.md`.
+
+## v1.28.0 planar face relationship measurement - 2026-10-27
+
+- Added a face-inspection command that measures the angle between two planar face normals and reports plane separation when the faces are parallel.
+- Added 50 focused regression assertions for box face angles, parallel gaps, invalid/stale references, curved-face rejection, and read-only behavior.
+- Added cylindrical-face radius, diameter, and axis inspection; its focused regression passed 19 assertions for cylinder side faces, planar cap rejection, stale selections, and read-only behavior.
+- See `FACE_ANGLE.md` for usage, verification, and limits.
+
 ## v1.27.0 drawing issue-date validation - 2026-10-27
 
 - Drawing export now rejects nonempty issue dates outside `YYYY-MM-DD`; the exported-SVG checker flags malformed dates as `DRAWING_ISSUE_DATE_FORMAT`.
@@ -63,7 +178,7 @@
 ## Selected vertex coordinates - 2026-10-26
 
 - Added viewport vertex picking and X/Y/Z coordinate reporting in Inspect, with geometry-token validation that rejects stale vertex references after body edits.
-- Focused regression passed 57 assertions; Windows x64 Release app and test targets built; full CTest passed 36/36; source audit passed 136 checks with all 111 public scene operations referenced.
+- Focused regression passed 59 assertions; Windows x64 Release app and test targets built; full CTest passed 36/36; source audit passed 136 checks with all 111 public scene operations referenced.
 - Live UI picked a box corner and reported X 0.000, Y 0.000, Z 20.000 mm. See `VERTEX_COORDINATES.md`.
 
 ## Selected edge length - 2026-10-26
@@ -421,4 +536,20 @@
 - Live Windows UI opened a schema-v4 scene, edited it to a purchased component, displayed the new fields in both report tabs, ran the BOM data-quality profile (0 errors; 2 expected revision/material warnings), and saved/inspected a schema-v5 file.
 - Windows Release build passed; BOM/parts/standards regression passed 69 assertions; drawing regression passed 54 assertions; full CTest passed 43/43; source audit passed 209 checks with 118/118 public core operations referenced.
 - The update does not add pricing, stock management, purchase orders, supplier catalogs, or ERP integration.
+
+## v1.29.0 persistent component occurrences and drawing source references - 2026-10-27
+
+- Added persistent component-definition identity, occurrence identity, fixed XYZ placement, scene schema v6 storage, Assembly menu/ribbon commands, and component-linked BOM grouping/columns.
+- Added source body/geometry revision metadata to SVG exports and grouped each exported view for easier selection in SVG editors. This is snapshot provenance, not a live model link.
+- Added focused regressions: 42 assembly assertions cover component insertion, placement, BOM/parts-list CSV links, undo/redo, v5 migration and v6 persistence, and malformed IDs; 66 drawing assertions cover source metadata and selectable view/annotation groups. Full CTest and source audit results are in `QA_MATRIX.md`.
+- Rigid/revolute joints and a persistent editable drawing-sheet model remain unimplemented.
+
+## v1.30.0 persistent drawing setup and SVG annotation groups - 2026-10-27
+
+- Added persisted drawing setup per body: projection, A4/A3 sheet, isometric/section view and depth, notes, and title-block values. Reopening the export dialog uses the saved settings.
+- Added strict settings validation and schema-v7 storage while retaining migration support for earlier scene versions.
+- SVGs record source body and geometry token, with semantic groups for projected views, overall dimensions, and general notes. The artifact remains a static snapshot.
+- Windows Release build passed; 57 assembly/drawing-settings assertions and 66 drawing assertions passed; full CTest passed 46/46; source audit passed 250 checks across 123 public operations. Live UI verification remains pending.
+
+
 

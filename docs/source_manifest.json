@@ -1,5 +1,5 @@
 {
-  "version": "1.27.0",
+  "version": "1.48.0",
   "algorithm": "SHA-256",
   "files": [
     {
@@ -14,8 +14,8 @@
     },
     {
       "path": "CMakeLists.txt",
-      "sha256": "a736ad450369531d197e54e1b586feab004c56309ffcc6892735d407fb2b0cf3",
-      "size_bytes": 6081
+      "sha256": "0b59b927a3e334d20b1cb2cb850b19f0594ab0b1d75864d2ab0b87bd41e1fef9",
+      "size_bytes": 7138
     },
     {
       "path": "docs/ASYMMETRIC_CHAMFER.md",
@@ -29,13 +29,13 @@
     },
     {
       "path": "docs/BOM_PARTS_LIST.md",
-      "sha256": "c9dff3ecaa9f07cc81a60316b33679a3b73553dadbef72d21e0657761dad0104",
-      "size_bytes": 4910
+      "sha256": "573deed8f171502f5263d18cc05332dc5abc55336f3fda079263d8806553d7c6",
+      "size_bytes": 5311
     },
     {
       "path": "docs/CHANGELOG.md",
-      "sha256": "0b4df0c78188caaa0ef5b47f160813960987212dd21831439cb8e31e137384e9",
-      "size_bytes": 43158
+      "sha256": "8ed4a842a42be966c1525a0c5da06f8ad6d6fdc5b8498645a1c176586476c111",
+      "size_bytes": 60937
     },
     {
       "path": "docs/CIRCULAR_COUNTERBORE_PATTERN.md",
@@ -66,6 +66,11 @@
       "path": "docs/CUSTOM_PLANE_EXTRUSION.md",
       "sha256": "4f66a99778167d9fd27e0b12a3066230cd9b8e93cd87d0a97f8806410a42ec5d",
       "size_bytes": 1557
+    },
+    {
+      "path": "docs/CYLINDRICAL_FACE.md",
+      "sha256": "03b61eb138d54dae30b540225c45022c2b6bdbcf3545f542851897105ae24ce1",
+      "size_bytes": 1133
     },
     {
       "path": "docs/DOVETAIL_GROOVE.md",
@@ -99,8 +104,8 @@
     },
     {
       "path": "docs/evidence/orthographic-cylinder-diameter-v1.20.svg",
-      "size_bytes": 24589,
-      "sha256": "115f67363788a0a78cd623111366177f97da6b1a29ada89e9ebe5c2f80cc8a94"
+      "sha256": "115f67363788a0a78cd623111366177f97da6b1a29ada89e9ebe5c2f80cc8a94",
+      "size_bytes": 24589
     },
     {
       "path": "docs/evidence/projection-first-angle-v1.21.svg",
@@ -113,14 +118,19 @@
       "size_bytes": 24795
     },
     {
+      "path": "docs/FACE_ANGLE.md",
+      "sha256": "97e01dc1b0cb61c4f1a2408a0cb7cb11d9a05095cacc0130fd055d7d068de08f",
+      "size_bytes": 1343
+    },
+    {
       "path": "docs/FACE_AREA.md",
       "sha256": "c5dd6c5371ab0bfdc65deecc7400a1dbce083669895e2ee6699bcd7fe2fcde7c",
       "size_bytes": 954
     },
     {
       "path": "docs/FEATURE_GAP_COMPARISON.md",
-      "sha256": "836d63eb42f14b38144c527e7975562dca7a0e2c721e9668e89b9e795b0fb86d",
-      "size_bytes": 6769
+      "sha256": "d92e4df1ed8d14e70ff0f24073596e47adbb27efa932e71823ad2fbc77420e29",
+      "size_bytes": 8832
     },
     {
       "path": "docs/FEATURES_V1_10.md",
@@ -214,13 +224,13 @@
     },
     {
       "path": "docs/local_verification.json",
-      "sha256": "42a36f7a1f06d6248635b1698f43869d586faa87a07152d45f236f0f7c701d0d",
-      "size_bytes": 21309
+      "sha256": "82f0f0cb92bd4761b3a92be46b172e83bae53476eb36728eaa609ad71c5a8239",
+      "size_bytes": 41887
     },
     {
       "path": "docs/manual_qa_results.md",
-      "sha256": "4235c89d563ecee009dc699dfea4a977ab22bd9a92a87957a44ab1ea8b29cccb",
-      "size_bytes": 8698
+      "sha256": "cb709e3e28cc8c402a5217d3fcf3688757b2e402f4c46b930c5078fc761cf49c",
+      "size_bytes": 9168
     },
     {
       "path": "docs/MASS_FROM_DENSITY.md",
@@ -253,6 +263,11 @@
       "size_bytes": 1715
     },
     {
+      "path": "docs/NEUTRAL_FILE_EXCHANGE.md",
+      "sha256": "dfd60e064f1fcd4b2c8d73858ca0a1071ced3f847597246249001e4f16de8c72",
+      "size_bytes": 2263
+    },
+    {
       "path": "docs/NON_UNIFORM_SCALE.md",
       "sha256": "ae183b907f016c3a58e11c808d63e98efd60421bb6cd0683ebcb5626c243ef08",
       "size_bytes": 1085
@@ -264,8 +279,18 @@
     },
     {
       "path": "docs/ORTHOGRAPHIC_DRAWINGS.md",
-      "sha256": "eeabf877a6d4b5f622735a861240703b9280db155a6d5d96e952d4faf2d6822e",
-      "size_bytes": 6844
+      "sha256": "4a14fe9f3a2a154beafc00ac4fc1c022b0ca64f2b81781ebe6c9ebcf2d81c0db",
+      "size_bytes": 17462
+    },
+    {
+      "path": "docs/PARAMETRIC_FOUNDATION.md",
+      "sha256": "1266e590d9a9f144dc77f908878a8f12d2139546d81586a5fe6c2ba62c03c972",
+      "size_bytes": 3869
+    },
+    {
+      "path": "docs/PERSISTENT_ASSEMBLIES.md",
+      "sha256": "d8b71c9fede040b70acddf22d21643f855452d7be6583fcaa252a4e5df8510e3",
+      "size_bytes": 4440
     },
     {
       "path": "docs/PLANAR_SECTION.md",
@@ -279,8 +304,8 @@
     },
     {
       "path": "docs/QA_MATRIX.md",
-      "sha256": "420c9a96e5761383fdf6b7d0cebc4f4f7f7712196e10942f187eb5cab0b8cff7",
-      "size_bytes": 56393
+      "sha256": "1ac41f282e45e450b1287f1e43301dafe4d810fe280df095221a6a940d72223d",
+      "size_bytes": 85033
     },
     {
       "path": "docs/ROUNDED_SLOT.md",
@@ -293,14 +318,24 @@
       "size_bytes": 1480
     },
     {
+      "path": "docs/SHEET_METAL.md",
+      "sha256": "88abcc82f54b3d82e527d16ac2b54c7c27d0a77177debea01018830cfa94286d",
+      "size_bytes": 2384
+    },
+    {
       "path": "docs/STANDARDS_CHECKS.md",
-      "sha256": "48dc265d9fdcef6719f32dfca1b306261abcacb438f44c358c56eb14ee40dc57",
-      "size_bytes": 8883
+      "sha256": "e1ea530d738b6ceff658516e971670ec994e7140864bd04778f307785b34aeb5",
+      "size_bytes": 11361
     },
     {
       "path": "docs/STEP_IMPORT.md",
-      "sha256": "2f59019a46f1b9e82ddcb146fd6dda1caa8f5fa65787b5d1232c28f98ecf53e5",
-      "size_bytes": 1614
+      "sha256": "85749b188be5d8fea03b1a6b145c8181cf6200ac78a27d59f84805356ff922ef",
+      "size_bytes": 1363
+    },
+    {
+      "path": "docs/STL_MESH_IMPORT.md",
+      "sha256": "a85a787211834a56c8c144552231fe082e3ad6c1ec9f81d3590fb715be4031e7",
+      "size_bytes": 1420
     },
     {
       "path": "docs/SURFACE_TYPE_SUMMARY.md",
@@ -364,8 +399,8 @@
     },
     {
       "path": "README.md",
-      "sha256": "e6cd89555845cdfa9264bb220bbc13ec3b45e65142e74b65e56ec8bed558b43c",
-      "size_bytes": 21571
+      "sha256": "e971e7eed50c7fac695a5a598d0aa30520a0ee8dd4ccc8bf2ff9b29d3fa1c6cf",
+      "size_bytes": 26283
     },
     {
       "path": "scripts/package_windows.ps1",
@@ -379,8 +414,8 @@
     },
     {
       "path": "scripts/source_audit.py",
-      "sha256": "a36dd54101590c933c6001cd9ebc4e7280693e5c04525c71088cf254f3ab1e43",
-      "size_bytes": 22526
+      "sha256": "8ed53b20689829cec8e4eb39038c6a8401e6bfcdef4b6133cc732ef589032667",
+      "size_bytes": 34701
     },
     {
       "path": "src/core/AdvancedComponents.cpp",
@@ -389,13 +424,13 @@
     },
     {
       "path": "src/core/DrawingSheet.cpp",
-      "sha256": "35df8b3ecd4a547d342484605865cf290e7493c71a9796d9484443dad3dd78d1",
-      "size_bytes": 39860
+      "sha256": "8cbe1c5418edc36b80d65ec534f98e8f16d2593ea4c8933c0fd9f292ef21e492",
+      "size_bytes": 76997
     },
     {
       "path": "src/core/DrawingSheet.h",
-      "sha256": "50788f3fecc1d52b91d7e310c81d1a6aa713d955f8a0b11175781fbbc42e28e6",
-      "size_bytes": 2270
+      "sha256": "ae1ce27bd6dd495ed47e87d2cb31f877b20922f3d7e7d9972e421ee132271cc7",
+      "size_bytes": 4887
     },
     {
       "path": "src/core/EngineeringComponents.cpp",
@@ -424,8 +459,8 @@
     },
     {
       "path": "src/core/PartsData.cpp",
-      "sha256": "a25997805740fbf96210861e15e2858cb2c6813f9b4e4611c54fd1b0b0eef43a",
-      "size_bytes": 18450
+      "sha256": "652dbe6fe3419b381431dd8b9f8c36cb80ef7406679c23b00325d96dd1b2fc0e",
+      "size_bytes": 24053
     },
     {
       "path": "src/core/PrecisionComponents.cpp",
@@ -439,13 +474,23 @@
     },
     {
       "path": "src/core/SceneDocument.cpp",
-      "sha256": "b2c98eb493215008006a959c8055ecd2f77a9099e68657246945596eff23af86",
-      "size_bytes": 218866
+      "sha256": "7bed0d287e1309bc85d37ccac977711c048ae388bec192a1821a3730371b4ba6",
+      "size_bytes": 363378
     },
     {
       "path": "src/core/SceneDocument.h",
-      "sha256": "c1975cb558dc7303c5686045e4aa4aa6f08c68da13735f501946a70f8602056b",
-      "size_bytes": 40037
+      "sha256": "52ba8bbfa562c13168125443bfbaafe4f893084e790c1a23b2ed97c35ae937f2",
+      "size_bytes": 48855
+    },
+    {
+      "path": "src/core/SheetMetal.cpp",
+      "sha256": "a3aa1ec3cf78e6822f8a152f6befab254230ce5c9a664235b946b60bb5288859",
+      "size_bytes": 15182
+    },
+    {
+      "path": "src/core/SheetMetal.h",
+      "sha256": "222d4dc296b814d47dd77ad117d3467ee57fa3651ed188d7ee33c1996eb491f8",
+      "size_bytes": 3918
     },
     {
       "path": "src/core/SpecializedComponents.cpp",
@@ -469,18 +514,18 @@
     },
     {
       "path": "src/ui/MainWindow.cpp",
-      "sha256": "c7085993a0946571a4e8a3f50f602b640d03a5951ae16896be31448e95055b2d",
-      "size_bytes": 166416
+      "sha256": "c66879bc2cbcdf389bc47de98f5f5d2d3efbfe8e8fad8f620cd4b07d4c9019e0",
+      "size_bytes": 240873
     },
     {
       "path": "src/ui/MainWindow.h",
-      "sha256": "13554fff4a4bca674cf280ee2b42bdedbc2ee6149216cde9fe51e7bc21c9e23b",
-      "size_bytes": 4415
+      "sha256": "968939a287c613a7379c0a908aed92112f09620aed74a2acf0310165c1de7091",
+      "size_bytes": 5681
     },
     {
       "path": "tests/cadcore_tests.cpp",
-      "sha256": "f1b66b8a57d8e80416d4d152efe5061e55b905e60b897e0a6cdf64e6ab53e090",
-      "size_bytes": 221132
+      "sha256": "0eb97db1af643a2d38bdd1fd3ebcc7d245d3607e218cb4a5dcef3b6e91f5c141",
+      "size_bytes": 333363
     },
     {
       "path": "tests/kernel_contract_smoke.py",
@@ -489,8 +534,8 @@
     },
     {
       "path": "vcpkg.json",
-      "sha256": "b3380ca80acbd65d20a26c4a3414882aaf93da609dafb8d72e4d3de6ae7aef6f",
-      "size_bytes": 201
+      "sha256": "35889641f6c6fd2bd1a91170c7c950db365a66308ba1c7439897c886edaa4b9c",
+      "size_bytes": 211
     }
   ]
 }

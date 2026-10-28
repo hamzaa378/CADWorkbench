@@ -1,6 +1,6 @@
 {
   "name": "cadworkbench",
-  "version-string": "1.0.0",
+  "version-string": "1.47.0",
   "description": "Windows CAD direct modeling with a full ribbon and mass properties inspection",
-  "dependencies": ["qtbase", "opencascade"]
+  "dependencies": ["qtbase", "qtsvg", "opencascade"]
 }

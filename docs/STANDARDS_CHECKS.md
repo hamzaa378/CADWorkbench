@@ -1,5 +1,15 @@
 # Standards and data checks
 
+## Configurable drawing checklist (v1.31)
+
+When checking an exported SVG, the reviewer can require any combination of drawing number, description, part number, revision, drawn-by, checked-by, issue date, material, X/Y/Z envelope dimensions, projection symbol, auxiliary view, and general notes. Missing selected requirements become findings. The checklist opens with the saved project defaults; **Save selected requirements as this project's defaults** stores the selection in the `.cadscene` document. Those settings persist across save/reopen and support undo/redo. An optional source check compares an SVG's body ID and geometry token with one selected body and reports current, stale, mismatched, or missing source identity.
+
+The model-level ISO/ASME readiness profiles also inspect saved drawing-sheet settings against these project defaults. They report missing sheets, required title-block values, required conventions, and stale or missing source bodies. **File → Refresh saved drawing source link...** updates the stored source revision after the user reviews the changed model; exporting a new SVG/PDF is still required to update the artifact. The model-level checks inspect saved settings, not the full rendered SVG or every formal standard requirement.
+
+Scene schema v13 stores the required title-block fields and annotation conventions. Schemas v1-v12 remain loadable and receive empty checklist defaults. Unsupported or duplicate keys and malformed policy records are rejected.
+
+The checklist is a project content-review aid. It does not establish formal ISO/ASME conformity, inspect licensed tolerance tables, verify GD&T, or provide standards certification.
+
 The Inspect menu and ribbon provide BOM data quality, ISO drawing readiness, ASME drawing readiness, **All available checks**, and a separate **Check exported drawing SVG** command. The model-level all-checks command runs the BOM, ISO, and ASME profiles, totals their errors and warnings, and shows findings under separate profile headings. The SVG command screens an exported sheet for structural content against the selected ISO/ASME profile. These are readiness screens, not standards certification; they do not claim to validate every clause.
 
 ## Current checks
@@ -10,6 +20,7 @@ The Inspect menu and ribbon provide BOM data quality, ISO drawing readiness, ASM
 - Reusing a part number with inconsistent description, revision, material/density, or geometry signature is an error.
 - Missing part number, description, revision, or material is reported as an actionable warning.
 - Purchased parts are warned when supplier or supplier part number is missing; procurement identity is included when checking duplicate-part-number consistency.
+- Saved sheets are checked for project-required fields/conventions and source freshness; missing requirements are warnings so the project can define its own release gate.
 - The report states that it is a data/readiness check, not third-party standards certification.
 
 ## Exported drawing content screen
@@ -20,9 +31,15 @@ These are CADWorkbench content checks only. They do not verify exact ISO 7200 fi
 
 ## Standards scope and drawing dependency
 
-The ISO profile identifies ISO 7200 title-block fields, ISO 129-1 dimension presentation, and ISO 22081 general geometrical/size specifications as drawing work still required. The ASME profile identifies Y14.100 drawing practice and Y14.5 dimensioning/GD&T as drawing work still required. v1.19 exports first-/third-angle A4/A3 SVG sheets with orthographic and isometric or section views, a basic metadata block, overall envelope dimensions, and cylindrical centerlines/center marks. The SVG content screen checks sheet structure and visible labels, but does not inspect requirements at clause level. The exporter does not create persistent drawing objects or editable dimension entities, and does not add feature dimensions, a standardized projection symbol, tolerances, datums, or feature-control frames. Therefore the readiness profiles still do **not** claim standards compliance.
+The ISO profile identifies ISO 7200 title-block fields, ISO 129-1 dimension presentation, and ISO 22081 general geometrical/size specifications as drawing work still required. The ASME profile identifies Y14.100 drawing practice and Y14.5 dimensioning/GD&T as drawing work still required. Current drawing sheets persist placed views, notes, envelope dimensions, a linked source-scoped parts list, and BOM balloons, while SVG export remains a snapshot. The content screen checks sheet structure and visible labels, but does not inspect requirements at clause level. Feature-attached dimensions, a validated standardized projection symbol, tolerances, datums, and feature-control frames remain absent. Therefore the readiness profiles still do **not** claim standards compliance.
 
 The checker can be extended to inspect drawing content against selected user-configured conventions. It must not invent or hard-code licensed tolerance tables; ISO general tolerance values and ASME interpretation require the relevant standard tables and project specification.
+
+## v1.46 saved-sheet project-policy checks
+
+The ISO/ASME model readiness reports apply the saved project policy to each body with a sheet. They flag missing saved sheets, required title-block values, X/Y/Z envelope dimensions, projection, auxiliary view, general notes, and stale/missing source bodies. These are project-defined release checks; the profile labels do not turn them into formal standard conformance tests.
+
+The Windows BOM/standards regression passes **93 assertions**, including a missing-sheet warning, a complete configured sheet, stale-source detection, refresh, and scope language. The full suite passed 51/51 for v1.46; live UI was excluded by the user request. See [`QA_MATRIX.md`](QA_MATRIX.md).
 
 ## v1.24 title-block fields, live profile checks (2026-10-27)
 

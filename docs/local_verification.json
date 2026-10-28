@@ -1,11 +1,12 @@
 {
-  "version": "1.27.0",
-  "date": "2026-10-27",
+  "version": "1.48.0",
+  "date": "2026-10-28",
   "platform": "Windows x64 Visual Studio 18 2026 Release",
-  "build": "passed; Windows x64 Release CADWorkbench.exe and cadcore_tests.exe rebuilt for drawing issue-date validation; prior v1.26 hierarchical assembly report remains included",
+  "build": "PASS; Windows x64 Visual Studio 18 2026 Release CADWorkbench.exe and cadcore_tests.exe built with OCCT 8.0.1 and Qt 6.11.2; TKDEIGES runtime DLL copied.",
   "ctest": {
-    "passed": 43,
+    "passed": 53,
     "failed": 0,
+    "duration_seconds": 34.99,
     "names": [
       "cadcore_modeling_tools",
       "cadcore_wing_rib",
@@ -22,6 +23,11 @@
       "cadcore_planar_section",
       "cadcore_surface_summary",
       "cadcore_face_area",
+      "cadcore_face_angle",
+      "cadcore_cylindrical_face",
+      "cadcore_edge_length",
+      "cadcore_vertex_coordinates",
+      "cadcore_vertex_distance",
       "cadcore_circular_hole_pattern",
       "cadcore_helical_sweep",
       "cadcore_variable_pitch_helix",
@@ -41,23 +47,27 @@
       "cadcore_asymmetric_chamfer",
       "cadcore_multi_edge_blends",
       "cadcore_oriented_extrusion",
-      "cadcore_geometry_and_persistence",
-      "cadcore_edge_length",
-      "cadcore_vertex_coordinates",
-      "cadcore_vertex_distance",
-      "cadcore_body_schedule_csv",
       "cadcore_custom_plane_extrusion",
       "cadcore_custom_axis_revolve",
+      "cadcore_geometry_and_persistence",
+      "cadcore_body_schedule_csv",
       "cadcore_bom_parts_standards",
+      "cadcore_persistent_assemblies",
+      "cadcore_step_assembly_import",
+      "cadcore_stl_mesh_import",
+      "cadcore_iges_exchange",
+      "cadcore_obj_mesh_import",
+      "cadcore_parametric_foundation",
+      "cadcore_sheet_metal_flat_pattern",
       "cadcore_orthographic_drawing"
     ]
   },
-  "direct_core_assertions": null,
+  "direct_core_assertions": 262,
   "source_audit_checks": {
-    "passed": 215,
+    "passed": 332,
     "failed": 0,
-    "public_api_operations": 118,
-    "public_api_referenced_by_regression": 118
+    "public_api_operations": 145,
+    "public_api_referenced_by_regression": 145
   },
   "component_templates": {
     "total": 405,
@@ -163,13 +173,13 @@
   "feature_gap_benchmark": {
     "total_capability_areas": 30,
     "implemented": 6,
-    "partial": 8,
-    "not_implemented": 16
+    "partial": 13,
+    "not_implemented": 11
   },
-  "verification_status": "Windows x64 Release v1.27.0 build passed; focused drawing regression passed 64 assertions; BOM/parts/standards regression passed 69 assertions; full CTest passed 43/43; source audit passed 222 checks with all 118 public core operations referenced. Final live v1.27 SVG export retained drawing number, author, checker, revision A, and date 2026-10-27; ISO and ASME each returned 0 errors / 0 warnings. Imported malformed date 27/10/2026 produced 1 DRAWING_ISSUE_DATE_FORMAT warning under both profiles, with explicit non-certification details. Assembly tree rolled two parts to quantity 2 / 48,000 mm^3. Clause-level ISO/ASME, tolerance, datum, and GD&T conformance remain unimplemented.",
+  "verification_status": "Windows x64 Release v1.48.0 build passed; full CTest passed 53/53 in 34.99 seconds; source audit passed 332 checks with all 145 public core operations referenced. Focused regressions passed: parametric foundation 113 assertions, multi-bend sheet metal 41, IGES exchange 15, OBJ mesh import 17; previous assembly, drawing, BOM, STEP, and STL regressions also pass. Live UI was not run by explicit user instruction.",
   "public_core_api_coverage": {
-    "declared_operations": 118,
-    "referenced_by_regression": 118,
+    "declared_operations": 145,
+    "referenced_by_regression": 145,
     "uncovered": []
   },
   "current_feature_verification": {
@@ -198,7 +208,7 @@
       "live_ui": "passed; selected edge 5 on 40x30x20 mm box reported 20.000 mm, matching the Z extent"
     },
     "vertex_coordinates": {
-      "focused_assertions": 57,
+      "focused_assertions": 59,
       "core": "passed; full box vertex traversal, bounds and corners, invalid indices, missing body, null output, stale token rejection",
       "ctest": "passed 37/37",
       "live_ui": "passed; picked box corner reported X=0.000, Y=0.000, Z=20.000 mm"
@@ -289,6 +299,86 @@
       "ctest": "passed 43/43 Windows x64 Release suite",
       "source_audit": "passed 222 checks; all 118 public core operations referenced",
       "live_ui": "PASS; malformed 27/10/2026 SVG checked in ISO and ASME profiles; each returned 0 errors, 1 DRAWING_ISSUE_DATE_FORMAT warning, and explicit non-certification scope details. Valid v1.27 export with 2026-10-27 returned 0 errors / 0 warnings under both profiles."
+    },
+    "planar_face_angle": {
+      "focused_assertions": 50,
+      "build": "Windows x64 Release CADWorkbench.exe and cadcore_tests.exe rebuilt successfully; app title v1.28.0",
+      "ctest": "passed 1/1 focused and 44/44 full Release suite",
+      "source_audit": "passed 227 checks; all 119 public core operations referenced",
+      "core": "adjacent/opposing planar face normals, oriented angle 0-180 degrees, parallel-plane gaps, unit normal values, invalid/missing/out-of-range/stale references, curved-face rejection, fresh references after transform, and non-mutating behavior",
+      "live_ui": "pending reserved live UI verification window"
+    },
+    "persistent_assemblies": {
+      "focused_assertions": 101,
+      "build": "Windows x64 Release v1.44.0 passed",
+      "ctest": "cadcore_persistent_assemblies passed; full suite 50/50",
+      "core": "Persistent components and occurrences, BOM/parts-list links, rigid/revolute joints, recursive parent transforms, transformed revolute frames, saved drawing source freshness state, persistence and migration.",
+      "live_ui": "not run by explicit user instruction",
+      "limits": "Joint model remains bounded; it does not provide a general six-degree-of-freedom constraint or motion solver."
+    },
+    "drawing_svg_source_identity": {
+      "focused_assertions": 66,
+      "ctest": "passed orthographic drawing checks; full Release suite passed 46/46",
+      "source_audit": "passed 250 checks; all 123 public core operations referenced",
+      "core": "SVG source body/geometry token, explicit export-snapshot status, selectable view groups, semantic overall dimension groups, and selectable general-note group",
+      "live_ui": "PASS; exported a 297 x 210 mm A4 SVG from the UI. Parsed file contained TOP, FRONT, RIGHT, and SECTION A-A view groups; source body/geometry identifiers and export-snapshot status; selectable overall-dimension and general-note groups; and entered drawing-number/title-block/note text.",
+      "limits": "snapshot metadata only; no persistent/live-updating drawing sheet, balloons, linked parts list, detail views, CAD drawing entities, or PDF export"
+    },
+    "persistent_drawing_setup": {
+      "focused_assertions": "included in 45 persistent-assembly assertions",
+      "core": "scene schema-v7 saves projection, A4/A3 size, auxiliary view, section depth, notes, drawing number, drawn-by, checked-by, issue date, and revision; input validates and export dialog preloads saved values",
+      "ctest": "full Release suite passed 46/46",
+      "live_ui": "PASS within one app session; reopened drawing export setup restored third-angle projection, A4 landscape, Section A-A at body mid-depth with 50% depth, note, drawing number, drawn-by, checked-by, revision, and issue date. CAD scene save/reopen was not exercised in the UI run.",
+      "limits": "settings persist, but placed drawing views and annotations are not an editable scene document"
+    },
+    "step_assembly_xde": {
+      "focused_assertions": 28,
+      "build": "Windows x64 Release v1.31.0 passed",
+      "ctest": "cadcore_step_assembly_import passed; full suite 49/49",
+      "core": "XDE STEP import/export preserves source names, nested assembly paths, repeated definition identity, unique occurrence IDs, fixed translation, solid volume, and import undo.",
+      "live_ui": "not run for v1.31.0",
+      "limits": "only assembly relationships represented by STEP transfer; no live UI verification"
+    },
+    "parametric_foundation": {
+      "focused_assertions": 59,
+      "build": "Windows x64 Release v1.44.0 passed",
+      "ctest": "cadcore_parametric_foundation passed; full suite 50/50",
+      "core": "Constrained rectangle/extrusion/one-hole history with named parameters; coordinated edits are validated and rebuilt atomically with rollback, undo/redo, persistence, and stale-history protection.",
+      "live_ui": "not run by explicit user instruction",
+      "limits": "Focused feature template only; no general-purpose sketch solver, expressions, or arbitrary feature graph."
+    },
+    "sheet_metal_flat_pattern": {
+      "focused_assertions": 14,
+      "build": "Windows x64 Release v1.31.0 passed",
+      "ctest": "cadcore_sheet_metal_flat_pattern passed; full suite 49/49",
+      "core": "one-bend outside-dimension development formula, bend allowance/deduction, rule validation, SVG blank outline and bend line, export file checks.",
+      "live_ui": "not run for v1.31.0",
+      "limits": "not folded sheet-solid modeling; no multi-bend, relief, material tables, springback, or DXF."
+    },
+    "drawing_checklist_and_source_comparison": {
+      "focused_assertions": 72,
+      "build": "Windows x64 Release v1.31.0 passed",
+      "ctest": "cadcore_orthographic_drawing passed; full suite 49/49",
+      "core": "configurable required title-block fields and annotation conventions; malformed XML handling; current, stale, wrong-body, and missing model-source snapshot checks.",
+      "live_ui": "not run for v1.31.0",
+      "limits": "checklist choices are per review and not saved as project defaults; source comparison identifies an export snapshot and does not create live-updating editable drawing sheets; no formal standards certification."
+    },
+    "assembly_joints": {
+      "focused_assertions": 71,
+      "build": "Windows x64 Release v1.44.0 passed",
+      "ctest": "cadcore_assembly_joints passed; full suite 50/50",
+      "core": "Rigid/revolute joint metadata and drive limits; recursive parent translation/rotation carries nested subassemblies and transforms revolute axis origins/directions; undo/redo verified.",
+      "live_ui": "not run by explicit user instruction"
+    },
+    "drawing_source_status": {
+      "passed": true,
+      "focused_assertions": 101,
+      "states": [
+        "Current",
+        "Stale",
+        "MissingBodies"
+      ],
+      "core": "Read-only source-body existence and geometry-revision report for a persisted sheet; stale/missing records are diagnosed without rewriting the saved source set."
     }
   },
   "body_schedule_csv_follow_up": {
@@ -324,5 +414,307 @@
     "core": "purchased/manufactured metadata, supplier and supplier number validation, duplicate inheritance/grouping, CSV reports, and targeted missing-field findings",
     "live_ui": "PASS; supplier ACME UI Supply and supplier number UI-420 visible in both live report tabs; check screen returned 0 errors / 2 metadata warnings for revision and material; saved scene was valid schema v5.",
     "limits": "no prices, sourcing catalogs, inventory, purchase orders, or ERP integration"
+  },
+  "working_tree_update_v1_32": {
+    "version": "1.32.0",
+    "date": "2026-10-27",
+    "implemented": "Persistent drawing-sheet ID, source geometry token, stable IDs for top/front/right/auxiliary views, editable paper-space view centers, layout editing UI, and SVG export of saved placements/IDs; scene schema v9.",
+    "build": "PASS; Windows x64 Release app and test targets built before v1.33 note changes.",
+    "automated_tests": "PASS; full CTest 49/49 before v1.33 note changes.",
+    "source_audit": "NOT RUN for the isolated v1.32 checkpoint.",
+    "live_ui": "NOT RUN",
+    "scope": "Single-part sheet with four views and shared auto-fit scale. SVG remains a snapshot; no native drawing entities, linked BOM table, balloons, detail views, or PDF."
+  },
+  "working_tree_update_v1_33": {
+    "version": "1.33.0",
+    "date": "2026-10-27",
+    "implemented": "Persistent positioned note annotations with stable IDs, schema-v9 storage, note editor, and SVG note metadata.",
+    "build": "PASS; Windows x64 Release app and test targets built as part of v1.34 validation.",
+    "focused_tests": {
+      "persistent_assembly_and_drawing_setup": 63,
+      "orthographic_drawing": 77
+    },
+    "ctest": {
+      "passed": 49,
+      "failed": 0
+    },
+    "source_audit": {
+      "passed": 250,
+      "failed": 0,
+      "public_api_operations": 126,
+      "public_api_referenced_by_regression": 126
+    },
+    "live_ui": "NOT RUN",
+    "scope": "Single-body sheet; SVG remains a snapshot; dimensions were generated rather than stored as editable records."
+  },
+  "working_tree_update": {
+    "version": "1.40.0",
+    "date": "2026-10-28",
+    "implemented": "Added the bounded parametric through-hole chain, persistent rigid/revolute joints, multi-body composite drawing sources, source-scoped BOM rows, multi-body source revision comparison, and persistent BOM balloons linked to source bodies and BOM item numbers. Scene schema v12 adds balloon records; v1-v11 scenes remain loadable.",
+    "build": "PASS; Windows x64 Visual Studio 18 2026 Release CADWorkbench.exe and cadcore_tests.exe.",
+    "focused_tests": {
+      "parametric_foundation": 51,
+      "assembly_joints": 32,
+      "persistent_assembly_drawing_settings": 81,
+      "orthographic_drawing": 98
+    },
+    "ctest": {
+      "passed": 50,
+      "failed": 0,
+      "duration_seconds": 43.22
+    },
+    "source_audit": {
+      "passed": 263,
+      "failed": 0,
+      "public_api_operations": 130,
+      "public_api_referenced_by_regression": 130,
+      "note": "Textual contract audit; build and regression tests provide runtime verification."
+    },
+    "live_ui": "NOT RUN by explicit user instruction.",
+    "scope": "Parametrics and joints remain bounded implementations rather than general solvers. Drawing SVGs are snapshots and do not update when source geometry changes. No feature-attached dimensions, independent detail views, PDF export, or formal standards certification."
+  },
+  "working_tree_update_v1_39": {
+    "version": "1.39.0",
+    "date": "2026-10-28",
+    "implemented": "Added editable circular through-hole to the focused rectangle/extrusion parametric chain; persistent rigid/revolute parent-child joints and bounded revolute driving; drawing sources combining up to 50 selected bodies with stored source IDs and aggregate geometry revision; multi-body source revision comparison; and a linked BOM scoped to selected drawing bodies.",
+    "build": "PASS; Windows x64 Visual Studio 18 2026 Release CADWorkbench.exe and cadcore_tests.exe.",
+    "focused_tests": {
+      "parametric_foundation": 51,
+      "assembly_joints": 32,
+      "persistent_assemblies": 75,
+      "orthographic_drawing": 97
+    },
+    "ctest": {
+      "passed": 50,
+      "failed": 0,
+      "duration_seconds": 44.07
+    },
+    "source_audit": {
+      "passed": 257,
+      "failed": 0,
+      "public_api_operations": 130,
+      "public_api_referenced_by_regression": 130,
+      "note": "Textual contract audit; build and regressions provide runtime verification."
+    },
+    "live_ui": "NOT RUN by explicit user instruction.",
+    "scope": "Parametrics remain a focused template rather than a general solver; joints are not a general assembly solver; multi-body drawing exports remain static SVG snapshots and do not auto-update when source geometry changes."
+  },
+  "working_tree_update_v1_40": {
+    "version": "1.40.0",
+    "date": "2026-10-28",
+    "implemented": "Added the bounded parametric through-hole chain, persistent rigid/revolute joints, multi-body composite drawing sources, source-scoped BOM rows, multi-body source revision comparison, and persistent BOM balloons linked to source bodies and BOM item numbers. Scene schema v12 adds balloon records; v1-v11 scenes remain loadable.",
+    "build": "PASS; Windows x64 Visual Studio 18 2026 Release CADWorkbench.exe and cadcore_tests.exe.",
+    "focused_tests": {
+      "parametric_foundation": 51,
+      "assembly_joints": 32,
+      "persistent_assembly_drawing_settings": 81,
+      "orthographic_drawing": 98
+    },
+    "ctest": {
+      "passed": 50,
+      "failed": 0,
+      "duration_seconds": 43.22
+    },
+    "source_audit": {
+      "passed": 263,
+      "failed": 0,
+      "public_api_operations": 130,
+      "public_api_referenced_by_regression": 130,
+      "note": "Textual contract audit; build and regression tests provide runtime verification."
+    },
+    "live_ui": "NOT RUN by explicit user instruction.",
+    "scope": "Parametrics and joints remain bounded implementations rather than general solvers. Drawing SVGs are snapshots and do not update when source geometry changes. No feature-attached dimensions, independent detail views, PDF export, or formal standards certification."
+  },
+  "focused_regressions": {
+    "bom_parts_standards": {
+      "passed": true,
+      "assertions": 93
+    },
+    "step_xde_assembly_import": {
+      "passed": true,
+      "assertions": 28
+    },
+    "one_bend_sheet_metal_flat_pattern": {
+      "passed": true,
+      "assertions": 34,
+      "coverage": "One-bend SVG and multi-bend bend-allowance/DXF development regressions."
+    },
+    "parametric_foundation": {
+      "passed": true,
+      "assertions": 77,
+      "coverage": "Offset sketches, negative sketch origins/hole centers, atomic multi-parameter edits, persistence and undo/redo."
+    },
+    "assembly_joints": {
+      "passed": true,
+      "assertions": 133,
+      "coverage": "Rigid/revolute/prismatic tree joints, mixed parent-first pose solving, descendant movement, persistent keyframe interpolation, shared-geometry synchronization and undo/redo."
+    },
+    "persistent_assembly_drawing_settings": {
+      "passed": true,
+      "assertions": 104,
+      "coverage": "Saved drawing source IDs and aggregate revisions, stale/current/missing state, explicit refresh with undo/redo, schema migrations and annotation persistence."
+    },
+    "orthographic_drawings": {
+      "passed": true,
+      "assertions": 120
+    },
+    "live_ui": {
+      "run": false,
+      "reason": "Explicitly excluded by user instruction."
+    },
+    "pdf_export": {
+      "passed": true,
+      "assertions": 8,
+      "formats": [
+        "A4 landscape",
+        "A3 landscape"
+      ],
+      "atomic_destination_preservation": true
+    },
+    "section_and_detail_views": {
+      "passed": true,
+      "assertions": 120,
+      "section_axes": [
+        "X",
+        "Y",
+        "Z"
+      ],
+      "cylindrical_feature_dimensions": "stable IDs on unchanged re-export; new feature reference after source geometry move",
+      "migration": "schema-v14 details preserved; sections default empty"
+    },
+    "stl_mesh_import": {
+      "passed": true,
+      "assertions": 17,
+      "coverage": "Closed faceted solid import, volume/face count, undo/redo and rejection of invalid/open inputs."
+    }
+  },
+  "working_tree_update_v1_43": {
+    "version": "1.43.0",
+    "date": "2026-10-28",
+    "implemented": "Added up to four persistent projected circular detail views and four independently placed X/Y/Z axis-aligned section views; editable source centers/depths/placements, clipped detail enlargements, section cutting lines/hatching, selectable geometry-derived cylindrical diameter dimensions, stable SVG metadata, and scene schema-v15 persistence with v1-v14 compatibility.",
+    "build": "PASS; Windows x64 Visual Studio 18 2026 Release CADWorkbench.exe and cadcore_tests.exe.",
+    "focused_tests": {
+      "parametric_foundation": 51,
+      "assembly_joints": 32,
+      "persistent_assembly_drawing_settings": 92,
+      "orthographic_drawing": 120
+    },
+    "ctest": {
+      "passed": 50,
+      "failed": 0,
+      "duration_seconds": 45.94
+    },
+    "source_audit": {
+      "passed": 292,
+      "failed": 0,
+      "public_api_operations": 131,
+      "public_api_referenced_by_regression": 131,
+      "note": "Textual contract audit; build and regression tests provide runtime verification."
+    },
+    "live_ui": "NOT RUN by explicit user instruction.",
+    "scope": "Detail/section records and cylindrical feature callouts feed exported SVG/PDF snapshots, which do not refresh automatically after model changes. Sections are axis-aligned; arbitrary section paths and user-attached edge/face dimensions remain future work."
+  },
+  "working_tree_update_v1_44": {
+    "version": "1.44.0",
+    "date": "2026-10-28",
+    "implemented": "Atomic batch editing for named parameters; recursive parent translation/rotation carrying rigid and revolute descendants with revolute joint-frame transforms; saved drawing source freshness report for current, stale, and missing sources; documentation and regression updates.",
+    "build": "PASS; Windows x64 Visual Studio 18 2026 Release CADWorkbench.exe and cadcore_tests.exe.",
+    "focused_tests": {
+      "parametric_foundation": 59,
+      "assembly_joints": 71,
+      "persistent_assembly_drawing_settings": 101,
+      "orthographic_drawing": 120
+    },
+    "ctest": {
+      "passed": 50,
+      "failed": 0,
+      "duration_seconds": 48.58
+    },
+    "source_audit": {
+      "passed": 309,
+      "failed": 0,
+      "public_api_operations": 132,
+      "public_api_referenced_by_regression": 132,
+      "note": "Textual contract audit; build and regression tests provide runtime verification."
+    },
+    "live_ui": "NOT RUN by explicit user instruction.",
+    "scope": "Parametric support remains a focused constrained feature chain. Assembly joints remain bounded and are not a general solver. Drawing exports remain snapshots; re-export after model changes."
+  },
+  "working_tree_update_v1_46": {
+    "version": "1.46.0",
+    "date": "2026-10-28",
+    "implemented": "Rigid/revolute/prismatic assembly-tree solving with atomic mixed poses, saved interpolated motion tracks, and explicit reusable component geometry synchronization; drawing source revision refresh with undo/redo; configurable saved-sheet field/convention checks with stale-source findings; scene schema v17; closed manifold STL import build/test repair.",
+    "build": "PASS; Windows x64 Visual Studio 18 2026 Release CADWorkbench.exe and cadcore_tests.exe.",
+    "ctest": {
+      "passed": 51,
+      "failed": 0,
+      "duration_seconds": 45.19
+    },
+    "source_audit": {
+      "passed": 332,
+      "failed": 0,
+      "public_api_operations": 141,
+      "public_api_referenced_by_regression": 141,
+      "note": "Textual contract audit; build and regressions provide runtime verification."
+    },
+    "focused_tests": {
+      "assembly_joints_motion": 133,
+      "persistent_assembly_drawing_settings": 104,
+      "bom_parts_standards": 93,
+      "orthographic_drawing": 120,
+      "stl_mesh_import": 17,
+      "parametric_foundation": 77,
+      "multi_bend_sheet_metal": 34,
+      "step_assembly_import": 28
+    },
+    "live_ui": "NOT RUN by explicit user instruction.",
+    "scope": "Bounded acyclic joint tree; no closed-loop solving or real-time motion playback. Drawing artifacts still require re-export; project checks do not certify ISO/ASME compliance."
+  },
+  "working_tree_update_v1_47": {
+    "version": "1.47.0",
+    "date": "2026-10-28",
+    "implemented": "Parametric X-direction through-hole pattern with atomic parameter rebuilds and schema v18 persistence; rectangular end reliefs for multi-bend DXF; solid-only IGES import/export and UI commands.; closed OBJ polygon-mesh import as faceted solids.",
+    "build": "PASS; Windows x64 Visual Studio 18 2026 Release CADWorkbench.exe and cadcore_tests.exe.",
+    "ctest": {
+      "passed": 53,
+      "failed": 0,
+      "duration_seconds": 45.64
+    },
+    "source_audit": {
+      "passed": 332,
+      "failed": 0,
+      "public_api_operations": 145,
+      "public_api_referenced_by_regression": 145
+    },
+    "focused_tests": {
+      "parametric_foundation": 96,
+      "multi_bend_sheet_metal": 41,
+      "iges_exchange": 15,
+      "obj_mesh_import": 17
+    },
+    "live_ui": "NOT RUN by explicit user instruction.",
+    "scope": "Parametric history remains a bounded rectangle/extrusion/through-hole/pattern chain; folded sheet solids and springback are absent; IGES handles solids and flattens hierarchy; STL/OBJ become faceted solids and editable mesh repair/surface bodies are absent."
+  },
+  "working_tree_update_v1_48": {
+    "version": "1.48.0",
+    "date": "2026-10-28",
+    "implemented": "X/Y-direction parametric through-hole patterns with atomic rebuilds, explicit axis persistence in schema v19, and schema-v18 X-pattern migration.",
+    "build": "PASS; Windows x64 Visual Studio 18 2026 Release CADWorkbench.exe and cadcore_tests.exe.",
+    "ctest": {
+      "passed": 53,
+      "failed": 0,
+      "duration_seconds": 34.99
+    },
+    "source_audit": {
+      "passed": 332,
+      "failed": 0,
+      "public_api_operations": 145,
+      "public_api_referenced_by_regression": 145
+    },
+    "focused_tests": {
+      "parametric_foundation": 113
+    },
+    "live_ui": "NOT RUN by explicit user instruction.",
+    "scope": "Parametric history remains a bounded rectangle/extrusion/through-hole/pattern chain; it is not a general sketch constraint solver or arbitrary feature timeline."
   }
 }

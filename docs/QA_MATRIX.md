@@ -1,3 +1,257 @@
+## CADWorkbench v1.48 parametric Y-direction patterns (2026-10-28)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | `CADWorkbench.exe` and `cadcore_tests.exe` built with Visual Studio 18, Qt 6.11.2, and OCCT 8.0.1. |
+| Parametric foundation | PASS (113 assertions) | X/Y hole patterns, axis persistence, schema-v18 migration, boundaries, volume, atomic rebuild, invalid-file rejection, undo/redo. |
+| Full Windows CTest | PASS (53/53) | Latest Release suite completed in 34.99 seconds. |
+| Source audit | PASS (332 checks) | All 145/145 public core operations are referenced by regression coverage. |
+| Live UI tests | NOT RUN | User requested coding, builds, and regression tests only. |
+| Scope | PARTIAL | Parametric history remains a focused rectangle/extrusion/hole/pattern chain, without a general constraint solver or arbitrary editable timeline. |
+
+## CADWorkbench v1.47 parametric patterns, sheet-metal relief, and IGES exchange (2026-10-28)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | `CADWorkbench.exe` and `cadcore_tests.exe` built with Visual Studio 18, Qt 6.11.2, and OCCT 8.0.1; IGES runtime DLL copied by the build. |
+| Parametric foundation | PASS (96 assertions) | X-direction hole-pattern count/spacing, limits, containment, volume, atomic rebuild, schema-v18 persistence, invalid-file rejection, undo/redo. |
+| Multi-bend sheet metal | PASS (41 assertions) | One-bend SVG, multi-bend rule calculation, DXF geometry, optional rectangular end reliefs, export, and invalid dimensions. |
+| IGES exchange | PASS (15 assertions) | Multi-solid export/import round-trip, solid validity and volume, atomic undo/redo, missing input and empty-scene handling. |
+| OBJ mesh import | PASS (17 assertions) | Polygon triangulation, negative indices, closed-solid volume, undo/redo, and open/malformed/missing-file rejection. |
+| Full Windows CTest | PASS (53/53) | Release suite completed in 45.64 seconds. |
+| Source audit | PASS (332 checks) | All 145/145 public core operations are referenced by regression coverage. |
+| Live UI tests | NOT RUN | User requested coding, builds, and regression tests only. |
+| Scope | PARTIAL | Parametric history remains a focused rectangle/extrusion/hole/pattern chain; sheet-metal solids and springback are absent; IGES handles solids only and flattens hierarchy. |
+
+## CADWorkbench v1.46 assembly, drawing-source, and project-readiness update (2026-10-28)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | Built `CADWorkbench.exe` and `cadcore_tests.exe` with Visual Studio 18, Qt 6.11.2, and OCCT 8.0.1. Existing OCCT/Qt deprecation warnings remain. |
+| Full Windows CTest | PASS (51/51) | Release suite completed in 45.19 seconds. |
+| Assembly solver and motion tracks | PASS (133 focused assertions) | Rigid/revolute/prismatic tree joints, limits, nested descendant motion, parent-first mixed pose solve, linear keyframe interpolation, scene-v17 save/reopen, malformed reference rejection, atomic undo/redo, and reusable geometry synchronization. |
+| Drawing source refresh | PASS (104 persistent-assembly assertions) | Current/stale/missing source status, explicit revision refresh, undo/redo of refresh and geometry edits, and existing saved-sheet migration/persistence checks. |
+| Configurable model drawing readiness | PASS (93 BOM/standards assertions) | Required saved-sheet fields/conventions, missing-sheet and stale-source warnings, source refresh, saved project policy persistence, and explicit ISO/ASME scope boundaries. |
+| Orthographic drawings | PASS (120 focused assertions) | Existing placed views, details/sections, selectable geometry-derived diameter references, linked BOM/balloons, and PDF/SVG output. |
+| Closed STL import | PASS (17 focused assertions) | Faceted solid validity, volume, triangle count, atomic undo/redo, missing input, invalid tolerance, and open-mesh rejection. |
+| Other focused priority regressions | PASS | Parametric foundation 77, multi-bend sheet metal 34, STEP assembly import 28. |
+| Source audit | PASS (332 checks) | All 141/141 public core operations are referenced by regression coverage. Textual audit complements compiled runtime tests. |
+| Live UI | NOT RUN | Explicitly excluded by the user for this work session. |
+| Scope | PARTIAL | Assembly solving supports acyclic rigid/revolute/prismatic trees, not closed-loop or over-constrained mechanisms; motion is evaluated at requested keyframe times, not played in real time. Occurrence orientation is encoded in transformed B-rep geometry. Drawings still require re-export after model edits, and readiness checks are not formal ISO/ASME certification. |
+
+See [`PERSISTENT_ASSEMBLIES.md`](PERSISTENT_ASSEMBLIES.md), [`ORTHOGRAPHIC_DRAWINGS.md`](ORTHOGRAPHIC_DRAWINGS.md), [`STANDARDS_CHECKS.md`](STANDARDS_CHECKS.md), and [`local_verification.json`](local_verification.json).
+
+## CADWorkbench v1.44 atomic parametric edits and saved drawing source status (2026-10-28)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | Built `CADWorkbench.exe` and `cadcore_tests.exe` with Visual Studio 18 2026, QtSvg/PrintSupport, and OCCT. Existing OCCT/Qt deprecation warnings remain. |
+| Full Windows CTest | PASS (50/50) | Suite completed in 48.58 seconds after single-body saved-source status coverage was added. |
+| Parametric foundation | PASS (59 focused assertions) | Batch update of block width and hole center succeeds together; invalid coupled dimensions preserve both parameters and solid; one-step undo/redo and unchanged-value no-op are covered. |
+| Assembly joints | PASS (71 focused assertions) | Parent translation/rotation carries rigid and revolute children through a nested chain, updates revolute joint frames, and supports atomic undo/redo; existing limit, reference, persistence, and cycle checks pass. |
+| Persistent assembly and drawing settings | PASS (101 focused assertions) | Single-body and multi-body sheets report no-sheet/current/stale/missing states; undo, deletion, save/reopen, schema migrations, and persisted drawing annotations are covered. |
+| Orthographic drawing | PASS (120 focused assertions) | Detail/section rendering and placement, geometry-derived cylindrical dimension IDs, PDF output, source metadata and other existing drawing checks. |
+| Existing priority regressions | PASS | Assembly joints 32, STEP XDE assembly import 28, one-bend sheet metal 14. |
+| Source audit | PASS (309 checks) | 132/132 public core operations are referenced by regression coverage. Textual audit only. |
+| Live UI | NOT RUN | Explicitly excluded by the user for this work session. |
+| Scope | PARTIAL | Parametric editing still supports a fixed rectangle/extrusion/one-hole chain, not a general sketch solver or arbitrary feature graph. Drawing source check reports revision status; saved SVG/PDF files still need re-export after model changes. |
+
+See [`PARAMETRIC_FOUNDATION.md`](PARAMETRIC_FOUNDATION.md), [`ORTHOGRAPHIC_DRAWINGS.md`](ORTHOGRAPHIC_DRAWINGS.md), and [`local_verification.json`](local_verification.json).
+
+## CADWorkbench v1.43 projected drawing section and detail views (2026-10-28)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | Built `CADWorkbench.exe` and `cadcore_tests.exe`; QtSvg/PrintSupport deployment remains available for SVG/PDF output. |
+| Full Windows CTest | PASS (50/50) | Final Windows x64 Release suite completed in 45.94 seconds. |
+| Orthographic drawings, detail views, sections, feature dimensions, and PDF | PASS (120 focused assertions) | X/Y/Z axis cut lines, correct TOP/FRONT source views, section labels and hatching, detail rendering/clipping, geometry-derived cylindrical feature IDs across re-export and geometry change, invalid-depth and outside-source rejection, existing annotations and A4/A3 PDF output. |
+| Persistent assembly/drawing settings | PASS (92 focused assertions) | Detail and section IDs/values survive schema-v15 save/reopen; invalid axes and out-of-sheet placements are rejected; v13/v14 migrations preserve earlier drawing records. |
+| Existing priority regressions | PASS | BOM/standards 83, STEP XDE 28, sheet-metal flat pattern 14, parametric foundation 51, assembly joints 32. |
+| Source audit | PASS (292 checks) | 131/131 public core operations are referenced by regression coverage. Textual audit only. |
+| Live UI | NOT RUN | Explicitly excluded by the user for this work session. |
+| Scope | PARTIAL | Detail and X/Y/Z axis-aligned section records are editable and feed exported SVG/PDF snapshots; cylindrical diameter callouts have geometry-derived feature IDs. Exported files do not refresh after a model change; arbitrary section paths and user-attached edge/face dimensions remain unimplemented. |
+
+See [`ORTHOGRAPHIC_DRAWINGS.md`](ORTHOGRAPHIC_DRAWINGS.md) and [`local_verification.json`](local_verification.json).
+
+## CADWorkbench v1.42 orthographic drawing PDF export (2026-10-28)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | Built `CADWorkbench.exe` and `cadcore_tests.exe`; QtSvg and Qt PrintSupport are included and deployed. |
+| Full Windows CTest | PASS (50/50) | Windows x64 Release suite completed in 46.44 seconds. |
+| Orthographic drawings and PDF | PASS (109 assertions) | Existing source/annotation regressions plus single-page A4/A3 PDF output, PDF header/trailer, malformed SVG rejection, and existing-file preservation. |
+| Project checklist policy | PASS | Schema-v13 save/load, v12 default migration, validation, and undo/redo remain covered by the BOM/standards regression. |
+| Source audit | PASS (272 checks) | 131/131 public core operations are referenced by regression coverage. Textual audit only. |
+| Live UI | NOT RUN | Explicitly excluded by the user for this work session. |
+| Scope | PARTIAL | PDF is a fixed one-page rendering of the SVG sheet. It does not create editable PDF annotations or update after model changes. |
+
+See [`ORTHOGRAPHIC_DRAWINGS.md`](ORTHOGRAPHIC_DRAWINGS.md) and [`local_verification.json`](local_verification.json).
+
+## CADWorkbench v1.41 project drawing checklist defaults (2026-10-28)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | Built `CADWorkbench.exe` and `cadcore_tests.exe` with Visual Studio 18 2026, Qt 6.11.2, OCCT 8.0.1, and vcpkg. |
+| Full Windows CTest | PASS (50/50) | Windows x64 Release suite completed in 43.65 seconds. |
+| Project drawing policy | PASS (14 new assertions) | Accepts known checklist keys, rejects duplicates/unknown keys, marks project dirty, supports undo/redo, persists through schema-v13 save/reopen, migrates schema v12 to empty defaults, and rejects malformed policy loads transactionally. |
+| BOM / standards checks | PASS (83 assertions) | Existing BOM and ISO/ASME SVG structural-readiness tests plus persistent project checklist regression. |
+| Existing priority regressions | PASS | STEP XDE 28, sheet-metal flat pattern 14, parametric foundation 51, assembly joints 32, persistent assembly/drawing settings 81, orthographic drawings 98 assertions. |
+| Source audit | PASS (268 checks) | 131/131 public core operations are referenced by regression coverage. Textual audit only. |
+| Live UI | NOT RUN | Explicitly excluded by the user for this work session. |
+| Scope | PARTIAL | Checklist defaults persist, but the checks remain structural/content screens and do not certify ISO/ASME clauses, tolerances, datums, or GD&T. |
+
+See [`STANDARDS_CHECKS.md`](STANDARDS_CHECKS.md) and [`local_verification.json`](local_verification.json).
+
+## CADWorkbench v1.40 persistent drawing BOM balloons (2026-10-28)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | Built `CADWorkbench.exe` and `cadcore_tests.exe` with Visual Studio 18 2026, Qt 6.11.2, OCCT 8.0.1, and vcpkg. |
+| Full Windows CTest | PASS (50/50) | Windows x64 Release suite completed in 43.22 seconds. |
+| STEP XDE assembly import | PASS (28 assertions) | Names, nested assembly paths, repeated component definitions, distinct occurrence IDs, placements, solid volume, atomic undo, and malformed input. |
+| One-bend sheet-metal flat pattern | PASS (14 assertions) | Bend allowance/deduction, outline and bend-line metadata, bounds, input rejection, and SVG file output. |
+| BOM and standards/readiness checks | PASS (69 assertions) | BOM quality rules, configurable checklist profiles, exported-SVG structural screening, and non-certification scope reporting. |
+| Persistent assembly/drawing settings | PASS (81 assertions) | Source set persistence, BOM quantity linking, balloon IDs/source body IDs/positions, schema-v11 migration, and invalid source/placement rejection. |
+| Orthographic drawings | PASS (98 assertions) | Source compound and aggregate revision, source-scoped BOM rows, balloon item number and body identity in SVG, source-set mismatch/staleness, and existing projections/annotations. |
+| Parametric foundation / joints | PASS (51 / 32 assertions) | Rebuilt and reran the focused parameter/history and rigid/revolute joint suites. |
+| Source audit | PASS (263 checks) | 130/130 public core operations are referenced by regression coverage. Textual audit only. |
+| Live UI | NOT RUN | Explicitly excluded by the user for this work session. |
+| Scope | PARTIAL | Balloons are attached to source-body BOM identities and exported as SVG snapshots; sheets do not update automatically, and there are no feature-attached dimensions, independent detail views, PDF export, or formal standards certification. |
+
+See [`ORTHOGRAPHIC_DRAWINGS.md`](ORTHOGRAPHIC_DRAWINGS.md), [`PERSISTENT_ASSEMBLIES.md`](PERSISTENT_ASSEMBLIES.md), and [`local_verification.json`](local_verification.json).
+
+## CADWorkbench v1.39 parametric hole, assembly joints, and multi-body drawing sources (2026-10-28)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | Built `CADWorkbench.exe` and `cadcore_tests.exe` with Visual Studio 18 2026, Qt 6.11.2, OCCT 8.0.1, and vcpkg. Build emitted existing OCCT/Qt deprecation warnings and a Qt translations notice; no build errors. |
+| Full Windows CTest | PASS (50/50) | Windows x64 Release suite completed in 44.07 seconds after source-scoped drawing BOM coverage was added. |
+| Parametric foundation | PASS (51 assertions) | Rectangle/extrusion plus circular sketch and through-hole; named diameter/center parameters, rebuild, persistence, containment validation, stale-history handling, undo/redo. |
+| Persistent assemblies | PASS (75 assertions) | Existing occurrence/BOM workflows plus scene joint persistence, malformed relationship handling, and grouping selected repeated occurrences in a source-scoped BOM. |
+| Rigid/revolute joints | PASS (32 assertions) | Relationship validation, cycle/self/duplicate rejection, axis/limit handling, revolute drive and undo/redo. |
+| Orthographic drawing | PASS (97 assertions) | Composite two-body source shape, volume/bounds, aggregate geometry token, source-ID export metadata, current/mismatched/stale multi-body comparisons, and source-scoped BOM validation. |
+| Source audit | PASS (257 checks) | 130/130 public core operations are referenced by regression coverage. Audit is textual and complements, but does not replace, the build and runtime suite. |
+| Live UI | NOT RUN | Explicitly excluded by the user for this work session. |
+| Scope | PARTIAL | Parametrics are a focused four-step template; assembly joints are a bounded relationship/drive implementation, not a general solver; multi-body drawing exports do not auto-update, though their selected source set and aggregate revision can be checked together. |
+
+See [`PARAMETRIC_FOUNDATION.md`](PARAMETRIC_FOUNDATION.md), [`PERSISTENT_ASSEMBLIES.md`](PERSISTENT_ASSEMBLIES.md), and [`ORTHOGRAPHIC_DRAWINGS.md`](ORTHOGRAPHIC_DRAWINGS.md).
+
+## CADWorkbench v1.36 linked BOM unit mass in drawings (2026-10-28)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | `CADWorkbench.exe` and `cadcore_tests.exe` built with Visual Studio 18 after the v1.36 mass-column change. |
+| Orthographic drawing regression | PASS | Checks the `MASS (kg)` header, `data-bom-unit-mass-kg`, and rendered nonzero fixture value `0.024`. |
+| Full CTest | PASS (49/49) | Windows x64 Release suite; 43.74 seconds. |
+| Source audit | PASS (250 checks) | All 126 public core operations are referenced by regression coverage. |
+| Live UI export | PASS | v1.36 opened the saved two-occurrence scene and exported `Testing/v1_36_linked_parts_mass.svg`; the linked table shows `MASS (kg)` and unit mass `0` because no material density is assigned. |
+| Scope | PARTIAL | Mass is taken from the existing BOM mass-property calculation; no density is inferred. Drawings remain one selected body per sheet and SVG exports are snapshots. |
+
+## CADWorkbench v1.35 BOM-linked drawing parts list (2026-10-28)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | `CADWorkbench.exe` and `cadcore_tests.exe` built with Visual Studio 18. |
+| Full CTest | PASS (49/49) | Windows x64 Release suite; all geometry, persistence, BOM, STEP, parametric, sheet-metal, and drawing targets passed. |
+| Source audit | PASS (250 checks) | All 126 public core operations are referenced by regression coverage. |
+| Live UI setup | PASS | Created a 40 × 30 × 20 mm box, selected it, enabled the linked parts list, saved the default 12 × 12 mm placement; editor confirmation and selection requirement observed. |
+| Live UI export | PASS | Exported `Testing/v1_35_linked_parts_list.svg`, then created a reusable component and second occurrence 50 mm away. `Testing/v1_35_bom_grouped_occurrences.svg` is well-formed SVG and shows one grouped BOM row, quantity 2, and the shared component-definition ID. |
+| Scene save/reopen | PASS | Saved and reopened `Testing/v1_35_linked_bom_ui.cadscene`; scene schema v11 retained two fixed occurrences sharing one definition, enabled table state, stable table ID, and 12 × 12 mm placement. UI editor reopened with the checkbox checked. |
+| Schema migration | PASS | Schema-v10 regression preserves saved drawing dimension records and adds a hidden default linked-parts-list record. |
+| Scope | PARTIAL | SVG is an export snapshot, one selected body per sheet, up to 18 BOM rows; no drawing balloons or live refresh of existing exports. |
+
+## CADWorkbench v1.34 persistent overall drawing dimensions (2026-10-27)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | `CADWorkbench.exe` and `cadcore_tests.exe` built successfully with Visual Studio 18. |
+| Persistent drawing setup | PASS (68 assertions) | Stable X/Y/Z dimension IDs and offsets, save/reopen, schema-v10 writing, schema compatibility, undo/redo, and invalid offset rejection. |
+| Orthographic drawing | PASS (78 assertions) | SVG includes the saved dimension ID and offset alongside stable sheet/view/note metadata; XML and existing drawing checks pass. |
+| Full CTest | PASS (49/49) | Windows x64 Release tests, 42.24 seconds. |
+| Source audit | PASS (250 checks) | All 126 public core operations are referenced by regression coverage. Textual audit; not a substitute for compilation/runtime tests. |
+| Live UI | NOT RUN | The dimensions menu/ribbon editor and generated SVG need a desktop click-through. |
+| Scope | PARTIAL | Persistent dimensions represent overall bounding-envelope extents. They are not attached to selected edges/features; no feature dimensioning, tolerances, datums/GD&T, multi-part sheets, balloons, linked BOM, detail views, PDF, or live SVG refresh. |
+
+## CADWorkbench v1.32 persistent placed-view drawing sheets (2026-10-27)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Source implementation | ADDED | Scene schema v9 stores a stable drawing-sheet ID, linked source geometry token, four stable projected-view IDs, and editable paper-space view centers. |
+| Layout UI | ADDED | **File → Arrange saved drawing views...** edits top/front/right/auxiliary view centers and explicitly refreshes a stale source link on save. |
+| SVG output | ADDED | Export uses saved placements and includes the sheet ID and stable per-view IDs. SVG remains a snapshot; model edits do not rewrite existing files. |
+| Windows Release build | PASS | v1.32 app and tests built successfully. |
+| Automated tests | PASS (49/49) | Full Windows Release suite passed at v1.32 and passed again after the v1.34 schema/dimension changes. |
+| Source audit | NOT RUN | The v1.32 implementation preceded the final source-audit run. |
+| Live UI | NOT RUN | Layout editor and exported placement IDs need a future desktop verification pass. |
+| Scope | PARTIAL | Per-body, single-part sheets with shared auto-fit scale. Feature-linked dimensions, linked BOM tables, balloons, detail views, PDF, and live-refresh of existing SVG files remain future work. |
+
+## CADWorkbench v1.31 parametric/manufacturing/drawing checks (2026-10-27)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | `CADWorkbench.exe` and `cadcore_tests.exe` rebuilt successfully with Visual Studio 18; app version v1.31.0 |
+| STEP XDE assembly round-trip | PASS (28 assertions) | Source component names, nested hierarchy, repeated definition identity, distinct occurrences, placement, solid volume, and atomic undo |
+| Parametric foundation | PASS (33 assertions) | Named dimensions, constrained XY rectangle, editable extrusion, undo/redo, schema-v8 geometry identity, stale-history safety, and corrupt mismatch rejection |
+| One-bend sheet-metal flat pattern | PASS (14 assertions) | Bend allowance/deduction, developed length, SVG metadata, input bounds, and file output |
+| Drawing checklist/source comparison | PASS (72 assertions) | Configurable required fields/conventions; malformed SVG, current/stale/wrong-body/missing source identity |
+| Persistent assemblies and BOM/standards | PASS (59 / 69 assertions) | Fixed occurrence persistence and BOM links; metadata, grouping, and bounded ISO/ASME content checks |
+| Full Windows CTest | PASS (49/49) | `cadcore_geometry_and_persistence` and all focused regressions passed in Release; 41.94 seconds |
+| Source audit | PASS (250 checks) | All 126 public core operations referenced by regression |
+| Live UI | NOT RUN | This update was verified with Windows Release build, automated regressions, and source audit only. Earlier v1.30 UI results remain historical and do not verify the new v1.31 UI flows. |
+| Scope | PARTIAL | One rectangle/extrusion parametric chain; one-bend calculator/SVG (not folded solid/DXF); STEP preservation is limited to structures represented in STEP; drawing requirements apply per review and source comparison identifies snapshots, not live-updating sheets. Formal ISO/ASME conformity and tolerance tables are not claimed. |
+
+See [`PARAMETRIC_FOUNDATION.md`](PARAMETRIC_FOUNDATION.md), [`SHEET_METAL.md`](SHEET_METAL.md), [`PERSISTENT_ASSEMBLIES.md`](PERSISTENT_ASSEMBLIES.md), [`ORTHOGRAPHIC_DRAWINGS.md`](ORTHOGRAPHIC_DRAWINGS.md), and [`STANDARDS_CHECKS.md`](STANDARDS_CHECKS.md).
+
+## CADWorkbench v1.30 persistent drawing setup and SVG source annotations (2026-10-27)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | `CADWorkbench.exe` and `cadcore_tests.exe` built with schema-v7 settings; app version v1.30.0 |
+| Assembly/drawing setup regression | PASS (59 assertions) | Occurrence identity/translation, BOM/parts list, v5/v6 migration, v7 persistence, drawing setup undo/redo and validation, malformed-load rejection and reopen |
+| SVG drawing regression | PASS (66 assertions) | Source body/revision metadata; selectable view, dimension, and note groups |
+| Full CTest | PASS (46/46) | Windows x64 Release suite |
+| Source audit | PASS (250 checks) | All 123 public core operations referenced by regression |
+| Live UI | PASS (focused workflow) | v1.30.0: converted a 40 × 30 × 20 mm box to a component and inserted a fixed occurrence at X=50 mm; Properties showed X bounds 50–90 mm; BOM showed Qty 2 / 48,000 mm³ total; parts list showed both occurrences. Exported A4 SVG with TOP/FRONT/RIGHT/SECTION A–A groups, source body/geometry IDs, and selectable dimensions/notes. Reopened export setup restored section, note, and title-block values. CAD scene save/reopen was not exercised in the UI. |
+| Scope | PARTIAL | Settings persist but no scene-based placed views, live model update, balloon/parts-list drawing entities, rigid/revolute joints, or PDF export |
+
+## CADWorkbench v1.29 persistent component occurrences and SVG source identity (2026-10-27)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | `CADWorkbench.exe` and `cadcore_tests.exe` built in `build_materials_round/Release`; app version v1.29.0 |
+| Assembly focused regression | PASS (42 assertions) | Component identity, fixed XYZ placement, BOM/parts-list linkage, CSV, undo/redo, geometry-divergence grouping, schema-v6 save/reopen, v5 migration, and duplicate-ID rejection |
+| Drawing focused regression | PASS (66 assertions) | Existing projection/dimension checks plus source body/token metadata, selectable view and annotation groups |
+| Full CTest | PASS (46/46) | Windows x64 Release suite including `cadcore_persistent_assemblies` |
+| Source audit | PASS (245 checks) | All 122 public core operations referenced by regression |
+| Live UI | PENDING | Assembly command workflows and generated SVG metadata reserved for final UI window |
+| Scope | PARTIAL | Translation-only placements; no rigid/revolute joints or persistent drawing sheet / live model update |
+
+See [`PERSISTENT_ASSEMBLIES.md`](PERSISTENT_ASSEMBLIES.md) and [`ORTHOGRAPHIC_DRAWINGS.md`](ORTHOGRAPHIC_DRAWINGS.md).
+
+## CADWorkbench v1.28 planar face relationship measurement (2026-10-27)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | Application and regression target rebuilt; version v1.28.0 |
+| Focused regression | PASS (50 assertions) | Face-normal angle, parallel-plane gap, invalid/stale references, curved-face rejection, and read-only behavior |
+| Full CTest | PENDING | Run after cylindrical-face measurement was added |
+| Source audit | PASS (232 checks) | All 120 public core operations referenced by regression |
+| Live UI | PENDING | Menu/ribbon control and two-face measurement reserved for the UI pass |
+
+See [`FACE_ANGLE.md`](FACE_ANGLE.md) for operation details and scope.
+
+## CADWorkbench v1.28 cylindrical face measurement (2026-10-27)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | Application and regression target rebuilt; version v1.28.0 |
+| Focused regression | PASS (19 assertions) | Cylindrical side radius/diameter/axis, planar cap rejection, and stale-reference handling |
+| Full CTest | PENDING | Run after this update |
+| Source audit | PASS (232 checks) | All 120 public core operations referenced by regression |
+| Live UI | PENDING | Menu/ribbon control and cylinder-face result reserved for the UI pass |
+
+See [`CYLINDRICAL_FACE.md`](CYLINDRICAL_FACE.md) for operation details and scope.
+
 ## Distance between selected vertices (2026-10-26)
 
 | Check | Result | Evidence |
@@ -15,7 +269,7 @@ See `VERTEX_DISTANCE.md` for behavior and the live UI limit.
 | Check | Result | Evidence |
 |---|---|---|
 | Windows x64 Release build | PASS | Updated `CADWorkbench.exe` and `cadcore_tests.exe` built in `build_resume/Release` |
-| Focused core regression | PASS (57 assertions) | Box vertex coordinates, bounds and corners; invalid/missing/stale references; null output |
+| Focused core regression | PASS (59 assertions) | Box vertex coordinates, bounds and corners; invalid/missing/stale references; null output |
 | Full CTest | PASS (37/37) | Includes `cadcore_vertex_coordinates` |
 | Source audit | PASS | 136 checks; all 112 public `SceneDocument` operations referenced by regression |
 | Live UI | PASS | Picked box corner reported X 0.000, Y 0.000, Z 20.000 mm |
@@ -746,3 +1000,16 @@ See [`ORTHOGRAPHIC_DRAWINGS.md`](ORTHOGRAPHIC_DRAWINGS.md) and [`STANDARDS_CHECK
 | Live scene persistence | PASS | Saved and inspected `purchased_item_ui_test.cadscene`; schema v5 retained purchasing and assembly-path fields |
 | Full CTest and source audit | PASS | 43/43 Windows Release tests; 209 static checks and 118/118 public core operations referenced |
 | Scope | LIMITED | No supplier catalog, prices, inventory, purchase orders, ERP links, or recursive assembly rollups |
+## CADWorkbench v1.33 persistent drawing note annotations (2026-10-27)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Windows x64 Release build | PASS | `CADWorkbench.exe` and `cadcore_tests.exe` built successfully after adding persistent note records and editor. |
+| Persistent drawing regression | PASS (63 assertions) | Sheet/view IDs, saved centers, note text/IDs/positions, save/reopen, undo/redo, and malformed placement/duplicate-ID rejection. |
+| Orthographic drawing regression | PASS (77 assertions) | SVG exports stable sheet/view/note IDs, applies saved centers, formats paper coordinates, and XML-escapes note text. |
+| Full Windows CTest | PASS (49/49) | Release suite completed in 48.70 seconds. |
+| Source audit | PASS (250 checks) | All 126 public core operations are referenced by regression coverage. |
+| Live UI | NOT RUN | Note editor/ribbon and scene save/reopen remain to be checked in the desktop app. |
+| Scope | PARTIAL | Notes and view positions are persistent; dimensions remain generated SVG annotations, sheets remain single-body, and no balloon, linked BOM table, detail view, PDF, or live SVG refresh is included. |
+
+## CADWorkbench v1.32 persistent placed-view drawing sheets (2026-10-27)

@@ -140,17 +140,36 @@ QVector<PartsListRow> SceneDocument::partsList(QString* error) const {
             }
             mass = p.massKg;
         }
-        rows.append({static_cast<int>(rows.size()) + 1, part->id, part->name, part->partNumber, part->description,
-                     part->revision, part->materialName, 1, g.volume, mass, part->assemblyPath,
-                     part->procurementType, part->supplier, part->supplierPartNumber});
+        PartsListRow row{static_cast<int>(rows.size()) + 1, part->id, part->name, part->partNumber, part->description,
+                         part->revision, part->materialName, 1, g.volume, mass, part->assemblyPath,
+                         part->procurementType, part->supplier, part->supplierPartNumber};
+        row.componentDefinitionId=part->componentDefinitionId;row.componentName=part->componentName;row.occurrenceId=part->occurrenceId;
+        row.placementX=part->placementX;row.placementY=part->placementY;row.placementZ=part->placementZ;
+        rows.append(std::move(row));
     }
     return rows;
 }
 
 QVector<BillOfMaterialsRow> SceneDocument::billOfMaterials(QString* error) const {
+    if(parts_.isEmpty())return {};
+    QStringList allBodyIds;allBodyIds.reserve(parts_.size());
+    for(const Part& part:parts_)allBodyIds.append(part.id);
+    return billOfMaterials(allBodyIds,error);
+}
+
+QVector<BillOfMaterialsRow> SceneDocument::billOfMaterials(const QStringList& bodyIds,QString* error) const {
+    if(bodyIds.isEmpty()||bodyIds.size()>50){if(error)*error="Choose between one and fifty bodies for a source-scoped BOM.";return {};}
+    QSet<QString> requestedIds;
+    for(const QString& id:bodyIds){
+        if(id.trimmed().isEmpty()||requestedIds.contains(id)||!find(id)){
+            if(error)*error="A source-scoped BOM requires distinct body IDs that exist in the current document.";
+            return {};
+        }
+        requestedIds.insert(id);
+    }
     QVector<const Part*> ordered;
-    ordered.reserve(parts_.size());
-    for (const Part& part : parts_) ordered.append(&part);
+    ordered.reserve(requestedIds.size());
+    for (const Part& part : parts_) if(requestedIds.contains(part.id))ordered.append(&part);
     std::stable_sort(ordered.begin(), ordered.end(), [](const Part* a, const Part* b) {
         const int pn = QString::compare(a->partNumber, b->partNumber, Qt::CaseInsensitive);
         if (pn != 0) return pn < 0;
@@ -175,7 +194,12 @@ QVector<BillOfMaterialsRow> SceneDocument::billOfMaterials(QString* error) const
             }
             massKg = mass.massKg;
         }
-        const QString group = source->partNumber.isEmpty()
+        const QString group = !source->componentDefinitionId.isEmpty()
+            ? QStringLiteral("COMP:%1|%2|%3|%4|%5|%6|%7|%8|%9|%10|%11")
+                .arg(source->componentDefinitionId, source->assemblyPath.toCaseFolded(), source->partNumber.toCaseFolded(), source->description.toCaseFolded(),
+                     source->revision.toCaseFolded(), source->materialName.toCaseFolded(), csvNumber(source->materialDensityKgPerM3), geometryKey(g),
+                     source->procurementType.toCaseFolded(), source->supplier.toCaseFolded(), source->supplierPartNumber.toCaseFolded())
+            : source->partNumber.isEmpty()
             ? QStringLiteral("BODY:%1").arg(source->id)
             : QStringLiteral("PN:%1|%2|%3|%4|%5|%6|%7|%8|%9|%10")
                 .arg(source->assemblyPath.toCaseFolded(), source->partNumber.toCaseFolded(), source->description.toCaseFolded(),
@@ -199,6 +223,9 @@ QVector<BillOfMaterialsRow> SceneDocument::billOfMaterials(QString* error) const
             row.procurementType = source->procurementType;
             row.supplier = source->supplier;
             row.supplierPartNumber = source->supplierPartNumber;
+            row.componentDefinitionId = source->componentDefinitionId;
+            row.componentName = source->componentName;
+            row.bodyIds.append(source->id);
             rowForKey.insert(group, rows.size());
             rows.append(row);
         } else {
@@ -206,6 +233,7 @@ QVector<BillOfMaterialsRow> SceneDocument::billOfMaterials(QString* error) const
             ++row.quantity;
             row.totalVolumeMm3 += g.volume;
             row.totalMassKg += massKg;
+            row.bodyIds.append(source->id);
         }
     }
     return rows;
@@ -219,14 +247,15 @@ bool SceneDocument::exportBillOfMaterialsCsv(const QString& path, QString* error
     QByteArray bytes;
     QTextStream out(&bytes, QIODevice::WriteOnly);
     out.setLocale(QLocale::c());
-    out << "Item,Part number,Description,Revision,Material,Quantity,Unit volume (mm^3),Total volume (mm^3),Unit mass (kg),Total mass (kg),Assembly path,Procurement type,Supplier,Supplier part number\r\n";
+    out << "Item,Part number,Description,Revision,Material,Quantity,Unit volume (mm^3),Total volume (mm^3),Unit mass (kg),Total mass (kg),Assembly path,Procurement type,Supplier,Supplier part number,Component definition ID,Component name\r\n";
     for (const auto& row : rows) {
         out << row.itemNumber << ',' << csvField(row.partNumber) << ',' << csvField(row.description) << ','
             << csvField(row.revision) << ',' << csvField(row.materialName) << ',' << row.quantity << ','
             << csvNumber(row.unitVolumeMm3) << ',' << csvNumber(row.totalVolumeMm3) << ','
             << (row.unitMassKg > 0.0 ? csvNumber(row.unitMassKg) : QString()) << ','
             << (row.totalMassKg > 0.0 ? csvNumber(row.totalMassKg) : QString()) << ',' << csvField(row.assemblyPath) << ','
-            << csvField(row.procurementType) << ',' << csvField(row.supplier) << ',' << csvField(row.supplierPartNumber) << "\r\n";
+            << csvField(row.procurementType) << ',' << csvField(row.supplier) << ',' << csvField(row.supplierPartNumber) << ','
+            << csvField(row.componentDefinitionId) << ',' << csvField(row.componentName) << "\r\n";
     }
     out.flush();
     if (out.status() != QTextStream::Ok) { if (error) *error = "Could not format the BOM CSV."; return false; }
@@ -240,13 +269,15 @@ bool SceneDocument::exportPartsListCsv(const QString& path, QString* error) cons
     QByteArray bytes;
     QTextStream out(&bytes, QIODevice::WriteOnly);
     out.setLocale(QLocale::c());
-    out << "Item,Body ID,Body name,Part number,Description,Revision,Material,Quantity,Volume (mm^3),Mass (kg),Assembly path,Procurement type,Supplier,Supplier part number\r\n";
+    out << "Item,Body ID,Body name,Part number,Description,Revision,Material,Quantity,Volume (mm^3),Mass (kg),Assembly path,Procurement type,Supplier,Supplier part number,Component definition ID,Component name,Occurrence ID,Translation offset X (mm),Translation offset Y (mm),Translation offset Z (mm)\r\n";
     for (const auto& row : rows) {
         out << row.itemNumber << ',' << csvField(row.bodyId) << ',' << csvField(row.bodyName) << ','
             << csvField(row.partNumber) << ',' << csvField(row.description) << ',' << csvField(row.revision) << ','
             << csvField(row.materialName) << ",1," << csvNumber(row.volumeMm3) << ','
             << (row.massKg > 0.0 ? csvNumber(row.massKg) : QString()) << ',' << csvField(row.assemblyPath) << ','
-            << csvField(row.procurementType) << ',' << csvField(row.supplier) << ',' << csvField(row.supplierPartNumber) << "\r\n";
+            << csvField(row.procurementType) << ',' << csvField(row.supplier) << ',' << csvField(row.supplierPartNumber) << ','
+            << csvField(row.componentDefinitionId) << ',' << csvField(row.componentName) << ',' << csvField(row.occurrenceId) << ','
+            << csvNumber(row.placementX) << ',' << csvNumber(row.placementY) << ',' << csvNumber(row.placementZ) << "\r\n";
     }
     out.flush();
     if (out.status() != QTextStream::Ok) { if (error) *error = "Could not format the parts-list CSV."; return false; }
@@ -300,13 +331,48 @@ StandardsCheckReport SceneDocument::checkStandards(StandardsProfile profile) con
             if (part.supplierPartNumber.isEmpty()) add(FindingSeverity::Warning, "SUPPLIER_PART_NUMBER_MISSING", part.id,
                                                        QStringLiteral("Purchased item '%1' has no supplier part number.").arg(part.name));
         }
+        if(profile!=StandardsProfile::BomData&&
+           (!drawingReadinessPolicy_.requiredTitleBlockFields.isEmpty()||!drawingReadinessPolicy_.requiredAnnotationConventions.isEmpty())){
+            if(!part.hasDrawingSettings){
+                add(FindingSeverity::Warning,"DRAWING_SHEET_MISSING",part.id,
+                    QStringLiteral("Body '%1' has no saved drawing sheet to check against the project's configured drawing checklist.").arg(part.name));
+            }else{
+                const DrawingSheetSettings& sheet=part.drawingSettings;
+                const auto requireField=[&](const QString& key,const QString& value){
+                    if(drawingReadinessPolicy_.requiredTitleBlockFields.contains(key)&&value.trimmed().isEmpty())
+                        add(FindingSeverity::Warning,"DRAWING_FIELD_MISSING",part.id,
+                            QStringLiteral("Required project drawing field '%1' is empty on sheet '%2'.").arg(key,sheet.sheetId));
+                };
+                requireField("drawing_number",sheet.drawingNumber.isEmpty()?part.partNumber:sheet.drawingNumber);
+                requireField("description",part.description);
+                requireField("part_number",part.partNumber);
+                requireField("revision",sheet.revision.isEmpty()?part.revision:sheet.revision);
+                requireField("drawn_by",sheet.drawnBy);requireField("checked_by",sheet.checkedBy);
+                requireField("issue_date",sheet.issueDate);requireField("material",part.materialName);
+                QSet<QString> dimensionAxes;for(const DrawingDimensionAnnotation& dimension:sheet.dimensionAnnotations)dimensionAxes.insert(dimension.axis);
+                const auto requireConvention=[&](const QString& key,bool present){
+                    if(drawingReadinessPolicy_.requiredAnnotationConventions.contains(key)&&!present)
+                        add(FindingSeverity::Warning,"DRAWING_CONVENTION_MISSING",part.id,
+                            QStringLiteral("Required project drawing convention '%1' is missing on sheet '%2'.").arg(key,sheet.sheetId));
+                };
+                requireConvention("envelope_dimensions",dimensionAxes.contains("X")&&dimensionAxes.contains("Y")&&dimensionAxes.contains("Z"));
+                requireConvention("projection_symbol",sheet.projection=="First-angle"||sheet.projection=="Third-angle");
+                requireConvention("auxiliary_view",sheet.auxiliaryView=="Isometric"||sheet.auxiliaryView=="Section A-A");
+                requireConvention("general_notes",!sheet.noteAnnotations.isEmpty()||!sheet.generalNotes.isEmpty());
+                const DrawingSheetSourceStatus sourceStatus=drawingSheetSourceStatus(part.id);
+                if(sourceStatus.state==DrawingSourceState::Stale)
+                    add(FindingSeverity::Warning,"DRAWING_SOURCE_STALE",part.id,"The saved drawing source geometry revision is stale; refresh the link and export a new sheet.");
+                else if(sourceStatus.state==DrawingSourceState::MissingBodies)
+                    add(FindingSeverity::Warning,"DRAWING_SOURCE_MISSING",part.id,"One or more saved drawing source bodies are missing.");
+            }
+        }
     }
     if (profile == StandardsProfile::BomData) {
         add(FindingSeverity::Info, "CHECK_SCOPE", {}, "Checks BOM fields, part-number consistency, material metadata, and solid validity; it is not a third-party standards certification.");
     } else if (profile == StandardsProfile::IsoDrawingReadiness) {
-        add(FindingSeverity::Info, "CHECK_SCOPE", {}, "ISO drawing readiness only: model units are millimetres and BOM fields/solids are checked. Exported drawing sheets are not inspected; title-block completeness, projection symbols, dimension presentation, and ISO tolerance rules are not verified.");
+        add(FindingSeverity::Info, "CHECK_SCOPE", {}, "ISO project readiness checks BOM fields, solid validity, and configured fields/conventions on saved sheets. Exported SVG content and formal ISO clauses/tolerances are not certified or fully inspected.");
     } else {
-        add(FindingSeverity::Info, "CHECK_SCOPE", {}, "ASME drawing readiness only: BOM fields and solid validity are checked. Exported drawing sheets are not inspected; Y14 title-block, dimensioning, tolerancing, and GD&T rules are not verified.");
+        add(FindingSeverity::Info, "CHECK_SCOPE", {}, "ASME project readiness checks BOM fields, solid validity, and configured fields/conventions on saved sheets. Exported SVG content and formal Y14 dimensioning, tolerancing, and GD&T rules are not certified or fully inspected.");
     }
     return report;
 }
