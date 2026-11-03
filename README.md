@@ -1,263 +1,48 @@
 # CADWorkbench
 
-Current source package: **v1.48.0**. See [`docs/QA_MATRIX.md`](docs/QA_MATRIX.md) for Windows build and regression status.
+CADWorkbench is a native Windows CAD application written in C++20 with Qt 6 and Open CASCADE Technology. This repository contains the **v1.55.0 source snapshot with the latest working-tree additions**. Start with [CONTINUE_HERE.md](CONTINUE_HERE.md) if you are resuming development in another chat.
 
-CADWorkbench is a native Windows 3D CAD application built with C++20, Qt 6, and Open CASCADE Technology (OCCT). It focuses on direct solid modeling and dimensioned engineering templates.
+## What works in this source snapshot
 
-## Current capabilities
+- Direct solid modeling: primitives, sketches, oriented extrusions, revolve, sweeps, lofts, holes, patterns, Boolean operations, blends, shelling, draft, and transforms, plus dimensioned engineering templates.
+- Constrained 2D sketches with points, segments, circles, geometric and dimensional constraints, circular cutouts, persistent polygon extrusion definitions, and edits that rebuild the solid. Newer constraints include symmetry, circle tangency, and point on a finite segment.
+- A focused parametric rectangle/extrusion/hole workflow with named parameters, linked dimensions, linear through/blind-hole patterns, all-edge chamfer/fillet, optional-operation suppression, and one-step batch suppression. This is a bounded feature chain.
+- Persistent reusable component occurrences with 3-axis position/orientation, rigid/revolute/prismatic joints, motion tracks, sampled interference scans, and BOM-linked metadata.
+- Saved model-linked drawing sheets with view placements, details, sections, notes, parts lists, balloons, and selected-edge dimensions. Export SVG, PDF, or editable DXF; exported files are snapshots.
+- Editable faceted folded sheet-metal bodies, flat-pattern DXF with individual bend K factors and optional end reliefs, and bend-table CSV.
+- STEP assembly and IGES exchange, STL/OBJ mesh import and repair, surface bodies, material assignments, BOM/parts-list exports, configurable drawing completeness checks, and named local revision snapshots.
 
-- Create and inspect solids, profiles, and dimensioned component templates.
-- Extrude sketch profiles on XY, XZ, YZ, or a user-defined 3D plane with local U/V positioning, signed plane offset W, reverse/symmetric directions, and through-all cuts.
-- Revolve a rectangular profile around world or arbitrary 3D axes with an editable axis origin, direction, and sweep angle.
-- Edit models with Boolean operations, holes, patterns, mirror, single- or multi-face shell, split, draft, fillet, chamfer, and transforms.
-- Scale selected bodies independently along X, Y, and Z, or use uniform scaling.
-- Pattern selected bodies around an arbitrary 3D axis with an editable origin, direction, instance count, and sweep angle.
-- Inspect the minimum clearance between two selected bodies and read a closest-point pair.
-- Measure the shared solid volume and centroid of two selected bodies to inspect geometric interference.
-- Inspect selected face area, selected edge length, and picked vertex coordinates in the viewport.
-- Measure the oriented angle between two planar faces and the separation between their planes when parallel. See [`docs/FACE_ANGLE.md`](docs/FACE_ANGLE.md).
-- Measure the radius, diameter, and axis of a selected cylindrical face. See [`docs/CYLINDRICAL_FACE.md`](docs/CYLINDRICAL_FACE.md).
-- Assign persistent material and density presets to bodies; mass-property inspection uses the assigned density by default.
-- Measure straight-line distance between two vertex references; the core test passes, while numeric live UI verification awaits a Ctrl-click capable desktop input path.
-- Navigate with mouse orbit, pan, zoom, and standard camera views.
-- Save and reopen native `.cadscene` documents; use undo and redo.
-- Import/export STEP assemblies and IGES solids; import closed STL and OBJ meshes as faceted solids and export STL. See [`docs/NEUTRAL_FILE_EXCHANGE.md`](docs/NEUTRAL_FILE_EXCHANGE.md).
-- Export a CSV body schedule with stable body IDs, names, visibility, volume, area, extents, and center coordinates.
-- Maintain persistent part numbers, descriptions, revisions, purchased/manufactured status, supplier details, and assembly paths; view grouped BOM quantities, per-body parts lists, and a derived assembly tree with quantity/volume/mass roll-ups; export BOM and parts lists as CSV. See [`docs/BOM_PARTS_LIST.md`](docs/BOM_PARTS_LIST.md).
-- Store reusable component identities and fixed XYZ-offset occurrences in the scene; synchronize edited source geometry to its occurrences explicitly. Rigid, revolute, and prismatic parent-child joints persist; combined poses solve parent-first, and saved motion tracks interpolate angle/linear keyframes. STEP import/export uses OCCT XDE to retain names, nested assembly paths, reusable definitions, occurrence IDs, and placements where the STEP file provides them. Closed manifold STL meshes import as faceted solids. Drawing sheets store source IDs and aggregate revisions, projected views, positioned notes, overall dimensions, a source-scoped BOM table, and persistent BOM balloons with source/item identities. See [`docs/PERSISTENT_ASSEMBLIES.md`](docs/PERSISTENT_ASSEMBLIES.md), [`docs/STL_MESH_IMPORT.md`](docs/STL_MESH_IMPORT.md), and [`docs/ORTHOGRAPHIC_DRAWINGS.md`](docs/ORTHOGRAPHIC_DRAWINGS.md).
-- Create a focused parametric XY rectangle, base extrusion, and through-hole, then add an editable X- or Y-direction linear hole pattern. Named dimensions, constraints, and feature history persist and rebuild atomically with undo/redo. See [`docs/PARAMETRIC_FOUNDATION.md`](docs/PARAMETRIC_FOUNDATION.md).
-- Develop one-bend SVG and two-to-fifty-bend DXF flat patterns from per-bend rules; multi-bend DXF supports optional rectangular end reliefs at each bend station. Folded sheet solids, springback, and tooling are not implemented. See [`docs/SHEET_METAL.md`](docs/SHEET_METAL.md).
-- Run BOM data-quality and ISO/ASME drawing-readiness checks, plus configurable required title-block fields and annotation conventions for each drawing review. Saved-sheet checks flag missing requirements and stale/missing model sources; a source link can be refreshed before re-export. SVG exports remain snapshots. These checks do not claim standards compliance. See [`docs/STANDARDS_CHECKS.md`](docs/STANDARDS_CHECKS.md).
-- Export an A4 or A3 landscape SVG drawing from one to fifty selected solids as a composite source, with selectable first-angle or third-angle layout, front/top/right views, an isometric or section view, visible/hidden edges, cylindrical centerlines and diameter callouts, notes, title-block metadata, overall envelope dimensions, and a linked parts list scoped to the selected source bodies. Source IDs and aggregate revisions can be checked against current bodies. Issue dates use `YYYY-MM-DD`; SVGs remain export snapshots. See [`docs/ORTHOGRAPHIC_DRAWINGS.md`](docs/ORTHOGRAPHIC_DRAWINGS.md).
-- Saved scene sheets retain source-body IDs, aggregate geometry revision, stable view identities, editable paper-space centers, up to four selectable circular detail views, and up to four separately positioned X/Y/Z axis-aligned section cuts. Exported SVG/PDF files remain snapshots and do not update automatically with model changes. Feature-linked dimensions, arbitrary section planes/paths, and automatic drawing refresh are not implemented.
-- Create a dimensioned Wing rib with an airfoil outline, spar opening, and two lightening holes.
-- Sweep circular or rectangular profiles along a smooth generated 3D path.
-- Sweep elliptical profiles along a smooth generated 3D path.
-- Create a solid helical sweep for coils and springs, with editable wire radius, coil radius, pitch, and turn count.
-- Create variable-pitch springs with separate start and end pitch values.
-- Create tapered springs with a coil radius that changes along the spring.
-- Create elliptical prisms and hollow elliptical tubes, plus circular and rectangle-to-circle loft transitions.
-- Create hollow offset reducers from lofted inner and outer circular sections.
-- Loft two offset elliptical sections into a tapered or eccentric solid.
-- Pattern a body along any normalized 3D direction vector, with one-step undo/redo.
-- Cut repeated through-all or blind holes around a bolt circle in one validated, undoable operation.
-- Cut a rotated dovetail groove with separately controlled mouth and undercut widths, depth, and length.
-- Cut a straight or rotated T-slot groove with independent neck, undercut, depth, and length controls.
-- Cut a straight or rotated rounded slot with semicircular ends, adjustable width, overall length, and depth.
-- Cut a rotated keyhole slot with a circular head, narrower throat, and adjustable depth.
-- Cut a linear array of rounded slots in one validated, undoable operation.
-- Cut circular bolt-circle arrays of countersunk through or blind holes with an editable included angle.
-- Cut circular bolt-circle arrays of stepped counterbore holes.
-- Cut linear arrays of through or blind counterbores along an editable 2D spacing vector.
-- Cut linear arrays of through or blind countersinks with adjustable included angle.
-- Cut a linear array of keyhole slots with adjustable head and throat dimensions.
-
-## BOM, standards, and drawing status (v1.43)
-
-| Area | Implemented and live-checked | Still missing |
-|---|---|---|
-| BOM | Persistent part and purchasing fields, supplier grouping, BOM quality findings, CSV export, and schema-v5 storage; UI editing, reporting, save/reopen, and checks exercised. | Pricing, inventory, purchase orders, and ERP/MRP integration. |
-| Parts list / assemblies | Per-body list, path-based assembly tree, reusable component IDs, fixed XYZ occurrences, persistent rigid/revolute parent-child joints, bounded revolute driving, BOM quantity links, scene persistence, and XDE STEP assembly import/export. v1.38 joint tests pass 32 focused assertions. | General six-degree transform editor, joint solver/assembly positioning, shared parametric definition edits, subassembly graph editor, motion/interference study. |
-| Parametric foundation | XY rectangle, extrusion and circular through-hole chain; named dimensions/location, recorded constraints, editable four-step history, undo/redo and stale-history protection; v1.37 focused regression passes 51 assertions. | General geometric constraint solver, expressions/equations, arbitrary sketch entities, downstream feature graph, arbitrary feature reorder/suppression. |
-| Sheet metal | One-bend outside-dimension flat-length calculation and SVG export with thickness, inside radius, bend angle, K-factor, and bend line; 14 focused assertions. | Folded sheet-solid modeling, multi-bend feature tree, corner reliefs, material libraries, DXF export, springback/tool compensation. |
-| Drawing checks / source link | Configurable per-project title-block/annotation checks and persistent sheets with view IDs/centers, notes, overall dimensions, source-scoped BOM parts list, BOM balloons, up to four projected detail views and four positioned X/Y/Z axis-aligned section cuts, composite source IDs and aggregate geometry revision; SVG and PDF export. | Automatically updating associative sheets, feature-linked dimensions, arbitrarily oriented section planes/paths, formal standards certification. |
-| ISO/ASME checks | BOM/model readiness checks and an exported-SVG content screen; required fields and annotation conventions can be saved as per-project checklist defaults. | Clause-level ISO compliance, ISO 7200 title-block certification, ASME Y14/GD&T, tolerance, and datum validation. |
-| 2D drawings | A4/A3 SVG and PDF export combines up to 50 selected bodies with first/third-angle layouts, orthographic and auxiliary views, title-block fields, source/revision identity, selectable groups, persistent view/note/overall-dimension/linked-parts-list/balloon/detail/section records, and geometry-linked cylindrical diameter callouts. The BOM table includes item, part number, description, quantity, material, per-unit mass, and revision. | User-attached dimensions on arbitrary edges/faces, automatic model-change updates, arbitrary section planes/paths, and formal standards validation. |
-
-The verification record and detailed limitations are in [`docs/local_verification.json`](docs/local_verification.json), [`docs/BOM_PARTS_LIST.md`](docs/BOM_PARTS_LIST.md), [`docs/STANDARDS_CHECKS.md`](docs/STANDARDS_CHECKS.md), and [`docs/ORTHOGRAPHIC_DRAWINGS.md`](docs/ORTHOGRAPHIC_DRAWINGS.md). These implemented areas are useful workflows, not full Fusion parity.
-
-Component templates are editable direct solids, not feature timelines or certified manufacturing designs. CADWorkbench does not claim feature parity with Fusion. See [`docs/FEATURE_GAP_COMPARISON.md`](docs/FEATURE_GAP_COMPARISON.md) for the current scope and known gaps.
-
-## Selected geometry inspection
-
-Use **Faces (inspection)** to measure one picked face area, **Edges (inspection)** to measure one picked edge length, or **Vertices (inspection)** to read a picked vertex's X/Y/Z coordinates. The Inspect ribbon includes a distance-between-two-vertices command. These queries are read-only and reject stale references after body geometry edits. Windows regressions cover all four tools. Live UI verified face area, edge length, and vertex coordinates; the distance command and its insufficient-selection guard are visible and verified, while the numeric two-pick result remains pending because the current desktop input cannot Ctrl-click a second subshape; manually Ctrl-click two opposite corners of the test box to verify the expected 53.852 mm diagonal. See [`docs/FACE_AREA.md`](docs/FACE_AREA.md), [`docs/EDGE_LENGTH.md`](docs/EDGE_LENGTH.md), [`docs/VERTEX_COORDINATES.md`](docs/VERTEX_COORDINATES.md), and [`docs/VERTEX_DISTANCE.md`](docs/VERTEX_DISTANCE.md).
-
-## STEP import
-
-Import STEP solids into the current scene as separate selectable bodies. Imports are validated transactionally and can be undone in one step. See [`docs/STEP_IMPORT.md`](docs/STEP_IMPORT.md) for coverage and current limitations.
-
-## Profile sweeps
-
-Create circular or rectangular solid sweeps with adjustable profile dimensions, path length, lateral offset, and vertical rise. Both commands are available in the Create menu and ribbon. See [`docs/PROFILE_SWEEP.md`](docs/PROFILE_SWEEP.md) for tested behavior and current limitations.
-
-## Helical sweep
-
-Create a spring-like solid from a circular profile using a specified wire radius, coil radius, pitch, and number of turns. The command is available from the Create menu and ribbon. Windows core regression, undo/redo, and live UI creation are verified; see [`docs/HELICAL_SWEEP.md`](docs/HELICAL_SWEEP.md).
-
-## Variable-pitch spring
-
-Create a helical solid whose pitch changes smoothly from the specified start pitch to end pitch. Windows Release build, focused geometry/history regression, full CTest, and live UI creation are verified; see [`docs/VARIABLE_PITCH_HELIX.md`](docs/VARIABLE_PITCH_HELIX.md).
-
-## Elliptical sweep and tapered spring
-
-Sweep an elliptical profile along the generated 3D path, or make a conical spring with independently set start and end coil radii. Windows Release build, core geometry/history regression, full CTest, and live UI creation are verified. See [`docs/ELLIPTICAL_SWEEP.md`](docs/ELLIPTICAL_SWEEP.md) and [`docs/TAPERED_HELIX.md`](docs/TAPERED_HELIX.md).
-
-## Five profile and transition tools
-
-Create elliptical prisms and tubes, circular lofts, rectangular-to-circular transitions, and hollow loft reducers. These direct solids are available from Create > Profiles. Windows build, 30 focused geometry/history assertions, full CTest, and live UI creation for all five tools are verified. See [`docs/FORM_FEATURES.md`](docs/FORM_FEATURES.md).
-
-## Elliptical loft
-
-Connect two elliptical sections with independently sized semi-axes, height, and top-section XY offset. Available from Create > Profiles in the menu and ribbon. The focused Windows geometry regression checks dimensions, bounds, volume, invalid-input rejection, and undo/redo. See [`docs/ELLIPTICAL_LOFT.md`](docs/ELLIPTICAL_LOFT.md) for current verification status.
-
-## Nonuniform scale
-
-Scale one selected body by independent X, Y, and Z multipliers about the world origin. The Modify menu and ribbon expose the operation; focused regression covers invalid factors, resulting bounds and volume, and undo/redo. See [`docs/NON_UNIFORM_SCALE.md`](docs/NON_UNIFORM_SCALE.md).
-
-## Custom-axis circular pattern
-
-Create rotated copies around an arbitrary 3D axis by entering an axis origin, direction, instance count, and total angle. The complete pattern is committed as one undoable operation. See [`docs/CUSTOM_AXIS_CIRCULAR_PATTERN.md`](docs/CUSTOM_AXIS_CIRCULAR_PATTERN.md) for validation and test status.
-
-## Oriented sketch extrusion
-
-Create supported sketch profiles on the XY, XZ, or YZ plane. Profile dimensions and origin use local U/V coordinates; signed W offsets the plane along its normal, and extrusion follows that normal or its reverse. Windows Release regression covers bounds and volume for every orientation, offset, and direction, plus topology, preview, commit, undo/redo, and invalid inputs. Live UI checks cover all three planes, including offset and reverse direction; XZ was also checked forward and reverse at W=0 and W=7 mm. See [`docs/ORIENTED_SKETCH_EXTRUSION.md`](docs/ORIENTED_SKETCH_EXTRUSION.md).
-
-Sketch cuts can now use a Through All end condition, computed against the target body's bounds in the chosen orientation. The focused Windows regression covers both directions on all three planes. A live UI Cut through a 40 × 30 × 20 mm body reduced volume by 500 mm³ and passed Undo. See [`docs/THROUGH_ALL_EXTRUSION_CUT.md`](docs/THROUGH_ALL_EXTRUSION_CUT.md).
-
-## Vector linear pattern
-
-Create equally spaced copies along any 3D direction vector. The operation normalizes the direction, preserves body appearance, validates instance count and spacing, and records the copies as one undoable change. Windows regression and live UI creation are verified. See [`docs/VECTOR_PATTERN.md`](docs/VECTOR_PATTERN.md).
-
-## Circular hole pattern
-
-Cut a bolt-circle array of through-all or blind holes from a selected body. The command validates each cut and commits the entire pattern as one undoable operation. Windows core regression and live UI geometry change are verified; see [`docs/CIRCULAR_HOLE_PATTERN.md`](docs/CIRCULAR_HOLE_PATTERN.md).
-
-## Dovetail groove
-
-Cut a rotated dovetail groove into a selected body with configurable position, mouth and undercut widths, depth, and length. The Windows geometry regression passed 28 assertions, and the live workflow verified the visible cut plus undo/redo. See [`docs/DOVETAIL_GROOVE.md`](docs/DOVETAIL_GROOVE.md).
-
-## T-slot groove
-
-Cut a straight or rotated T-slot into a selected body with independent neck width, undercut width and height, total depth, and length. The focused Windows regression passed 28 assertions. Live UI verification on a 40 × 30 × 20 mm box measured a reduction from 24,000 to 23,135.040 mm³ and verified undo/redo. See [`docs/T_SLOT_GROOVE.md`](docs/T_SLOT_GROOVE.md).
-
-## Rounded slot
-
-Cut an obround pocket into a selected body, with semicircular ends and adjustable width, overall length, depth, and rotation. Windows Release regression and live UI verification passed, including undo/redo. See [`docs/ROUNDED_SLOT.md`](docs/ROUNDED_SLOT.md).
-
-## Keyhole slot
-
-Cut a circular head joined to a narrower straight throat into a selected body, with adjustable location, head diameter, throat width and length, depth, and rotation. Windows regression and live UI verification passed, including undo/redo. See [`docs/KEYHOLE_SLOT.md`](docs/KEYHOLE_SLOT.md).
-
-## Linear rounded-slot pattern
-
-Cut 2–100 equally spaced obround pockets along a 2D direction, with configurable first center, orientation, width, overall length, and depth. The Windows regression passed 29 assertions; focused slot-pattern CTests passed 5/5. Live UI verification on a 40 × 30 × 20 mm box produced three visible slots, changed volume from 24,000 to 21,655.221 mm³, and verified undo/redo. See [`docs/ROUNDED_SLOT_PATTERN.md`](docs/ROUNDED_SLOT_PATTERN.md).
-
-## Circular countersink pattern
-
-Cut a bolt-circle array of countersunk holes with configurable drill and head diameters, included angle, through-all or blind depth, instance count, and arc. The Windows regression passed 28 assertions, including partial failure rollback and blind-pattern undo/redo. Live UI checks verified four 90° through countersinks and three blind countersinks over a 180° arc. See [`docs/CIRCULAR_COUNTERSINK_PATTERN.md`](docs/CIRCULAR_COUNTERSINK_PATTERN.md).
-
-## Circular counterbore pattern
-
-Cut a bolt-circle array of stepped holes with independent drill depth, counterbore diameter and counterbore depth, plus count and arc controls. Focused Windows regression passed 21 assertions. Live UI verification created four recesses and a separate three-hole blind partial-arc pattern, with undo/redo confirmed. See [`docs/CIRCULAR_COUNTERBORE_PATTERN.md`](docs/CIRCULAR_COUNTERBORE_PATTERN.md).
-
-## Linear counterbore pattern
-
-Cut 2–100 counterbored holes along a 2D spacing vector. Choose through-all or blind drill depth and independently set the counterbore diameter and depth. Windows Release focused regression passed 23 assertions, including rollback on a missed later cutter. Live UI showed three stepped seats on a 40 × 30 × 20 mm box and verified undo/redo. See [`docs/LINEAR_COUNTERBORE_PATTERN.md`](docs/LINEAR_COUNTERBORE_PATTERN.md).
-
-## Linear countersink pattern
-
-Cut 2–100 countersunk holes along a 2D spacing vector, with configurable drill/head diameter, included angle, and through or blind depth. Windows Release focused regression passed 23 assertions. Live UI showed three tapered seats on a 40 × 30 × 20 mm box and verified undo/redo. See [`docs/LINEAR_COUNTERSINK_PATTERN.md`](docs/LINEAR_COUNTERSINK_PATTERN.md).
-
-## Linear keyhole-slot pattern
-
-Cut 2–100 keyhole profiles along a 2D spacing vector with configurable head, throat, depth, and orientation. Focused Windows regression passed 22 assertions, including rollback when a later slot misses the body; live UI verification created three cuts and confirmed undo/redo. See [`docs/LINEAR_KEYHOLE_PATTERN.md`](docs/LINEAR_KEYHOLE_PATTERN.md).
-
-## Modeling tools
-
-The Create menu and Create ribbon include 30 dimension-driven tools for structural sections, plates, flanges, pipe fittings, gears, and mechanical parts. Their feature list and per-tool verification status are in [`docs/MODELING_TOOLS.md`](docs/MODELING_TOOLS.md).
-
-## Requirements
-
-- Windows 10 or 11, 64-bit.
-- Visual Studio 2022 or later with the **Desktop development with C++** workload and CMake tools.
-- Git and PowerShell.
-- vcpkg, bootstrapped for the current Windows environment.
-- An internet connection for the first dependency install.
-
-The project uses its checked-in `vcpkg.json` manifest to install Qt and OCCT dependencies. Do not include `build/` or `vcpkg_installed/` in a source upload; these are generated locally.
+The scope and limitations are detailed in [CONTINUE_HERE.md](CONTINUE_HERE.md). CADWorkbench does not claim Fusion 360 feature parity or formal ISO/ASME certification.
 
 ## Build on Windows
 
-Open PowerShell in the extracted source folder. Install vcpkg once if it is not already available:
-
-```powershell
-git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
-C:\vcpkg\bootstrap-vcpkg.bat
-$env:VCPKG_ROOT = 'C:\vcpkg'
-```
-
-If vcpkg already exists, skip the clone and bootstrap steps. Set the environment variable for each new PowerShell session, then build:
+Install a Windows C++ MSVC toolchain with Visual Studio CMake tools. Bootstrap [vcpkg](https://github.com/microsoft/vcpkg) and set `VCPKG_ROOT` to its folder. The checked-in [vcpkg.json](vcpkg.json) lists Qt and OCCT dependencies.
 
 ```powershell
 $env:VCPKG_ROOT = 'C:\vcpkg'
 .\scripts\build_windows.ps1
 ```
 
-The script configures an x64 Release build, installs manifest dependencies, compiles the application and tests, stages Qt runtime plugins beside the executable, and runs CTest. The executable is `build\Release\CADWorkbench.exe`.
+The script configures CMake, builds a Release application and tests, then runs CTest. To build without rerunning tests, use `-SkipTests`. Dependency installation and the first compile can take substantially longer than an incremental build.
 
-To build without running the full CTest suite:
+## Verification
 
-```powershell
-.\scripts\build_windows.ps1 -SkipTests
-```
+The current Windows Release build passes and **72/72 CTest cases pass**. The latest coding rounds did **not** include live UI interaction, so menu behavior is compiled but not claimed as interactively verified. See [CONTINUE_HERE.md](CONTINUE_HERE.md) for the verified feature summary and next work.
 
-The Wing rib change has a focused regression mode:
+## Source layout
 
-```powershell
-$env:PATH = "$PWD\vcpkg_installed\x64-windows\bin;$env:PATH"
-.\build\Release\cadcore_tests.exe --wing-rib
-```
+| Path | Contents |
+|---|---|
+| [src/core](src/core) | CAD scene, geometry, sketches, drawings, assemblies, sheet metal, surfaces, meshes, and revisions |
+| [src/ui](src/ui) | Qt desktop window, commands, ribbon, and viewport |
+| [tests](tests) | Native C++ regressions and supplemental source checks |
+| [scripts](scripts) | Windows build, runtime release packaging, and source snapshot packaging |
+| [docs](docs) | QA notes and historical documentation |
 
-Run the GUI from `build\Release` after the build script has staged Qt. Launching the executable from a different folder may fail to locate Qt platform plugins.
+Additional current area notes are in [BOM_PARTS_LIST.md](BOM_PARTS_LIST.md), [ORTHOGRAPHIC_DRAWINGS.md](ORTHOGRAPHIC_DRAWINGS.md), [PARAMETRIC_FOUNDATION.md](PARAMETRIC_FOUNDATION.md), [PERSISTENT_ASSEMBLIES.md](PERSISTENT_ASSEMBLIES.md), [SHEET_METAL.md](SHEET_METAL.md), and [STANDARDS_CHECKS.md](STANDARDS_CHECKS.md). The previous long README is preserved as [historical documentation](docs/README_HISTORY.md); some of its status statements and links predate this snapshot.
 
-## Tests and review
+## Publishing the source
 
-Run the complete native test suite with:
+Run `./scripts/package_source_snapshot.ps1` to create a source ZIP with a SHA-256 manifest. Extract the ZIP and upload the **contents** of `CADWorkbench_v1_55_Source` to GitHub. The source archive intentionally excludes Git metadata, local build outputs, vcpkg installations, generated binaries, and caches. The separate `package_release_windows.ps1` script builds a portable application package and installer from an already compiled Windows Release app and installed runtime dependencies.
 
-```powershell
-ctest --test-dir build -C Release --output-on-failure
-```
-
-The app uses Open CASCADE for solid construction and validity checks. A passing build or core test suite does not by itself confirm every menu workflow or a clean-machine installation. See [`docs/QA_MATRIX.md`](docs/QA_MATRIX.md) and [`docs/manual_qa_results.md`](docs/manual_qa_results.md) for tested workflows and remaining release checks.
-
-## Current Windows verification (2026-10-28)
-
-The v1.44 update adds atomic batch editing for named parametric dimensions, parent-driven nested assembly transforms that preserve joint frames, and an in-app report for current, stale, or missing saved-drawing source bodies. It builds on v1.43 persistent section/detail views and cylindrical feature references, v1.42 A4/A3 PDF export, and the persistent assembly and parametric foundation. Windows Release build and all 50 regression targets pass; current focused counts are recorded in [`docs/QA_MATRIX.md`](docs/QA_MATRIX.md) and [`docs/local_verification.json`](docs/local_verification.json). Live UI testing was not run by request.
-
-Earlier live UI results documented below are historical and do not verify the v1.44 changes. The current update was checked with a Windows Release build and automated regression suite only; the drawing screens do not certify standards compliance. See [`docs/local_verification.json`](docs/local_verification.json), [`docs/QA_MATRIX.md`](docs/QA_MATRIX.md), [`docs/PARAMETRIC_FOUNDATION.md`](docs/PARAMETRIC_FOUNDATION.md), [`docs/PERSISTENT_ASSEMBLIES.md`](docs/PERSISTENT_ASSEMBLIES.md), [`docs/BOM_PARTS_LIST.md`](docs/BOM_PARTS_LIST.md), and [`docs/ORTHOGRAPHIC_DRAWINGS.md`](docs/ORTHOGRAPHIC_DRAWINGS.md).
-
-Some individual manual checks remain: the body-schedule CSV save dialog has not been exercised through a save in the UI, and the numeric two-vertex measurement has not been verified live because the available desktop input could not Ctrl-click the second subshape. See [`docs/BODY_SCHEDULE_CSV.md`](docs/BODY_SCHEDULE_CSV.md) and [`docs/VERTEX_DISTANCE.md`](docs/VERTEX_DISTANCE.md).
-
-## Upload the source to GitHub
-
-1. Create an empty repository on GitHub. Do not initialize it with a README, license, or `.gitignore`, since this folder already contains those files.
-2. In PowerShell, change to the extracted project source folder.
-3. Initialize Git, create the first commit, and add the GitHub remote:
-
-```powershell
-git init
-git add README.md LICENSE .gitignore CMakeLists.txt vcpkg.json src tests scripts docs .github
-git commit -m "Prepare CADWorkbench source release"
-git branch -M main
-git remote add origin https://github.com/USERNAME/REPOSITORY.git
-git push -u origin main
-```
-
-Replace `USERNAME` and `REPOSITORY` with the repository owner and name. GitHub may ask you to authenticate through its browser or credential manager.
-
-For later updates:
-
-```powershell
-git add .
-git commit -m "Describe the update"
-git push
-```
-
-Before pushing, review `git status` and confirm generated build folders, dependency installs, personal files, and test models are not staged. The project `.gitignore` excludes common build outputs.
-
-## License
-
-Project source is licensed under the MIT License in [`LICENSE`](LICENSE). Qt and OCCT have their own licenses and redistribution terms; review them before distributing a compiled application.
-
-
-
+The project currently has no license file; choose one before distributing it as an open-source release.

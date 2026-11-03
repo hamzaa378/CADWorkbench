@@ -1,14 +1,18 @@
 #include "MainWindow.h"
 #include "core/DrawingSheet.h"
+#include "core/DocumentRevisionHistory.h"
 #include "core/SheetMetal.h"
+#include "core/SurfaceModeling.h"
 #include "CadViewport.h"
 
+#include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepGProp.hxx>
 #include <Bnd_Box.hxx>
 #include <BRepBndLib.hxx>
 #include <GProp_GProps.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopAbs_ShapeEnum.hxx>
+#include <TopoDS.hxx>
 
 #include <QAction>
 #include <QActionGroup>
@@ -18,10 +22,13 @@
 #include <QColorDialog>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QCompleter>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDate>
+#include <QDateTime>
 #include <QDateEdit>
+#include <QDir>
 #include <QDockWidget>
 #include <QDoubleSpinBox>
 #include <QFutureWatcher>
@@ -33,16 +40,26 @@
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QInputDialog>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QMenuBar>
+#include <QMenu>
 #include <QMessageBox>
 #include <QInputDialog>
 #include <QScrollArea>
+#include <QSettings>
 #include <QSignalBlocker>
 #include <QSpinBox>
 #include <QStatusBar>
+#include <QShortcut>
+#include <QSet>
+#include <QSize>
+#include <QStyle>
 #include <QToolBar>
 #include <QTabWidget>
 #include <QTableWidget>
@@ -53,12 +70,41 @@
 #include <QVBoxLayout>
 #include <QWidgetAction>
 #include <QtConcurrent/QtConcurrentRun>
+#include <gp_Pnt.hxx>
+#include <gp_Ax1.hxx>
+#include <gp_Dir.hxx>
+#include <gp_Vec.hxx>
 
 #include <optional>
 #include <algorithm>
+#include <cmath>
+#include <functional>
+#include <numbers>
 #include <utility>
 
 namespace {
+TopoDS_Shape selectedSubshape(const cad::SceneDocument& document,const QString& partId,
+                              const QString& geometryToken,int shapeIndex,TopAbs_ShapeEnum type) {
+    for(const cad::Part& part:document.parts()){
+        if(part.id!=partId||part.geometryToken!=geometryToken||shapeIndex<1)return {};
+        int index=0;
+        for(TopExp_Explorer explorer(part.shape,type);explorer.More();explorer.Next())
+            if(++index==shapeIndex)return explorer.Current();
+        return {};
+    }
+    return {};
+}
+
+QString meshImportStatus(const QString& format,const QString& fileName,const cad::MeshImportSummary& summary) {
+    return QStringLiteral("Imported faceted %1 %2: %3; welded %4 vertices, removed %5 degenerate/%6 duplicate facets, reoriented %7, filled %8 planar hole(s).")
+        .arg(format,summary.importedAsSurfaceBody?QStringLiteral("surface body"):QStringLiteral("solid"),fileName)
+        .arg(static_cast<qulonglong>(summary.weldedVertices))
+        .arg(static_cast<qulonglong>(summary.removedDegenerateTriangles))
+        .arg(static_cast<qulonglong>(summary.removedDuplicateTriangles))
+        .arg(static_cast<qulonglong>(summary.reorientedTriangles))
+        .arg(static_cast<qulonglong>(summary.filledHoles));
+}
+
 std::optional<QVector<double>> valuesDialog(QWidget* parent, const QString& title,
                                               const QStringList& names, const QVector<double>& defaults,
                                               double min = 0.00001, double max = 1e6) {
@@ -90,6 +136,54 @@ int numberOf(const TopoDS_Shape& shape, TopAbs_ShapeEnum type) {
     for (TopExp_Explorer explorer(shape,type); explorer.More(); explorer.Next()) ++count;
     return count;
 }
+QString ribbonCommandLabel(QString label) {
+    label.remove('&');
+    while(label.endsWith('.'))label.chop(1);
+    static const QHash<QString,QString> conciseLabels={
+        {"Sketch and extrude profile","Extrude"},
+        {"Constrained rectangle + editable extrusion","Parametric extrude"},
+        {"Constrained offset rectangle + extrusion","Offset extrude"},
+        {"Add parametric through-hole to selected base","Parametric hole"},
+        {"Pattern parametric through-hole","Pattern holes"},
+        {"Loft between rectangles","Loft"},
+        {"Revolve rectangle profile","Revolve"},
+        {"Revolve about X/Y/Z axis","Axis revolve"},
+        {"Make selected body a component","Make component"},
+        {"Insert component occurrence","Insert occurrence"},
+        {"Create rigid joint (select parent then child)","Rigid joint"},
+        {"Create revolute joint (select parent then child)","Revolute joint"},
+        {"Drive selected revolute joint","Drive revolute"},
+        {"Create prismatic joint (select parent then child)","Prismatic joint"},
+        {"Drive selected prismatic joint","Drive prismatic"},
+        {"Edit selected joint motion track","Motion track"},
+        {"Evaluate assembly motion study at time","Motion study"},
+        {"BOM and parts list","BOM / parts list"},
+        {"Part number / description / revision","Part metadata"},
+        {"Edit feature history / view sketch constraints","Edit feature history"},
+        {"Fillet selected edges","Fillet edges"},
+        {"Chamfer selected edges","Chamfer edges"},
+        {"Asymmetric chamfer selected edge","Asymmetric chamfer"},
+        {"Fillet all body edges","Fillet all"},
+        {"Chamfer all body edges","Chamfer all"},
+        {"Edit saved drawing notes","Drawing notes"},
+        {"Edit saved drawing dimensions","Drawing dimensions"},
+        {"Place linked drawing parts list","Drawing parts list"},
+        {"Edit saved BOM balloons","BOM balloons"},
+        {"Edit saved detail views","Detail views"},
+        {"Edit saved section views","Section views"},
+        {"Check saved drawing source","Check drawing link"}
+    };
+    if(conciseLabels.contains(label))return conciseLabels.value(label);
+    QString compact=label;
+    if(compact.startsWith("Export "))compact.remove(0,7);
+    else if(compact.startsWith("Import "))compact.remove(0,7);
+    else if(compact.startsWith("Edit saved "))compact.remove(0,11);
+    else if(compact.startsWith("Show selected "))compact.remove(0,14);
+    else if(compact.startsWith("Add parametric "))compact.remove(0,4);
+    compact.replace(" selected body","");
+    compact.replace(" selected","");
+    return compact.trimmed();
+}
 
 template <typename Preview, typename Builder, typename Completed>
 void runPreviewAsync(QObject* owner, QStatusBar* statusBar, const QString& errorAction,
@@ -115,6 +209,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     buildUi();
     refresh();
     resize(1320,800);
+    setMinimumSize(1080,700);
 }
 
 void MainWindow::confirmPreview(const QString& title, const QString& message,
@@ -137,6 +232,7 @@ void MainWindow::confirmPreview(const QString& title, const QString& message,
 
 void MainWindow::buildUi() {
     viewport_ = new CadViewport(this);
+    viewport_->setObjectName("CadViewport");
     setCentralWidget(viewport_);
 
     tree_ = new QTreeWidget(this);
@@ -144,6 +240,10 @@ void MainWindow::buildUi() {
     tree_->setSelectionMode(QAbstractItemView::ExtendedSelection);
     tree_->setAlternatingRowColors(true);
     tree_->setRootIsDecorated(false);
+    tree_->setUniformRowHeights(true);
+    tree_->header()->setStretchLastSection(false);
+    tree_->header()->setSectionResizeMode(0,QHeaderView::Stretch);
+    tree_->header()->setSectionResizeMode(1,QHeaderView::ResizeToContents);
     auto* browser = new QDockWidget("Model browser",this);
     browser->setObjectName("ModelBrowserDock");
     browser->setWidget(tree_);
@@ -165,6 +265,17 @@ void MainWindow::buildUi() {
     auto* openAction = file->addAction("&Open...",this,&MainWindow::openFile,QKeySequence::Open);
     auto* saveAction = file->addAction("&Save",this,[this]{saveFile();},QKeySequence::Save);
     auto* saveAsAction = file->addAction("Save &As...",this,[this]{saveFile(true);},QKeySequence::SaveAs);
+    auto* createRevisionAction=file->addAction("Create named document revision...",this,&MainWindow::createDocumentRevision);
+    auto* compareRevisionsAction=file->addAction("Compare document revisions...",this,&MainWindow::compareDocumentRevisions);
+    auto* restoreRevisionAction=file->addAction("Restore document revision as...",this,&MainWindow::restoreDocumentRevision);
+    file->addAction("Tag or prune document revisions...",this,&MainWindow::manageDocumentRevisionHistory);
+    auto* autoRevisionAction=file->addAction("Create a revision after each save");
+    autoRevisionAction->setCheckable(true);
+    QSettings appSettings;
+    autoRevisionAction->setChecked(appSettings.value(QStringLiteral("history/automaticCheckpoint"),false).toBool());
+    connect(autoRevisionAction,&QAction::toggled,this,[](bool enabled){
+        QSettings().setValue(QStringLiteral("history/automaticCheckpoint"),enabled);
+    });
     file->addSeparator();
     auto* importStepAction = file->addAction("Import STEP...",this,&MainWindow::importSTEPFile);
     file->addAction("Import IGES solids...",this,&MainWindow::importIGESFile);
@@ -178,9 +289,12 @@ void MainWindow::buildUi() {
     auto* exportPartsListAction=file->addAction("Export parts list CSV...",this,&MainWindow::exportPartsListCsv);
     auto* exportDrawingAction=file->addAction("Export orthographic drawing SVG...",this,&MainWindow::exportDrawingSvg);
     file->addAction("Export orthographic drawing PDF...",this,&MainWindow::exportDrawingPdf);
+    auto* exportDrawingDxfAction=file->addAction("Export orthographic drawing DXF...",this,&MainWindow::exportDrawingDxf);
     auto* arrangeDrawingViewsAction=file->addAction("Arrange saved drawing views...",this,&MainWindow::editDrawingViewLayout);
     auto* editDrawingNotesAction=file->addAction("Edit saved drawing notes...",this,&MainWindow::editDrawingNotes);
     auto* editDrawingDimensionsAction=file->addAction("Edit saved drawing dimensions...",this,&MainWindow::editDrawingDimensions);
+    auto* addEdgeDimensionAction=file->addAction("Add selected edge length to drawing...",this,&MainWindow::addSelectedEdgeDrawingDimension);
+    auto* removeEdgeDimensionAction=file->addAction("Remove saved edge dimension...",this,&MainWindow::removeSelectedEdgeDrawingDimension);
     auto* editDrawingPartsListAction=file->addAction("Place linked drawing parts list...",this,&MainWindow::editDrawingPartsList);
     auto* editDrawingBalloonsAction=file->addAction("Edit saved BOM balloons...",this,&MainWindow::editDrawingBalloons);
     auto* editDrawingDetailsAction=file->addAction("Edit saved detail views...",this,&MainWindow::editDrawingDetails);
@@ -189,6 +303,8 @@ void MainWindow::buildUi() {
     file->addAction("Refresh saved drawing source link...",this,&MainWindow::refreshSavedDrawingSource);
     auto* exportFlatPatternAction=file->addAction("Export one-bend sheet-metal flat pattern SVG...",this,&MainWindow::exportSheetMetalFlatPattern);
     auto* exportMultiBendDxfAction=file->addAction("Export multi-bend sheet-metal flat pattern DXF...",this,&MainWindow::exportMultiBendSheetMetalDxf);
+    auto* exportFoldedSheetDxfAction=file->addAction("Export selected folded body flat pattern DXF...",this,&MainWindow::exportSelectedFoldedSheetFlatPatternDxf);
+    auto* exportFoldedBendTableAction=file->addAction("Export selected folded body bend table CSV...",this,&MainWindow::exportSelectedFoldedSheetBendTableCsv);
     file->addSeparator();
     auto* exitAction = file->addAction("E&xit",this,&QWidget::close);
 
@@ -201,13 +317,23 @@ void MainWindow::buildUi() {
     auto* materialAction = edit->addAction("Assign material...",this,&MainWindow::assignMaterial);
     auto* metadataAction = edit->addAction("Part number / description / revision...",this,&MainWindow::editPartMetadata);
     auto* editParameterAction = edit->addAction("Edit named parameters...",this,&MainWindow::editNamedParameter);
-    auto* featureHistoryAction = edit->addAction("Show selected sketch constraints / feature history...",this,&MainWindow::showSelectedFeatureHistory);
+    edit->addAction("Edit selected constrained polygon sketch...",this,&MainWindow::editConstrainedPolygonExtrusion);
+    edit->addAction("Edit selected sketch geometric constraints...",this,&MainWindow::editConstrainedSketchRelations);
+    auto* editSketchCirclesAction=edit->addAction("Add/remove constrained sketch circles...",this,&MainWindow::editConstrainedSketchCircles);
+    edit->addAction("Edit named parameter links...",this,&MainWindow::editParameterLinks);
+    edit->addAction("Add parametric all-edge chamfer...",this,&MainWindow::addParametricAllEdgeChamfer);
+    edit->addAction("Add parametric all-edge fillet...",this,&MainWindow::addParametricAllEdgeFillet);
+    edit->addAction("Edit folded sheet-metal body...",this,&MainWindow::editFoldedSheetMetal);
+    auto* featureHistoryAction = edit->addAction("Edit feature history / view sketch constraints...",this,&MainWindow::showSelectedFeatureHistory);
     auto* deleteAction = edit->addAction("Delete selected",this,&MainWindow::removeSelected,QKeySequence::Delete);
 
     auto* assemblyMenu = menuBar()->addMenu("&Assembly");
     auto* makeComponentAction = assemblyMenu->addAction("Make selected body a component...",this,&MainWindow::makeSelectedComponent);
     auto* insertOccurrenceAction = assemblyMenu->addAction("Insert component occurrence...",this,&MainWindow::insertSelectedComponentOccurrence);
+    assemblyMenu->addAction("Orient selected free occurrence (roll, pitch, yaw)...",this,&MainWindow::orientSelectedComponentOccurrence);
     assemblyMenu->addAction("Synchronize selected component definition to its occurrences...",this,&MainWindow::synchronizeSelectedComponentDefinition);
+    assemblyMenu->addAction("Linear pattern of component occurrences...",this,&MainWindow::linearPatternSelectedComponentOccurrence);
+    assemblyMenu->addAction("Circular Z-axis pattern of component occurrences...",this,&MainWindow::circularPatternSelectedComponentOccurrence);
     auto* rigidJointAction = assemblyMenu->addAction("Create rigid joint (select parent then child)...",this,&MainWindow::createRigidJoint);
     auto* revoluteJointAction = assemblyMenu->addAction("Create revolute joint (select parent then child)...",this,&MainWindow::createRevoluteJoint);
     auto* driveJointAction = assemblyMenu->addAction("Drive selected revolute joint...",this,&MainWindow::driveSelectedRevoluteJoint);
@@ -215,6 +341,7 @@ void MainWindow::buildUi() {
     assemblyMenu->addAction("Drive selected prismatic joint...",this,&MainWindow::driveSelectedPrismaticJoint);
     assemblyMenu->addAction("Edit selected joint motion track...",this,&MainWindow::editSelectedJointMotionTrack);
     assemblyMenu->addAction("Evaluate assembly motion study at time...",this,&MainWindow::evaluateAssemblyMotionStudy);
+    auto* motionInterferenceAction=assemblyMenu->addAction("Scan selected bodies for motion interference...",this,&MainWindow::scanSelectedMotionInterference);
 
     auto* create = menuBar()->addMenu("&Create");
     auto* boxAction = create->addAction("Box...",this,[this]{makeShape(cad::Primitive::Box);});
@@ -247,8 +374,23 @@ void MainWindow::buildUi() {
     auto* extrusionAction = create->addAction("Sketch and extrude profile...",this,&MainWindow::sketchExtrusion);
     auto* parametricExtrusionAction = create->addAction("Constrained rectangle + editable extrusion...",this,&MainWindow::createParametricExtrusion);
     auto* parametricOffsetAction = create->addAction("Constrained offset rectangle + extrusion...",this,&MainWindow::createParametricOffsetExtrusion);
+    create->addAction("Constrained trapezoid extrusion...",this,&MainWindow::createConstrainedTrapezoidExtrusion);
+    create->addAction("Constrained triangle from side lengths...",this,&MainWindow::createConstrainedTriangleExtrusion);
+    create->addAction("Constrained polygon from vertices...",this,&MainWindow::createConstrainedPolygonFromVertices);
     auto* parametricHoleAction = create->addAction("Add parametric through-hole to selected base...",this,&MainWindow::addParametricThroughHole);
-    create->addAction("Pattern parametric through-hole...",this,&MainWindow::addParametricLinearHolePattern);
+    create->addAction("Add parametric blind hole to selected base...",this,&MainWindow::addParametricBlindHole);
+    create->addAction("Pattern parametric through/blind hole...",this,&MainWindow::addParametricLinearHolePattern);
+    auto* surfaceLoftAction=create->addAction("Lofted surface through rectangular sections...",this,&MainWindow::createLoftedSurfaceBody);
+    create->addAction("Extrude selected edge as a surface...",this,&MainWindow::extrudeSelectedEdgeSurface);
+    create->addAction("Revolve selected edge as a surface...",this,&MainWindow::revolveSelectedEdgeSurface);
+    create->addAction("Offset selected surface face...",this,&MainWindow::offsetSelectedSurface);
+    create->addAction("Extend selected surface face...",this,&MainWindow::extendSelectedSurface);
+    create->addAction("Thicken selected surface body into a solid...",this,&MainWindow::thickenSelectedSurface);
+    create->addAction("Stitch selected surface bodies into solids...",this,&MainWindow::stitchSelectedSurfaces);
+    create->addAction("Sew selected surfaces into one shell...",this,&MainWindow::sewSelectedSurfaces);
+    create->addAction("Trim surface with a solid...",this,&MainWindow::trimSelectedSurface);
+    create->addAction("Split surface with a solid...",this,&MainWindow::splitSelectedSurface);
+    create->addAction("Folded sheet-metal body...",this,&MainWindow::createFoldedSheetMetal);
     auto* loftAction = create->addAction("Loft between rectangles...",this,&MainWindow::loftRectangles);
     auto* revolveAction = create->addAction("Revolve rectangle profile...",this,&MainWindow::revolveRectangleProfile);
     auto* axisRevolveAction = create->addAction("Revolve about X/Y/Z axis...",this,&MainWindow::revolveAboutWorldAxis);
@@ -428,30 +570,60 @@ void MainWindow::buildUi() {
     auto addRibbonTab=[ribbon](const QString& tabName,
                                const QVector<QPair<QString,QList<QAction*>>>& groups) {
         auto* scroll=new QScrollArea(ribbon);
+        scroll->setObjectName("RibbonScrollArea");
         scroll->setWidgetResizable(true);
         scroll->setFrameShape(QFrame::NoFrame);
         scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
         scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         auto* contents=new QWidget(scroll);
+        contents->setObjectName("RibbonPage");
         auto* row=new QHBoxLayout(contents);
         row->setContentsMargins(6,4,6,2);
         row->setSpacing(4);
         for (const auto& group:groups) {
             auto* column=new QWidget(contents);
+            column->setObjectName("RibbonGroup");
             auto* layout=new QVBoxLayout(column);
             layout->setContentsMargins(5,1,5,1);
             layout->setSpacing(2);
             auto* buttons=new QHBoxLayout;
             buttons->setContentsMargins(0,0,0,0);
             buttons->setSpacing(2);
-            for (QAction* action:group.second) {
+            const int groupActionCount=static_cast<int>(group.second.size());
+            int directActionCount=groupActionCount;
+            if(group.first=="Primitives")directActionCount=std::min(6,groupActionCount);
+            else if(group.first=="Profiles")directActionCount=std::min(6,groupActionCount);
+            else if(group.first=="Features"||group.first=="Measure")directActionCount=std::min(5,groupActionCount);
+            else if(groupActionCount>8)directActionCount=0;
+            auto addCommandButton=[&](QAction* action){
                 auto* button=new QToolButton(column);
                 button->setDefaultAction(action);
                 button->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
-                button->setMinimumWidth(82);
-                button->setMinimumHeight(72);
-                button->setToolTip(action->text().remove('&'));
+                button->setMinimumWidth(90);
+                button->setMaximumWidth(124);
+                button->setMinimumHeight(68);
+                button->setIconSize(QSize(24,24));
+                QString fullLabel=action->text();fullLabel.remove('&');
+                button->setText(ribbonCommandLabel(fullLabel));
+                button->setToolTip(fullLabel);
+                button->setStatusTip(fullLabel);
                 buttons->addWidget(button);
+            };
+            for(int i=0;i<directActionCount;++i)addCommandButton(group.second[i]);
+            if(directActionCount<groupActionCount){
+                auto* overflow=new QToolButton(column);
+                overflow->setText("More…");
+                overflow->setMinimumWidth(76);
+                overflow->setMaximumWidth(96);
+                overflow->setMinimumHeight(68);
+                overflow->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
+                overflow->setToolTip(QString("More %1 commands").arg(group.first));
+                overflow->setStatusTip(overflow->toolTip());
+                auto* overflowMenu=new QMenu(overflow);
+                for(int i=directActionCount;i<groupActionCount;++i)overflowMenu->addAction(group.second[i]);
+                overflow->setMenu(overflowMenu);
+                overflow->setPopupMode(QToolButton::InstantPopup);
+                buttons->addWidget(overflow);
             }
             layout->addLayout(buttons);
             auto* caption=new QLabel(group.first,column);
@@ -473,13 +645,13 @@ void MainWindow::buildUi() {
     addRibbonTab("File",{
         {"Document",{newAction,openAction,saveAction,saveAsAction,exitAction}},
         {"Import",{importStepAction,importStlMeshAction}},
-        {"Export",{exportStepAction,exportStlAction,exportBodyScheduleAction,exportBomAction,exportPartsListAction,exportDrawingAction,exportFlatPatternAction,exportMultiBendDxfAction}},
-        {"Drawing",{arrangeDrawingViewsAction,editDrawingNotesAction,editDrawingDimensionsAction,editDrawingPartsListAction,editDrawingBalloonsAction,editDrawingDetailsAction,editDrawingSectionsAction,inspectDrawingSourceAction}},
-        {"History",{undoAction_,redoAction_}}
+        {"Export",{exportStepAction,exportStlAction,exportBodyScheduleAction,exportBomAction,exportPartsListAction,exportDrawingAction,exportDrawingDxfAction,exportFlatPatternAction,exportMultiBendDxfAction,exportFoldedSheetDxfAction,exportFoldedBendTableAction}},
+        {"Drawing",{arrangeDrawingViewsAction,editDrawingNotesAction,editDrawingDimensionsAction,addEdgeDimensionAction,removeEdgeDimensionAction,editDrawingPartsListAction,editDrawingBalloonsAction,editDrawingDetailsAction,editDrawingSectionsAction,inspectDrawingSourceAction}},
+        {"History",{undoAction_,redoAction_,createRevisionAction,compareRevisionsAction,restoreRevisionAction}}
     });
     addRibbonTab("Create",{
         {"Primitives",{boxAction,cylAction,sphereAction,coneAction,torusAction,prismAction,capsuleAction,ellipsoidAction,tubeAction,wedgeAction,frustumAction,nutAction,orientedCylinderAction,orientedConeAction,torusSegmentAction}},
-        {"Profiles",{extrusionAction,parametricExtrusionAction,parametricOffsetAction,parametricHoleAction,loftAction,revolveAction,axisRevolveAction,sweepCircleAction,sweepRectangleAction,sweepEllipseAction,helicalSweepAction,variablePitchHelixAction,taperedHelixAction,ellipticalPrismAction,ellipticalTubeAction,circularLoftAction,rectToCircleLoftAction,hollowReducerAction,ellipticalLoftAction}},
+        {"Profiles",{extrusionAction,parametricExtrusionAction,parametricOffsetAction,parametricHoleAction,loftAction,surfaceLoftAction,revolveAction,axisRevolveAction,sweepCircleAction,sweepRectangleAction,sweepEllipseAction,helicalSweepAction,variablePitchHelixAction,taperedHelixAction,ellipticalPrismAction,ellipticalTubeAction,circularLoftAction,rectToCircleLoftAction,hollowReducerAction,ellipticalLoftAction}},
         {"Mechanical",mechanicalActions},
         {"Advanced",advancedActions}
         ,{"Specialized",specializedActions},
@@ -494,11 +666,11 @@ void MainWindow::buildUi() {
         {"Combine",{fuseAction,cutAction,commonAction}},
         {"Pattern",{patternAction,vectorPatternAction,rectangularPatternAction,vectorRectangularPatternAction,circularPatternAction,axisPatternAction}},
         {"Features",{holeAction,holeGridAction,circularHolePatternAction,circularCountersinkPatternAction,circularCounterborePatternAction,linearCountersinkPatternAction,linearCounterborePatternAction,dovetailGrooveAction,tSlotGrooveAction,roundedSlotAction,keyholeSlotAction,roundedSlotPatternAction,linearKeyholePatternAction,splitAction,shellAction,draftAction,filletAction,chamferAction,asymmetricChamferAction,filletAllAction,chamferAllAction}},
-        {"Manage",{renameAction,colorAction,materialAction,metadataAction,editParameterAction,featureHistoryAction,deleteAction}}
+        {"Manage",{renameAction,colorAction,materialAction,metadataAction,editParameterAction,editSketchCirclesAction,featureHistoryAction,deleteAction}}
     });
     addRibbonTab("Assembly",{
         {"Components",{makeComponentAction,insertOccurrenceAction,rigidJointAction,revoluteJointAction,driveJointAction}},
-        {"Reports",{partsReportAction}}
+        {"Reports",{partsReportAction,motionInterferenceAction}}
     });
     addRibbonTab("Inspect",{
         {"Measure",{massPropertiesAction,clearanceAction,interferenceAction,diagnosticsAction,sectionAction,surfaceSummaryAction,faceAreaAction,faceAngleAction,cylinderMeasureAction,edgeLengthAction,vertexCoordinatesAction,vertexDistanceAction}},
@@ -509,7 +681,98 @@ void MainWindow::buildUi() {
         {"Camera",{fitAction,fitSelectionAction,isoAction,topAction,frontAction,rightAction}},
         {"Display",{wireframeAction,gridAction}}
     });
+
+    auto* quickAccess=addToolBar("Quick Access");
+    quickAccess->setObjectName("QuickAccessToolbar");
+    quickAccess->setMovable(false);
+    quickAccess->setFloatable(false);
+    quickAccess->setIconSize(QSize(18,18));
+    quickAccess->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    quickAccess->setContextMenuPolicy(Qt::PreventContextMenu);
+    newAction->setIcon(style()->standardIcon(QStyle::SP_FileIcon));
+    openAction->setIcon(style()->standardIcon(QStyle::SP_DialogOpenButton));
+    saveAction->setIcon(style()->standardIcon(QStyle::SP_DialogSaveButton));
+    undoAction_->setIcon(style()->standardIcon(QStyle::SP_ArrowBack));
+    redoAction_->setIcon(style()->standardIcon(QStyle::SP_ArrowForward));
+    quickAccess->addAction(newAction);
+    quickAccess->addAction(openAction);
+    quickAccess->addAction(saveAction);
+    quickAccess->addSeparator();
+    quickAccess->addAction(undoAction_);
+    quickAccess->addAction(redoAction_);
+    quickAccess->addSeparator();
+    auto* workspaceLabel=new QLabel("WORKSPACE",quickAccess);
+    workspaceLabel->setObjectName("WorkspaceLabel");
+    quickAccess->addWidget(workspaceLabel);
+    auto* workspacePicker=new QComboBox(quickAccess);
+    workspacePicker->setObjectName("WorkspaceSelector");
+    workspacePicker->addItems({"Design","Assembly","Drawing","Inspect","View"});
+    workspacePicker->setMinimumWidth(128);
+    quickAccess->addWidget(workspacePicker);
+    connect(workspacePicker,qOverload<int>(&QComboBox::currentIndexChanged),this,[ribbon](int index){
+        static const int tabForWorkspace[]={1,3,0,4,5};
+        if(index>=0&&index<5)ribbon->setCurrentIndex(tabForWorkspace[index]);
+    });
+    connect(ribbon,&QTabWidget::currentChanged,this,[workspacePicker](int tabIndex){
+        const int workspaceForTab=tabIndex==0?2:tabIndex==3?1:tabIndex==4?3:tabIndex==5?4:0;
+        const QSignalBlocker blocker(workspacePicker);
+        workspacePicker->setCurrentIndex(workspaceForTab);
+    });
+    auto* commandSearch=new QLineEdit(quickAccess);
+    commandSearch->setObjectName("CommandSearch");
+    commandSearch->setClearButtonEnabled(true);
+    commandSearch->setPlaceholderText("Search commands  Ctrl+K");
+    commandSearch->setToolTip("Find and run any available CAD command.");
+    commandSearch->setMinimumWidth(225);
+    commandSearch->setMaximumWidth(300);
+    quickAccess->addWidget(commandSearch);
+
+    QVector<QPair<QString,QAction*>> commandEntries;
+    QSet<QAction*> seenCommands;
+    std::function<void(QMenu*)> collectMenuActions=[&](QMenu* menu){
+        if(!menu)return;
+        for(QAction* action:menu->actions()){
+            if(action->menu())collectMenuActions(action->menu());
+            else if(!action->isSeparator()&&!seenCommands.contains(action)){
+                const QString label=action->text().remove('&').trimmed();
+                if(!label.isEmpty()){seenCommands.insert(action);commandEntries.append({label,action});}
+            }
+        }
+    };
+    for(QAction* menuAction:menuBar()->actions())collectMenuActions(menuAction->menu());
+    QStringList commandLabels;
+    for(const auto& entry:commandEntries)commandLabels.append(entry.first);
+    std::sort(commandLabels.begin(),commandLabels.end(),[](const QString& a,const QString& b){return a.compare(b,Qt::CaseInsensitive)<0;});
+    commandLabels.removeDuplicates();
+    auto* commandCompleter=new QCompleter(commandLabels,commandSearch);
+    commandCompleter->setCaseSensitivity(Qt::CaseInsensitive);
+    commandCompleter->setFilterMode(Qt::MatchContains);
+    commandCompleter->setCompletionMode(QCompleter::PopupCompletion);
+    commandSearch->setCompleter(commandCompleter);
+    auto triggerCommand=[commandEntries,commandSearch,this](const QString& query){
+        const QString needle=query.trimmed();if(needle.isEmpty())return;
+        QAction* match=nullptr;
+        for(const auto& entry:commandEntries)if(entry.first.compare(needle,Qt::CaseInsensitive)==0&&entry.second->isEnabled()){match=entry.second;break;}
+        if(!match){
+            QVector<QAction*> partialMatches;
+            for(const auto& entry:commandEntries)if(entry.first.contains(needle,Qt::CaseInsensitive)&&entry.second->isEnabled())partialMatches.append(entry.second);
+            if(partialMatches.size()==1)match=partialMatches.first();
+            else if(partialMatches.size()>1){statusBar()->showMessage("Several commands match. Choose one from the suggestion list.",5000);return;}
+        }
+        commandSearch->clear();
+        if(match)match->trigger();
+        else statusBar()->showMessage("No command matches that search.",4000);
+    };
+    connect(commandSearch,&QLineEdit::returnPressed,this,[commandSearch,triggerCommand]{triggerCommand(commandSearch->text());});
+    connect(commandCompleter,qOverload<const QString&>(&QCompleter::activated),this,triggerCommand);
+    auto* focusSearch=new QShortcut(QKeySequence("Ctrl+K"),this);
+    connect(focusSearch,&QShortcut::activated,this,[commandSearch]{commandSearch->setFocus();commandSearch->selectAll();});
+    ribbon->setCurrentIndex(1);
+    workspacePicker->setCurrentIndex(0);
+
+    addToolBarBreak(Qt::TopToolBarArea);
     auto* ribbonToolbar=addToolBar("CAD Ribbon");
+    ribbonToolbar->setObjectName("CadRibbonToolbar");
     ribbonToolbar->setMovable(false);
     ribbonToolbar->setFloatable(false);
     ribbonToolbar->setContextMenuPolicy(Qt::PreventContextMenu);
@@ -545,6 +808,45 @@ void MainWindow::buildUi() {
         updateInspector(ids);
     });
     statusBar()->showMessage("Select: left click / Ctrl+click | Orbit: Shift+middle drag or right drag | Pan: middle drag | Zoom: wheel | Units: mm");
+    setStyleSheet(R"QSS(
+        QMainWindow { background: #e8edf1; color: #26343d; }
+        QMenuBar { background: #34434e; color: #f4f7f9; border-bottom: 1px solid #25323b; padding: 2px 4px; }
+        QMenuBar::item { padding: 6px 10px; border-radius: 4px; }
+        QMenuBar::item:selected { background: #176b91; color: #ffffff; }
+        QMenu { background: #ffffff; color: #26343d; border: 1px solid #9eacb6; padding: 4px; }
+        QMenu::item { padding: 6px 26px 6px 22px; border-radius: 3px; }
+        QMenu::item:selected { background: #d8edf6; color: #173b4d; }
+        QToolBar { background: #e8edf1; color: #26343d; border: none; spacing: 4px; padding: 4px 8px; }
+        QToolBar#QuickAccessToolbar { background: #dfe6eb; border-bottom: 1px solid #b8c4cc; }
+        QToolBar#CadRibbonToolbar { background: #edf1f4; border-bottom: 1px solid #b8c4cc; }
+        QToolButton { background: transparent; color: #26343d; border: 1px solid transparent; border-radius: 4px; padding: 5px; }
+        QToolButton:hover { background: #d7e7ef; border-color: #8eb6c9; }
+        QToolButton:pressed, QToolButton:checked { background: #c5e5f1; border-color: #3188a8; }
+        QTabWidget#CadCommandRibbon::pane { background: #edf1f4; border: 1px solid #aebbc5; border-top: 2px solid #1684aa; }
+        QScrollArea#RibbonScrollArea { background: #edf1f4; border: none; }
+        QWidget#RibbonPage { background: #edf1f4; }
+        QWidget#RibbonGroup { background: #ffffff; border: 1px solid #c2ccd3; border-radius: 5px; }
+        QWidget#RibbonGroup QLabel { color: #536674; font-size: 10px; border: none; background: transparent; }
+        QWidget#RibbonGroup QToolButton { background: transparent; color: #25343e; border: 1px solid transparent; padding: 4px; font-size: 11px; font-weight: 500; }
+        QWidget#RibbonGroup QToolButton:hover { background: #e5f2f7; border-color: #8eb6c9; }
+        QWidget#RibbonGroup QToolButton:pressed { background: #c5e5f1; border-color: #3188a8; }
+        QWidget#RibbonGroup QToolButton::menu-indicator { image: none; }
+        QTabBar::tab { background: #dce4e9; color: #3d505c; padding: 7px 15px; margin-right: 2px; border: 1px solid #b8c4cc; border-bottom: none; }
+        QTabBar::tab:selected { background: #ffffff; color: #173b4d; border-top: 2px solid #1684aa; }
+        QDockWidget { color: #f5f7f8; font-weight: 600; }
+        QDockWidget::title { background: #40525e; padding: 7px 9px; border: 1px solid #34444f; }
+        QTreeWidget { background: #ffffff; alternate-background-color: #f1f5f7; color: #24333d; border: 1px solid #c2ccd3; selection-background-color: #c6e6f2; selection-color: #163b4e; outline: none; }
+        QHeaderView::section { background: #e3e9ed; color: #314752; padding: 5px; border: none; border-right: 1px solid #c2ccd3; border-bottom: 1px solid #c2ccd3; }
+        QLabel { color: #26343d; }
+        QLabel#WorkspaceLabel { color: #4c626f; font-size: 9px; font-weight: 700; padding-left: 4px; }
+        QLineEdit, QComboBox { background: #ffffff; color: #26343d; border: 1px solid #9eacb6; border-radius: 4px; padding: 5px 8px; selection-background-color: #b8e0ef; }
+        QLineEdit:focus, QComboBox:focus { border: 1px solid #1684aa; }
+        QComboBox QAbstractItemView { background: #ffffff; color: #26343d; selection-background-color: #c6e6f2; }
+        QStatusBar { background: #34434e; color: #f0f4f6; border-top: 1px solid #25323b; }
+        QScrollBar:horizontal { background: #dce4e9; height: 10px; margin: 0; }
+        QScrollBar::handle:horizontal { background: #8fa2ae; min-width: 28px; border-radius: 4px; }
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+    )QSS");
 }
 
 QStringList MainWindow::selectedIds() const {
@@ -557,6 +859,19 @@ void MainWindow::updateInspector(const QStringList& ids) {
     if (ids.size() > 1) { detail_->setText(QString("%1 bodies selected").arg(ids.size())); return; }
     const auto* part = document_.find(ids.first());
     if (!part) { detail_->clear(); return; }
+    if(part->isSurfaceBody){
+        GProp_GProps area;BRepGProp::SurfaceProperties(part->shape,area);
+        Bnd_Box surfaceBounds;BRepBndLib::AddOptimal(part->shape,surfaceBounds,false,false);
+        double xmin=0,ymin=0,zmin=0,xmax=0,ymax=0,zmax=0;
+        if(!surfaceBounds.IsVoid())surfaceBounds.Get(xmin,ymin,zmin,xmax,ymax,zmax);
+        detail_->setText(QStringLiteral("%1 — Surface body\n\nSurface area: %2 mm²\nBounds X: %3 to %4 mm\nBounds Y: %5 to %6 mm\nBounds Z: %7 to %8 mm\nFaces: %9\nEdges: %10\nVisible: %11\nColor: %12\n\nID: %13")
+            .arg(part->name).arg(area.Mass(),0,'f',3)
+            .arg(xmin,0,'f',2).arg(xmax,0,'f',2).arg(ymin,0,'f',2).arg(ymax,0,'f',2)
+            .arg(zmin,0,'f',2).arg(zmax,0,'f',2).arg(numberOf(part->shape,TopAbs_FACE))
+            .arg(numberOf(part->shape,TopAbs_EDGE)).arg(part->visible?QStringLiteral("Yes"):QStringLiteral("No"))
+            .arg(part->color,part->id));
+        return;
+    }
     GProp_GProps props;
     BRepGProp::VolumeProperties(part->shape,props);
     Bnd_Box box;
@@ -810,7 +1125,8 @@ void MainWindow::refresh(bool fit) {
         const QSignalBlocker blocker(tree_);
         tree_->clear();
         for (const auto& part : document_.parts()) {
-            const QString label=part.componentDefinitionId.isEmpty()?part.name:
+            const QString label=part.isSurfaceBody?QStringLiteral("%1 — Surface").arg(part.name):
+                part.componentDefinitionId.isEmpty()?part.name:
                 QStringLiteral("%1 — occurrence %2").arg(part.componentName,part.occurrenceId.left(8));
             auto* item = new QTreeWidgetItem(tree_,{label,QString()});
             item->setData(0,Qt::UserRole,part.id);
@@ -818,6 +1134,9 @@ void MainWindow::refresh(bool fit) {
                 QString tooltip=QStringLiteral("Component: %1\nDefinition ID: %2\nOccurrence ID: %3\nPlacement origin: (%4, %5, %6) mm")
                     .arg(part.componentName,part.componentDefinitionId,part.occurrenceId)
                     .arg(part.placementX,0,'f',3).arg(part.placementY,0,'f',3).arg(part.placementZ,0,'f',3);
+                tooltip+=QStringLiteral("\nOrientation R/P/Y: %1° / %2° / %3°")
+                    .arg(part.placementRollDegrees,0,'f',2).arg(part.placementPitchDegrees,0,'f',2)
+                    .arg(part.placementYawDegrees,0,'f',2);
                 if(!part.assemblyJointType.isEmpty())tooltip+=QStringLiteral("\n%1 joint parent body: %2").arg(part.assemblyJointType,part.assemblyJointParentBodyId);
                 if(part.assemblyJointType=="Revolute")tooltip+=QStringLiteral("\nAngle: %1° (limits %2° to %3°)")
                     .arg(part.jointAngleDegrees,0,'f',3).arg(part.jointMinimumDegrees,0,'f',3).arg(part.jointMaximumDegrees,0,'f',3);
@@ -1290,6 +1609,333 @@ void MainWindow::createParametricOffsetExtrusion() {
     }
     refresh(true);
 }
+void MainWindow::createConstrainedTrapezoidExtrusion() {
+    QDialog dialog(this);dialog.setWindowTitle("Constrained trapezoid extrusion");auto* form=new QFormLayout(&dialog);
+    auto field=[&](const QString& label,double initial,double minimum=0.00001){
+        auto* box=new QDoubleSpinBox(&dialog);box->setRange(minimum,1000000);box->setDecimals(3);
+        box->setValue(initial);box->setSuffix(" mm");form->addRow(label,box);return box;
+    };
+    auto* bottom=field("Bottom width",50);auto* top=field("Top width",30);
+    auto* height=field("Profile height",25);auto* offset=field("Top left X offset",10,-1000000);
+    auto* depth=field("Extrusion depth",10);
+    auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);form->addRow(buttons);
+    connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);
+    connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+    if(dialog.exec()!=QDialog::Accepted)return;
+    cad::SketchModel sketch;
+    sketch.points={{"a",0,0},{"b",bottom->value(),0},
+                   {"c",offset->value()+top->value(),height->value()},{"d",offset->value(),height->value()}};
+    sketch.segments={{"bottom","a","b"},{"top","d","c"}};
+    auto fixed=[&](const QString& point,double x,double y){cad::SketchConstraint c;c.type=cad::SketchConstraintType::FixedPoint;c.pointA=point;c.fixedX=x;c.fixedY=y;return c;};
+    auto horizontal=[&](const QString& segment){cad::SketchConstraint c;c.type=cad::SketchConstraintType::Horizontal;c.segmentA=segment;return c;};
+    auto distance=[&](const QString& a,const QString& b,double value){cad::SketchConstraint c;c.type=cad::SketchConstraintType::Distance;c.pointA=a;c.pointB=b;c.value=value;return c;};
+    sketch.constraints={fixed("a",0,0),fixed("d",offset->value(),height->value()),
+                        horizontal("bottom"),horizontal("top"),distance("a","b",bottom->value()),
+                        distance("d","c",top->value())};
+    QString error;
+    if(!document_.addConstrainedPolygonExtrusion(sketch,{"a","b","c","d"},depth->value(),&error)){
+        reportError("Constrained trapezoid",error);return;
+    }
+    refresh(true);
+}
+void MainWindow::createConstrainedTriangleExtrusion() {
+    QDialog dialog(this);dialog.setWindowTitle("Constrained triangle from side lengths");auto* form=new QFormLayout(&dialog);
+    auto field=[&](const QString& label,double initial){auto* box=new QDoubleSpinBox(&dialog);
+        box->setRange(0.00001,1000000);box->setDecimals(3);box->setValue(initial);box->setSuffix(" mm");form->addRow(label,box);return box;};
+    auto* base=field("Base A–B",40);auto* left=field("Side A–C",30);
+    auto* right=field("Side B–C",35);auto* depth=field("Extrusion depth",10);
+    auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);form->addRow(buttons);
+    connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);
+    connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+    if(dialog.exec()!=QDialog::Accepted)return;
+    const double ab=base->value(),ac=left->value(),bc=right->value();
+    if(ab+ac<=bc||ab+bc<=ac||ac+bc<=ab){reportError("Constrained triangle","The three lengths do not form a triangle.");return;}
+    const double cx=(ab*ab+ac*ac-bc*bc)/(2*ab);
+    const double cy=std::sqrt(std::max(0.0,ac*ac-cx*cx));
+    cad::SketchModel sketch;sketch.points={{"a",0,0},{"b",ab,0},{"c",cx,cy}};
+    sketch.segments={{"base","a","b"},{"left","a","c"},{"right","b","c"}};
+    cad::SketchConstraint anchor;anchor.type=cad::SketchConstraintType::FixedPoint;anchor.pointA="a";
+    cad::SketchConstraint horizontal;horizontal.type=cad::SketchConstraintType::Horizontal;horizontal.segmentA="base";
+    auto distance=[&](const QString& a,const QString& b,double value){cad::SketchConstraint c;c.type=cad::SketchConstraintType::Distance;c.pointA=a;c.pointB=b;c.value=value;return c;};
+    sketch.constraints={anchor,horizontal,distance("a","b",ab),distance("a","c",ac),distance("b","c",bc)};
+    QString error;
+    if(!document_.addConstrainedPolygonExtrusion(sketch,{"a","b","c"},depth->value(),&error)){
+        reportError("Constrained triangle",error);return;
+    }
+    refresh(true);
+}
+void MainWindow::createConstrainedPolygonFromVertices() {
+    bool accepted=false;
+    const QString entered=QInputDialog::getMultiLineText(this,"Constrained polygon from vertices",
+        "Enter one X, Y coordinate pair per line, in boundary order (3–12 points, mm):",
+        "0, 0\n40, 0\n50, 25\n10, 30",&accepted);
+    if(!accepted)return;
+    const QStringList rows=entered.split('\n',Qt::SkipEmptyParts);
+    if(rows.size()<3||rows.size()>12){reportError("Constrained polygon","Enter 3 to 12 vertex rows.");return;}
+    cad::SketchModel sketch;QStringList boundary;
+    for(int i=0;i<rows.size();++i){
+        const QStringList values=rows[i].split(',');
+        bool validX=false,validY=false;
+        const double x=values.size()==2?values[0].trimmed().toDouble(&validX):0.0;
+        const double y=values.size()==2?values[1].trimmed().toDouble(&validY):0.0;
+        if(!validX||!validY||!std::isfinite(x)||!std::isfinite(y)||std::abs(x)>1e6||std::abs(y)>1e6){
+            reportError("Constrained polygon",QStringLiteral("Vertex %1 needs two finite X, Y coordinates within ±1,000,000 mm.").arg(i+1));return;
+        }
+        const QString id=QStringLiteral("P%1").arg(i+1);
+        boundary.append(id);sketch.points.append({id,x,y});
+        cad::SketchConstraint anchor;anchor.type=cad::SketchConstraintType::FixedPoint;
+        anchor.pointA=id;anchor.fixedX=x;anchor.fixedY=y;sketch.constraints.append(anchor);
+    }
+    for(int i=0;i<boundary.size();++i)
+        sketch.segments.append({QStringLiteral("edge%1").arg(i+1),boundary[i],boundary[(i+1)%boundary.size()]});
+    const double depth=QInputDialog::getDouble(this,"Constrained polygon extrusion","Extrusion depth (mm)",
+        10.0,0.00001,1000000.0,3,&accepted);
+    if(!accepted)return;
+    QString error;
+    if(!document_.addConstrainedPolygonExtrusion(sketch,boundary,depth,&error)){
+        reportError("Constrained polygon",error);return;
+    }
+    refresh(true);
+}
+void MainWindow::editConstrainedPolygonExtrusion() {
+    const QStringList ids=selectedIds();
+    if(ids.size()!=1){reportError("Edit constrained sketch","Select one constrained polygon extrusion.");return;}
+    const cad::Part* part=document_.find(ids.first());
+    if(!part||!part->hasConstrainedPolygonDefinition){
+        reportError("Edit constrained sketch","The selected body has no editable constrained polygon sketch.");return;
+    }
+    if(part->geometryToken!=part->constrainedPolygonGeometryToken){
+        reportError("Edit constrained sketch","The sketch is stale after a direct geometry edit.");return;
+    }
+    cad::SketchModel sketch=part->constrainedPolygonSketch;
+    const QStringList boundary=part->constrainedPolygonBoundary;
+    QDialog dialog(this);dialog.setWindowTitle("Edit constrained polygon sketch");dialog.setMinimumWidth(410);
+    auto* form=new QFormLayout(&dialog);
+    auto makeField=[&](const QString& label,double value,double minimum,double maximum){
+        auto* box=new QDoubleSpinBox(&dialog);box->setRange(minimum,maximum);
+        box->setDecimals(4);box->setValue(value);box->setSuffix(" mm");form->addRow(label,box);return box;
+    };
+    auto* depth=makeField("Extrusion depth",part->constrainedPolygonDepthMm,0.00001,1000000);
+    QVector<std::function<void()>> apply;
+    for(int i=0;i<sketch.constraints.size();++i){
+        const auto& constraint=sketch.constraints[i];
+        if(constraint.type==cad::SketchConstraintType::Distance||
+           constraint.type==cad::SketchConstraintType::HorizontalDistance||
+           constraint.type==cad::SketchConstraintType::VerticalDistance){
+            const bool signedDistance=constraint.type!=cad::SketchConstraintType::Distance;
+            const QString direction=constraint.type==cad::SketchConstraintType::HorizontalDistance?"horizontal ":
+                constraint.type==cad::SketchConstraintType::VerticalDistance?"vertical ":"";
+            auto* box=makeField(QStringLiteral("%1Distance %2 to %3").arg(direction,constraint.pointA,constraint.pointB),
+                                constraint.value,signedDistance?-1000000.0:0.00001,1000000.0);
+            apply.append([&sketch,i,box]{sketch.constraints[i].value=box->value();});
+        }else if(constraint.type==cad::SketchConstraintType::Angle){
+            auto* box=makeField(QStringLiteral("Angle %1 to %2 (degrees)").arg(constraint.segmentA,constraint.segmentB),
+                                constraint.value*180.0/std::acos(-1.0),-360,360);
+            box->setSuffix("°");
+            apply.append([&sketch,i,box]{sketch.constraints[i].value=box->value()*std::acos(-1.0)/180.0;});
+        }else if(constraint.type==cad::SketchConstraintType::Radius){
+            auto* box=makeField(QStringLiteral("Circle %1 radius").arg(constraint.circleA),constraint.value,0.00001,1000000);
+            apply.append([&sketch,i,box]{sketch.constraints[i].value=box->value();});
+        }else if(constraint.type==cad::SketchConstraintType::FixedPoint){
+            auto* x=makeField(QStringLiteral("Anchor %1 X").arg(constraint.pointA),constraint.fixedX,-1000000,1000000);
+            auto* y=makeField(QStringLiteral("Anchor %1 Y").arg(constraint.pointA),constraint.fixedY,-1000000,1000000);
+            apply.append([&sketch,i,x,y]{sketch.constraints[i].fixedX=x->value();sketch.constraints[i].fixedY=y->value();});
+        }
+    }
+    auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);form->addRow(buttons);
+    connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);
+    connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+    if(dialog.exec()!=QDialog::Accepted)return;
+    for(const auto& update:apply)update();
+    QString error;
+    if(!document_.updateConstrainedPolygonExtrusion(ids.first(),sketch,boundary,depth->value(),&error)){
+        reportError("Edit constrained sketch",error);return;
+    }
+    refresh();
+}
+void MainWindow::editConstrainedSketchRelations() {
+    const QStringList ids=selectedIds();
+    if(ids.size()!=1){reportError("Sketch constraints","Select one constrained polygon extrusion.");return;}
+    const cad::Part* part=document_.find(ids.first());
+    if(!part||!part->hasConstrainedPolygonDefinition||
+       part->geometryToken!=part->constrainedPolygonGeometryToken){
+        reportError("Sketch constraints","Select a current constrained polygon sketch. A direct geometry edit makes its sketch history stale.");return;
+    }
+    cad::SketchModel sketch=part->constrainedPolygonSketch;
+    QStringList pointIds,segmentIds,circleIds;
+    for(const auto& point:sketch.points)pointIds.append(point.id);
+    for(const auto& segment:sketch.segments)segmentIds.append(segment.id);
+    for(const auto& circle:sketch.circles)circleIds.append(circle.id);
+    bool accepted=false;
+    const QString operation=QInputDialog::getItem(this,"Sketch constraints","Action:",
+        {"Add constraint","Remove constraint","Unfix point"},0,false,&accepted);
+    if(!accepted)return;
+    if(operation=="Remove constraint"){
+        if(sketch.constraints.isEmpty()){reportError("Sketch constraints","This sketch has no constraints to remove.");return;}
+        const QStringList typeNames={"Coincident points","Horizontal segment","Vertical segment","Point distance",
+            "Fixed point","Equal segment lengths","Parallel segments","Perpendicular segments","Segment angle",
+            "Signed horizontal distance","Signed vertical distance","Point on line","Segment midpoint","Collinear segments",
+            "Circle radius","Equal circle radii","Concentric circles","Point on circle","Line tangent to circle",
+            "Points symmetric about line","Externally tangent circles","Internally tangent circles","Point on segment"};
+        QStringList labels;
+        for(int i=0;i<sketch.constraints.size();++i){
+            const auto& c=sketch.constraints[i];
+            QStringList references{c.pointA,c.pointB,c.segmentA,c.segmentB,c.circleA,c.circleB};references.removeAll(QString());
+            labels.append(QStringLiteral("%1. %2 — %3").arg(i+1).arg(typeNames.value(static_cast<int>(c.type),"Unknown"),
+                references.join(", ")));
+        }
+        const QString chosen=QInputDialog::getItem(this,"Remove sketch constraint","Constraint:",labels,0,false,&accepted);
+        if(!accepted)return;
+        sketch.constraints.removeAt(labels.indexOf(chosen));
+    }else if(operation=="Unfix point"){
+        const QString point=QInputDialog::getItem(this,"Unfix sketch point","Point:",pointIds,0,false,&accepted);
+        if(!accepted)return;
+        int removed=0;
+        for(int i=sketch.constraints.size()-1;i>=0;--i)
+            if(sketch.constraints[i].type==cad::SketchConstraintType::FixedPoint&&sketch.constraints[i].pointA==point){
+                sketch.constraints.removeAt(i);++removed;
+            }
+        if(!removed){reportError("Sketch constraints","The selected point is not fixed.");return;}
+    }else{
+        using Type=cad::SketchConstraintType;
+        const QVector<QPair<QString,Type>> types={
+            {"Coincident points",Type::Coincident},{"Horizontal segment",Type::Horizontal},
+            {"Vertical segment",Type::Vertical},{"Point distance",Type::Distance},
+            {"Signed horizontal distance",Type::HorizontalDistance},{"Signed vertical distance",Type::VerticalDistance},
+            {"Fixed point",Type::FixedPoint},{"Equal segment lengths",Type::EqualLength},
+            {"Parallel segments",Type::Parallel},{"Perpendicular segments",Type::Perpendicular},
+            {"Angle between segments",Type::Angle},{"Point on line",Type::PointOnLine},
+            {"Point at segment midpoint",Type::Midpoint},{"Collinear segments",Type::Collinear},
+            {"Circle radius",Type::Radius},{"Equal circle radii",Type::EqualRadius},
+            {"Concentric circles",Type::Concentric},{"Point on circle",Type::PointOnCircle},
+            {"Line tangent to circle",Type::TangentLineCircle},
+            {"Points symmetric about line",Type::SymmetricAboutLine},
+            {"Externally tangent circles",Type::TangentCirclesExternal},
+            {"Internally tangent circles",Type::TangentCirclesInternal},
+            {"Point on segment",Type::PointOnSegment}};
+        QStringList labels;for(const auto& entry:types)labels.append(entry.first);
+        const QString selected=QInputDialog::getItem(this,"Add sketch constraint","Constraint type:",labels,0,false,&accepted);
+        if(!accepted)return;
+        cad::SketchConstraint constraint;constraint.type=types[labels.indexOf(selected)].second;
+        auto choose=[&](const QString& label,const QStringList& options){
+            return QInputDialog::getItem(this,"Add sketch constraint",label,options,0,false,&accepted);
+        };
+        const bool usesPoints=constraint.type==Type::Coincident||constraint.type==Type::Distance||
+            constraint.type==Type::HorizontalDistance||constraint.type==Type::VerticalDistance||
+            constraint.type==Type::FixedPoint||constraint.type==Type::PointOnLine||constraint.type==Type::PointOnSegment||
+            constraint.type==Type::Midpoint||
+            constraint.type==Type::PointOnCircle||constraint.type==Type::SymmetricAboutLine;
+        const bool usesTwoPoints=constraint.type==Type::Coincident||constraint.type==Type::Distance||
+            constraint.type==Type::HorizontalDistance||constraint.type==Type::VerticalDistance||
+            constraint.type==Type::SymmetricAboutLine;
+        const bool usesTwoSegments=constraint.type==Type::EqualLength||constraint.type==Type::Parallel||
+            constraint.type==Type::Perpendicular||constraint.type==Type::Angle||constraint.type==Type::Collinear;
+        const bool usesSegment=constraint.type==Type::Horizontal||constraint.type==Type::Vertical||
+            constraint.type==Type::PointOnLine||constraint.type==Type::PointOnSegment||
+            constraint.type==Type::Midpoint||constraint.type==Type::TangentLineCircle||
+            constraint.type==Type::SymmetricAboutLine||usesTwoSegments;
+        const bool usesCircle=constraint.type==Type::Radius||constraint.type==Type::EqualRadius||
+            constraint.type==Type::Concentric||constraint.type==Type::PointOnCircle||constraint.type==Type::TangentLineCircle||
+            constraint.type==Type::TangentCirclesExternal||constraint.type==Type::TangentCirclesInternal;
+        const bool usesTwoCircles=constraint.type==Type::EqualRadius||constraint.type==Type::Concentric||
+            constraint.type==Type::TangentCirclesExternal||constraint.type==Type::TangentCirclesInternal;
+        if(usesPoints){constraint.pointA=choose("First point:",pointIds);if(!accepted)return;}
+        if(usesTwoPoints){constraint.pointB=choose("Second point:",pointIds);if(!accepted)return;}
+        if(usesSegment){constraint.segmentA=choose("First segment:",segmentIds);if(!accepted)return;}
+        if(usesTwoSegments){constraint.segmentB=choose("Second segment:",segmentIds);if(!accepted)return;}
+        if(usesCircle){
+            if(circleIds.isEmpty()){reportError("Sketch constraints","Add a sketch circle first.");return;}
+            constraint.circleA=choose("First circle:",circleIds);if(!accepted)return;
+        }
+        if(usesTwoCircles){constraint.circleB=choose("Second circle:",circleIds);if(!accepted)return;}
+        if(constraint.type==Type::Distance||constraint.type==Type::HorizontalDistance||
+           constraint.type==Type::VerticalDistance||constraint.type==Type::Angle||constraint.type==Type::Radius){
+            const bool angle=constraint.type==Type::Angle;
+            const bool positive=constraint.type==Type::Distance||constraint.type==Type::Radius;
+            const double entered=QInputDialog::getDouble(this,"Add sketch constraint",
+                angle?"Signed angle (degrees):":"Distance (mm):",angle?90.0:10.0,
+                angle?-360.0:(positive?0.00001:-1000000.0),angle?360.0:1000000.0,3,&accepted);
+            if(!accepted)return;
+            constraint.value=angle?entered*std::acos(-1.0)/180.0:entered;
+        }
+        if(constraint.type==Type::FixedPoint){
+            const auto pointIt=std::find_if(sketch.points.cbegin(),sketch.points.cend(),
+                [&](const cad::SketchPoint& p){return p.id==constraint.pointA;});
+            const double initialX=pointIt==sketch.points.cend()?0.0:pointIt->x;
+            const double initialY=pointIt==sketch.points.cend()?0.0:pointIt->y;
+            constraint.fixedX=QInputDialog::getDouble(this,"Fix sketch point","X (mm):",initialX,-1000000,1000000,3,&accepted);
+            if(!accepted)return;
+            constraint.fixedY=QInputDialog::getDouble(this,"Fix sketch point","Y (mm):",initialY,-1000000,1000000,3,&accepted);
+            if(!accepted)return;
+        }
+        sketch.constraints.append(constraint);
+    }
+    QString error;
+    if(!document_.updateConstrainedPolygonExtrusion(ids.first(),sketch,part->constrainedPolygonBoundary,
+                                                      part->constrainedPolygonDepthMm,&error)){
+        reportError("Sketch constraints",error);return;
+    }
+    refresh();
+}
+void MainWindow::editConstrainedSketchCircles() {
+    const QStringList ids=selectedIds();
+    if(ids.size()!=1){reportError("Sketch circles","Select one constrained polygon extrusion.");return;}
+    const cad::Part* part=document_.find(ids.first());
+    if(!part||!part->hasConstrainedPolygonDefinition||part->geometryToken!=part->constrainedPolygonGeometryToken){
+        reportError("Sketch circles","Select a current constrained polygon sketch.");return;
+    }
+    cad::SketchModel sketch=part->constrainedPolygonSketch;
+    bool accepted=false;
+    const QString operation=QInputDialog::getItem(this,"Sketch circles","Action:",
+        {"Add circular cutout","Add construction circle","Remove circle"},0,false,&accepted);
+    if(!accepted)return;
+    if(operation=="Remove circle"){
+        if(sketch.circles.isEmpty()){reportError("Sketch circles","This sketch has no circles to remove.");return;}
+        QStringList labels;for(const auto& circle:sketch.circles)labels.append(circle.id);
+        const QString selected=QInputDialog::getItem(this,"Remove sketch circle","Circle:",labels,0,false,&accepted);
+        if(!accepted)return;
+        const int index=labels.indexOf(selected);if(index<0)return;
+        const QString center=sketch.circles[index].centerPointId;
+        sketch.circles.removeAt(index);
+        for(int i=sketch.constraints.size()-1;i>=0;--i)
+            if(sketch.constraints[i].circleA==selected||sketch.constraints[i].circleB==selected)sketch.constraints.removeAt(i);
+        bool centerUsed=part->constrainedPolygonBoundary.contains(center);
+        for(const auto& circle:sketch.circles)if(circle.centerPointId==center)centerUsed=true;
+        for(const auto& segment:sketch.segments)if(segment.startPointId==center||segment.endPointId==center)centerUsed=true;
+        for(const auto& constraint:sketch.constraints)
+            if((constraint.pointA==center||constraint.pointB==center)&&constraint.type!=cad::SketchConstraintType::FixedPoint)centerUsed=true;
+        if(!centerUsed){
+            for(int i=sketch.constraints.size()-1;i>=0;--i)
+                if(sketch.constraints[i].type==cad::SketchConstraintType::FixedPoint&&sketch.constraints[i].pointA==center)
+                    sketch.constraints.removeAt(i);
+            for(int i=sketch.points.size()-1;i>=0;--i)if(sketch.points[i].id==center)sketch.points.removeAt(i);
+        }
+    }else{
+        if(sketch.circles.size()>=64||sketch.points.size()>=64){reportError("Sketch circles","The sketch entity limit has been reached.");return;}
+        const double x=QInputDialog::getDouble(this,"Sketch circle","Center X (mm):",5,-1000000,1000000,3,&accepted);if(!accepted)return;
+        const double y=QInputDialog::getDouble(this,"Sketch circle","Center Y (mm):",5,-1000000,1000000,3,&accepted);if(!accepted)return;
+        const double radius=QInputDialog::getDouble(this,"Sketch circle","Radius (mm):",2,0.00001,1000000,3,&accepted);if(!accepted)return;
+        int suffix=sketch.circles.size()+1;QString circleId,centerId;
+        while(true){
+            circleId=QStringLiteral("circle%1").arg(suffix);centerId=QStringLiteral("circle-center%1").arg(suffix);
+            const bool circleUsed=std::any_of(sketch.circles.cbegin(),sketch.circles.cend(),[&](const cad::SketchCircle& c){return c.id==circleId;});
+            const bool centerUsed=std::any_of(sketch.points.cbegin(),sketch.points.cend(),[&](const cad::SketchPoint& p){return p.id==centerId;});
+            if(!circleUsed&&!centerUsed)break;++suffix;
+        }
+        sketch.points.append({centerId,x,y});
+        sketch.circles.append({circleId,centerId,radius,operation=="Add circular cutout"});
+        cad::SketchConstraint anchor;anchor.type=cad::SketchConstraintType::FixedPoint;anchor.pointA=centerId;
+        anchor.fixedX=x;anchor.fixedY=y;sketch.constraints.append(anchor);
+        cad::SketchConstraint size;size.type=cad::SketchConstraintType::Radius;size.circleA=circleId;size.value=radius;
+        sketch.constraints.append(size);
+    }
+    QString error;
+    if(!document_.updateConstrainedPolygonExtrusion(ids.first(),sketch,part->constrainedPolygonBoundary,
+                                                      part->constrainedPolygonDepthMm,&error)){
+        reportError("Sketch circles",error);return;
+    }
+    refresh();
+}
 void MainWindow::addParametricThroughHole() {
     const QStringList ids=selectedIds();
     if(ids.size()!=1){reportError("Parametric through-hole","Select one current parametric rectangle extrusion.");return;}
@@ -1301,10 +1947,29 @@ void MainWindow::addParametricThroughHole() {
     }
     refresh();
 }
+void MainWindow::addParametricBlindHole() {
+    const QStringList ids=selectedIds();
+    if(ids.size()!=1){reportError("Parametric blind hole","Select one current parametric rectangle extrusion.");return;}
+    QDialog dialog(this);dialog.setWindowTitle("Add constrained circular sketch and blind hole");auto* form=new QFormLayout(&dialog);
+    const auto dimension=[&](const QString& label,double value){auto* box=new QDoubleSpinBox(&dialog);box->setRange(0.00001,1000000);box->setDecimals(3);box->setSingleStep(1);box->setValue(value);box->setSuffix(" mm");form->addRow(label,box);return box;};
+    const auto coordinate=[&](const QString& label,double value){auto* box=new QDoubleSpinBox(&dialog);box->setRange(-1000000,1000000);box->setDecimals(3);box->setSingleStep(1);box->setValue(value);box->setSuffix(" mm");form->addRow(label,box);return box;};
+    auto* diameter=dimension("Hole diameter",8.0);auto* centerX=coordinate("Circle center X",20.0);
+    auto* centerY=coordinate("Circle center Y",15.0);auto* holeDepth=dimension("Blind depth",8.0);
+    auto* note=new QLabel("The circular profile is dimensioned and cut inward from the top face. Depth must be less than the base extrusion thickness.",&dialog);
+    note->setWordWrap(true);form->addRow(note);
+    auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);form->addRow(buttons);
+    connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+    if(dialog.exec()!=QDialog::Accepted)return;
+    QString error;
+    if(!document_.addParametricBlindHole(ids.first(),diameter->value(),centerX->value(),centerY->value(),holeDepth->value(),&error)){
+        reportError("Parametric blind hole",error);return;
+    }
+    refresh(true);
+}
 void MainWindow::addParametricLinearHolePattern() {
     const QStringList ids=selectedIds();
-    if(ids.size()!=1){reportError("Parametric hole pattern","Select one body with a current parametric through-hole.");return;}
-    QDialog dialog(this);dialog.setWindowTitle("Linear through-hole pattern");auto* form=new QFormLayout(&dialog);
+    if(ids.size()!=1){reportError("Parametric hole pattern","Select one body with a current parametric through-hole or blind hole.");return;}
+    QDialog dialog(this);dialog.setWindowTitle("Linear parametric hole pattern");auto* form=new QFormLayout(&dialog);
     auto* count=new QSpinBox(&dialog);count->setRange(2,100);count->setValue(4);
     auto* spacing=new QDoubleSpinBox(&dialog);spacing->setRange(0.00001,1000000.0);spacing->setDecimals(3);spacing->setValue(12.0);spacing->setSuffix(" mm");
     auto* axis=new QComboBox(&dialog);axis->addItems({"X","Y"});
@@ -1318,6 +1983,32 @@ void MainWindow::addParametricLinearHolePattern() {
         reportError("Parametric hole pattern",error);return;
     }
     refresh();
+}
+void MainWindow::addParametricAllEdgeChamfer() {
+    const QStringList ids=selectedIds();
+    if(ids.size()!=1){reportError("Parametric chamfer","Select one current parametric solid.");return;}
+    bool accepted=false;
+    const double distance=QInputDialog::getDouble(this,"Add parametric all-edge chamfer",
+        "Chamfer distance parameter (mm):",1.0,0.00001,1000000.0,4,&accepted);
+    if(!accepted)return;
+    QString error;
+    if(!document_.addParametricAllEdgeChamfer(ids.first(),distance,&error)){
+        reportError("Parametric chamfer",error);return;
+    }
+    refresh();statusBar()->showMessage("Added an editable all-edge chamfer to the parametric feature history.",8000);
+}
+void MainWindow::addParametricAllEdgeFillet() {
+    const QStringList ids=selectedIds();
+    if(ids.size()!=1){reportError("Parametric fillet","Select one current parametric solid.");return;}
+    bool accepted=false;
+    const double radius=QInputDialog::getDouble(this,"Add parametric all-edge fillet",
+        "Fillet radius parameter (mm):",1.0,0.00001,1000000.0,4,&accepted);
+    if(!accepted)return;
+    QString error;
+    if(!document_.addParametricAllEdgeFillet(ids.first(),radius,&error)){
+        reportError("Parametric fillet",error);return;
+    }
+    refresh();statusBar()->showMessage("Added an editable all-edge fillet to the parametric feature history.",8000);
 }
 void MainWindow::editNamedParameter() {
     const QStringList ids=selectedIds();if(ids.size()!=1){reportError("Edit named parameters","Select one parametric body.");return;}
@@ -1340,6 +2031,61 @@ void MainWindow::editNamedParameter() {
     QMap<QString,double> values;for(auto it=editors.cbegin();it!=editors.cend();++it)values.insert(it.key(),it.value()->value());
     QString error;if(!document_.setNamedParameters(ids.first(),values,&error)){reportError("Edit named parameters",error);return;}refresh();
 }
+void MainWindow::editParameterLinks() {
+    const QStringList ids=selectedIds();
+    if(ids.size()!=1){reportError("Edit parameter links","Select one parametric body.");return;}
+    const QString id=ids.first();
+    const QMap<QString,double> parameters=document_.namedParameters(id);
+    if(parameters.isEmpty()){reportError("Edit parameter links","The selected body has no editable parameter definition.");return;}
+    QStringList dimensions;
+    for(auto it=parameters.cbegin();it!=parameters.cend();++it)
+        if(it.key()=="width"||it.key()=="height"||it.key()=="depth"||it.key()=="hole_diameter"||it.key()=="hole_depth"||it.key()=="hole_pattern_spacing")
+            dimensions.append(it.key());
+    if(dimensions.size()<2){reportError("Edit parameter links","This feature history does not have enough linkable dimensions.");return;}
+    const auto links=document_.parameterLinks(id);
+    QDialog dialog(this);dialog.setWindowTitle("Edit named parameter links");auto* form=new QFormLayout(&dialog);
+    auto* target=new QComboBox(&dialog);auto* source=new QComboBox(&dialog);
+    target->addItems(dimensions);source->addItems(dimensions);
+    auto* scale=new QDoubleSpinBox(&dialog);scale->setRange(0.000001,1000000.0);scale->setDecimals(6);scale->setSingleStep(0.1);scale->setValue(1.0);
+    auto* offset=new QDoubleSpinBox(&dialog);offset->setRange(-1000000.0,1000000.0);offset->setDecimals(4);offset->setSingleStep(1.0);offset->setValue(0.0);offset->setSuffix(" mm");
+    auto* current=new QLabel(&dialog);current->setWordWrap(true);
+    form->addRow("Driven target dimension:",target);form->addRow("Source dimension:",source);
+    form->addRow("Scale:",scale);form->addRow("Offset:",offset);form->addRow("Current links:",current);
+    auto* explanation=new QLabel("Links rebuild the model as one undoable edit. Cycles, invalid dimensions, and edits that violate sketch containment are rejected without changing the current solid.",&dialog);
+    explanation->setWordWrap(true);form->addRow(explanation);
+    auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);
+    buttons->button(QDialogButtonBox::Ok)->setText("Set / replace link");
+    auto* remove=buttons->addButton("Remove selected link",QDialogButtonBox::ActionRole);
+    form->addRow(buttons);
+    auto refreshLinkEditor=[&]{
+        const QString driven=target->currentText();
+        const auto link=links.constFind(driven);
+        if(link==links.cend())current->setText("No link for this target.");
+        else current->setText(QStringLiteral("%1 = %2 × %3 %4 %5 mm").arg(driven,link->source)
+            .arg(link->scale,0,'g',8).arg(link->offset<0.0?QStringLiteral("−"):QStringLiteral("+")).arg(std::abs(link->offset),0,'g',8));
+        remove->setEnabled(links.contains(driven));
+        const QString defaultSource=dimensions.first()==driven?dimensions.value(1):dimensions.first();
+        const int sourceIndex=source->findText(link==links.cend()?defaultSource:link->source);
+        if(sourceIndex>=0)source->setCurrentIndex(sourceIndex);
+        scale->setValue(link==links.cend()?1.0:link->scale);
+        offset->setValue(link==links.cend()?0.0:link->offset);
+    };
+    connect(target,&QComboBox::currentTextChanged,&dialog,[&]{refreshLinkEditor();});
+    connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);
+    connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+    connect(remove,&QPushButton::clicked,&dialog,[&]{
+        QString error;
+        if(!document_.removeParameterLink(id,target->currentText(),&error))reportError("Remove parameter link",error);
+        else{refresh();dialog.accept();}
+    });
+    refreshLinkEditor();
+    if(dialog.exec()!=QDialog::Accepted)return;
+    QString error;
+    if(!document_.setParameterLink(id,target->currentText(),source->currentText(),scale->value(),offset->value(),&error)){
+        reportError("Set parameter link",error);return;
+    }
+    refresh();
+}
 void MainWindow::showSelectedFeatureHistory() {
     const QStringList ids=selectedIds();if(ids.size()!=1){reportError("Feature history","Select one body.");return;}
     const QStringList constraints=document_.sketchConstraints(ids.first());const QStringList features=document_.featureHistory(ids.first());
@@ -1349,7 +2095,256 @@ void MainWindow::showSelectedFeatureHistory() {
     lines.append(QString());lines.append("Sketch constraints:");for(const QString& constraint:constraints)lines.append("  "+constraint);
     lines.append(QString());lines.append("Editable features:");for(int i=0;i<features.size();++i)lines.append(QStringLiteral("  %1. %2").arg(i+1).arg(features[i]));
     if(!document_.parametricDefinitionCurrent(ids.first()))lines.append(QStringLiteral("Geometry has changed since this history was authored; parameter editing is disabled for safety."));
-    QMessageBox::information(this,"Parametric sketch and feature history",lines.join('\n'));
+    const bool editable=document_.parametricDefinitionCurrent(ids.first());
+    if(!editable||features.isEmpty()){
+        QMessageBox::information(this,"Parametric sketch and feature history",lines.join('\n'));return;
+    }
+    const QStringList suppressed=document_.suppressedParametricFeatures(ids.first());
+    QStringList choices;
+    QStringList featureIds;
+    const auto addFeatureChoice=[&](const QString& label,const QString& featureId){
+        choices.append(QStringLiteral("%1 [%2]").arg(label,
+            suppressed.contains(featureId)?QStringLiteral("suppressed"):QStringLiteral("active")));
+        featureIds.append(featureId);
+    };
+    if(features.contains(QStringLiteral("Cut: Parametric through-hole")))
+        addFeatureChoice(QStringLiteral("Through-hole cut"),QStringLiteral("through_hole"));
+    if(features.contains(QStringLiteral("Cut: Parametric blind hole")))
+        addFeatureChoice(QStringLiteral("Blind-hole cut"),QStringLiteral("blind_hole"));
+    if(features.contains(QStringLiteral("Pattern: Linear through-hole array along X"))||
+       features.contains(QStringLiteral("Pattern: Linear through-hole array along Y"))||
+       features.contains(QStringLiteral("Pattern: Linear blind-hole array along X"))||
+       features.contains(QStringLiteral("Pattern: Linear blind-hole array along Y")))
+        addFeatureChoice(QStringLiteral("Linear hole pattern"),QStringLiteral("linear_hole_pattern"));
+    if(features.contains(QStringLiteral("Chamfer: All edges")))
+        addFeatureChoice(QStringLiteral("All-edge chamfer"),QStringLiteral("edge_chamfer"));
+    if(features.contains(QStringLiteral("Fillet: All edges")))
+        addFeatureChoice(QStringLiteral("All-edge fillet"),QStringLiteral("edge_fillet"));
+    if(choices.isEmpty()){
+        QMessageBox::information(this,"Parametric sketch and feature history",lines.join('\n'));return;
+    }
+    QDialog dialog(this);dialog.setWindowTitle("Edit feature history");dialog.resize(610,480);
+    auto* layout=new QVBoxLayout(&dialog);
+    auto* summary=new QPlainTextEdit(lines.join('\n'),&dialog);summary->setReadOnly(true);
+    layout->addWidget(summary);
+    layout->addWidget(new QLabel("Active optional operations (clear a check box to suppress):",&dialog));
+    QVector<QCheckBox*> toggles;toggles.reserve(featureIds.size());
+    for(int i=0;i<featureIds.size();++i){
+        auto* toggle=new QCheckBox(choices[i].section(" [",0,0),&dialog);
+        toggle->setChecked(!suppressed.contains(featureIds[i]));
+        layout->addWidget(toggle);toggles.append(toggle);
+    }
+    auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);
+    layout->addWidget(buttons);
+    connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);
+    connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+    if(dialog.exec()!=QDialog::Accepted)return;
+    QStringList proposed;
+    for(int i=0;i<featureIds.size();++i)if(!toggles[i]->isChecked())proposed.append(featureIds[i]);
+    QString error;
+    if(!document_.setParametricFeaturesSuppressed(ids.first(),proposed,&error)){
+        reportError("Edit feature history",error);return;
+    }
+    refresh();statusBar()->showMessage("Feature history rebuilt from the selected active operations.",8000);
+}
+
+void MainWindow::createLoftedSurfaceBody() {
+    QDialog dialog(this);dialog.setWindowTitle("Lofted surface body");dialog.setMinimumWidth(420);
+    auto* form=new QFormLayout(&dialog);
+    auto makeLength=[&](double value){
+        auto* field=new QDoubleSpinBox(&dialog);field->setRange(0.001,1000000.0);field->setDecimals(3);
+        field->setSingleStep(1.0);field->setSuffix(" mm");field->setValue(value);return field;
+    };
+    auto* bottomWidth=makeLength(40);auto* bottomHeight=makeLength(30);
+    auto* middleWidth=makeLength(32);auto* middleHeight=makeLength(24);auto* middleZ=makeLength(40);
+    auto* topWidth=makeLength(24);auto* topHeight=makeLength(18);auto* topZ=makeLength(80);
+    form->addRow("Bottom section width:",bottomWidth);form->addRow("Bottom section height:",bottomHeight);
+    form->addRow("Middle section width:",middleWidth);form->addRow("Middle section height:",middleHeight);
+    form->addRow("Middle section Z:",middleZ);form->addRow("Top section width:",topWidth);
+    form->addRow("Top section height:",topHeight);form->addRow("Top section Z:",topZ);
+    auto* explanation=new QLabel("Creates an open surface shell through three centered rectangular sections. It remains a surface body until stitched or thickened.",&dialog);
+    explanation->setWordWrap(true);form->addRow(explanation);
+    auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);form->addRow(buttons);
+    connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);
+    connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+    if(dialog.exec()!=QDialog::Accepted)return;
+    if(middleZ->value()>=topZ->value()){
+        reportError("Lofted surface","The top section Z position must be above the middle section.");return;
+    }
+    auto rectangleWire=[](double width,double height,double z){
+        const double x=width*0.5,y=height*0.5;
+        BRepBuilderAPI_MakePolygon polygon;
+        polygon.Add(gp_Pnt(-x,-y,z));polygon.Add(gp_Pnt(x,-y,z));
+        polygon.Add(gp_Pnt(x,y,z));polygon.Add(gp_Pnt(-x,y,z));polygon.Close();
+        return polygon.IsDone()?polygon.Wire():TopoDS_Wire{};
+    };
+    const std::vector<TopoDS_Wire> sections{
+        rectangleWire(bottomWidth->value(),bottomHeight->value(),0.0),
+        rectangleWire(middleWidth->value(),middleHeight->value(),middleZ->value()),
+        rectangleWire(topWidth->value(),topHeight->value(),topZ->value())};
+    TopoDS_Shell shell;QString error;
+    if(!cad::makeLoftedSurfaceShell(sections,&shell,&error)){
+        reportError("Lofted surface",error);return;
+    }
+    if(!document_.addSurfaceBody("Lofted Surface",shell,&error)){
+        reportError("Lofted surface",error);return;
+    }
+    refresh(true);statusBar()->showMessage("Created a lofted surface body from three sections.",8000);
+}
+
+void MainWindow::extrudeSelectedEdgeSurface() {
+    const auto edges=viewport_->selectedEdgeReferences();
+    if(edges.size()!=1){QMessageBox::information(this,"Extruded surface","Switch to Select → Edges and select exactly one boundary edge.");return;}
+    const auto values=valuesDialog(this,"Extrude selected edge as a surface",
+        {"X translation (mm)","Y translation (mm)","Z translation (mm)"},{0,0,25},-1e6,1e6);
+    if(!values)return;
+    const auto edge=selectedSubshape(document_,edges.first().partId,edges.first().geometryToken,edges.first().edgeIndex,TopAbs_EDGE);
+    if(edge.IsNull()){reportError("Extruded surface","The selected edge reference is stale. Select it again.");return;}
+    TopoDS_Face face;QString error;
+    if(!cad::makeExtrudedSurface(TopoDS::Edge(edge),gp_Vec((*values)[0],(*values)[1],(*values)[2]),&face,&error)||
+       !document_.addSurfaceBody("Extruded Surface",face,&error)){
+        reportError("Extruded surface",error);return;
+    }
+    refresh(true);statusBar()->showMessage("Created a persisted surface body from the selected edge.",8000);
+}
+
+void MainWindow::revolveSelectedEdgeSurface() {
+    const auto edges=viewport_->selectedEdgeReferences();
+    if(edges.size()!=1){QMessageBox::information(this,"Revolved surface","Switch to Select → Edges and select exactly one profile edge.");return;}
+    const auto values=valuesDialog(this,"Revolve selected edge about world Z",
+        {"Axis X (mm)","Axis Y (mm)","Axis Z (mm)","Revolve angle (degrees)"},{0,0,0,90},-1e6,1e6);
+    if(!values)return;
+    if((*values)[3]<0.001||(*values)[3]>360.0){reportError("Revolved surface","Angle must be between 0.001 and 360 degrees.");return;}
+    const auto edge=selectedSubshape(document_,edges.first().partId,edges.first().geometryToken,edges.first().edgeIndex,TopAbs_EDGE);
+    if(edge.IsNull()){reportError("Revolved surface","The selected edge reference is stale. Select it again.");return;}
+    TopoDS_Face face;QString error;
+    const gp_Ax1 axis(gp_Pnt((*values)[0],(*values)[1],(*values)[2]),gp_Dir(0,0,1));
+    if(!cad::makeRevolvedSurface(TopoDS::Edge(edge),axis,(*values)[3]*std::numbers::pi/180.0,&face,&error)||
+       !document_.addSurfaceBody("Revolved Surface",face,&error)){
+        reportError("Revolved surface",error);return;
+    }
+    refresh(true);statusBar()->showMessage("Created a persisted revolved surface body.",8000);
+}
+
+void MainWindow::offsetSelectedSurface() {
+    const auto faces=viewport_->selectedFaceReferences();
+    if(faces.size()!=1){QMessageBox::information(this,"Offset surface","Switch to Select → Faces and select exactly one surface face.");return;}
+    const auto values=valuesDialog(this,"Offset selected surface face",{"Offset distance (mm)","Kernel tolerance (mm)"},{2,0.01},-1e6,1e6);
+    if(!values)return;
+    const auto face=selectedSubshape(document_,faces.first().partId,faces.first().geometryToken,faces.first().faceIndex,TopAbs_FACE);
+    if(face.IsNull()){reportError("Offset surface","The selected face reference is stale. Select it again.");return;}
+    TopoDS_Shape offset;QString error;
+    if(!cad::makeOffsetSurface(TopoDS::Face(face),(*values)[0],(*values)[1],&offset,&error)||
+       !document_.addSurfaceBody("Offset Surface",offset,&error)){
+        reportError("Offset surface",error);return;
+    }
+    refresh(true);statusBar()->showMessage("Created an offset surface body.",8000);
+}
+
+void MainWindow::extendSelectedSurface() {
+    const auto faces=viewport_->selectedFaceReferences();
+    if(faces.size()!=1){QMessageBox::information(this,"Extend surface","Switch to Select → Faces and select exactly one surface face.");return;}
+    QDialog dialog(this);dialog.setWindowTitle("Extend selected surface face");auto* form=new QFormLayout(&dialog);
+    auto* distance=new QDoubleSpinBox(&dialog);distance->setRange(0.000001,1000000);distance->setDecimals(3);distance->setValue(5);distance->setSuffix(" mm");
+    auto* uMin=new QCheckBox("U minimum",&dialog);auto* uMax=new QCheckBox("U maximum",&dialog);
+    auto* vMin=new QCheckBox("V minimum",&dialog);auto* vMax=new QCheckBox("V maximum",&dialog);uMax->setChecked(true);
+    form->addRow("Extension distance:",distance);form->addRow(uMin);form->addRow(uMax);form->addRow(vMin);form->addRow(vMax);
+    auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);form->addRow(buttons);
+    connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+    if(dialog.exec()!=QDialog::Accepted)return;
+    const auto face=selectedSubshape(document_,faces.first().partId,faces.first().geometryToken,faces.first().faceIndex,TopAbs_FACE);
+    if(face.IsNull()){reportError("Extend surface","The selected face reference is stale. Select it again.");return;}
+    TopoDS_Face extended;QString error;
+    if(!cad::extendSurfaceFace(TopoDS::Face(face),distance->value(),uMin->isChecked(),uMax->isChecked(),vMin->isChecked(),vMax->isChecked(),&extended,&error)||
+       !document_.addSurfaceBody("Extended Surface",extended,&error)){
+        reportError("Extend surface",error);return;
+    }
+    refresh(true);statusBar()->showMessage("Created an extended surface body.",8000);
+}
+
+void MainWindow::thickenSelectedSurface() {
+    const QStringList ids=selectedIds();
+    if(ids.size()!=1){QMessageBox::information(this,"Thicken surface","Select exactly one surface body in the browser.");return;}
+    bool accepted=false;
+    const double thickness=QInputDialog::getDouble(this,"Thicken surface body",
+        "Signed wall thickness (mm):",2.0,-1e6,1e6,4,&accepted);
+    if(!accepted)return;
+    QString error;
+    if(!document_.thickenSurfaceBody(ids.first(),thickness,&error)){
+        reportError("Thicken surface body",error);return;
+    }
+    refresh(true);statusBar()->showMessage("Created a solid from the selected surface body; the source surface is preserved.",9000);
+}
+
+void MainWindow::stitchSelectedSurfaces() {
+    const QStringList ids=selectedIds();
+    if(ids.isEmpty()){QMessageBox::information(this,"Stitch surfaces","Select one or more surface bodies in the browser.");return;}
+    bool accepted=false;
+    const double tolerance=QInputDialog::getDouble(this,"Stitch surface bodies",
+        "Sewing tolerance (mm):",0.01,1e-7,1.0,6,&accepted);
+    if(!accepted)return;
+    QString error;
+    if(!document_.stitchSurfaceBodies(ids,tolerance,&error)){
+        reportError("Stitch surface bodies",error);return;
+    }
+    refresh(true);statusBar()->showMessage("Created a solid from the selected closed surfaces; source surfaces are preserved.",9000);
+}
+
+void MainWindow::sewSelectedSurfaces() {
+    const QStringList ids=selectedIds();
+    if(ids.size()<2){QMessageBox::information(this,"Sew surfaces","Select at least two adjacent surface bodies in the browser.");return;}
+    bool accepted=false;
+    const double tolerance=QInputDialog::getDouble(this,"Sew surfaces into a shell",
+        "Maximum edge sewing tolerance (mm):",0.01,1e-7,1.0,6,&accepted);
+    if(!accepted)return;
+    QString error;
+    if(!document_.sewSurfaceBodies(ids,tolerance,&error)){
+        reportError("Sew surfaces",error);return;
+    }
+    refresh(true);statusBar()->showMessage("Created one surface shell; all source surface bodies are preserved.",9000);
+}
+
+void MainWindow::trimSelectedSurface() {
+    const QStringList ids=selectedIds();
+    if(ids.size()!=2){QMessageBox::information(this,"Trim surface","Select one surface body and one solid body in the browser.");return;}
+    const cad::Part* first=document_.find(ids[0]);
+    const cad::Part* second=document_.find(ids[1]);
+    const cad::Part* surface=first&&first->isSurfaceBody?first:second&&second->isSurfaceBody?second:nullptr;
+    const cad::Part* solid=first&&first->isSurfaceBody?second:second&&second->isSurfaceBody?first:nullptr;
+    if(!surface||!solid||solid->isSurfaceBody){
+        QMessageBox::information(this,"Trim surface","The selection must contain exactly one persisted surface body and one solid body.");return;
+    }
+    QMessageBox choice(QMessageBox::Question,"Trim surface",
+        "Choose which side of the solid boundary to keep. The source surface and tool solid will be preserved.",
+        QMessageBox::NoButton,this);
+    QAbstractButton* inside=choice.addButton("Keep inside solid",QMessageBox::AcceptRole);
+    QAbstractButton* outside=choice.addButton("Keep outside solid",QMessageBox::DestructiveRole);
+    choice.addButton(QMessageBox::Cancel);
+    choice.exec();
+    const bool keepInside=choice.clickedButton()==inside;
+    if(!keepInside&&choice.clickedButton()!=outside)return;
+    QString error;
+    if(!document_.trimSurfaceBody(surface->id,solid->id,keepInside,&error)){
+        reportError("Trim surface",error);return;
+    }
+    refresh(true);statusBar()->showMessage("Trimmed surface body created; source surface and tool solid are preserved.",9000);
+}
+
+void MainWindow::splitSelectedSurface() {
+    const QStringList ids=selectedIds();
+    if(ids.size()!=2){QMessageBox::information(this,"Split surface","Select one persisted face or shell surface body and one solid body in the browser.");return;}
+    const cad::Part* first=document_.find(ids[0]);
+    const cad::Part* second=document_.find(ids[1]);
+    const cad::Part* surface=first&&first->isSurfaceBody?first:second&&second->isSurfaceBody?second:nullptr;
+    const cad::Part* solid=first&&first->isSurfaceBody?second:second&&second->isSurfaceBody?first:nullptr;
+    if(!surface||!solid||solid->isSurfaceBody){
+        QMessageBox::information(this,"Split surface","The selection must contain exactly one surface body and one solid body.");return;
+    }
+    QString error;
+    if(!document_.splitSurfaceBodyBySolid(surface->id,solid->id,&error)){
+        reportError("Split surface",error);return;
+    }
+    refresh(true);statusBar()->showMessage("Surface fragments created; the source surface and splitting solid are preserved.",9000);
 }
 
 void MainWindow::loftRectangles() {
@@ -2483,9 +3478,65 @@ void MainWindow::insertSelectedComponentOccurrence() {
     if(!document_.insertComponentOccurrence(ids.first(),x,y,z,&error)){reportError("Insert component occurrence",error);return;}
     refresh();
 }
+void MainWindow::orientSelectedComponentOccurrence() {
+    const QStringList ids=selectedIds();
+    if(ids.size()!=1){reportError("Orient component","Select one free component occurrence.");return;}
+    const cad::Part* part=document_.find(ids.first());
+    if(!part||part->componentDefinitionId.isEmpty()){
+        reportError("Orient component","Make the selected body a component first.");return;
+    }
+    QDialog dialog(this);dialog.setWindowTitle("Orient free component occurrence");auto* form=new QFormLayout(&dialog);
+    auto angle=[&](const QString& label,double value){auto* box=new QDoubleSpinBox(&dialog);
+        box->setRange(-36000,36000);box->setDecimals(3);box->setValue(value);box->setSuffix(" degrees");
+        form->addRow(label,box);return box;};
+    auto* roll=angle("Roll about local X",part->placementRollDegrees);
+    auto* pitch=angle("Pitch about local Y",part->placementPitchDegrees);
+    auto* yaw=angle("Yaw about world Z",part->placementYawDegrees);
+    auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);form->addRow(buttons);
+    connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);
+    connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+    if(dialog.exec()!=QDialog::Accepted)return;
+    QString error;
+    if(!document_.setFreeOccurrenceOrientation(ids.first(),roll->value(),pitch->value(),yaw->value(),&error)){
+        reportError("Orient component",error);return;
+    }
+    refresh();
+}
 void MainWindow::synchronizeSelectedComponentDefinition() {
     const QStringList ids=selectedIds();if(ids.size()!=1){reportError("Synchronize component definition","Select one reusable component occurrence as the definition source.");return;}
     QString error;if(!document_.synchronizeComponentOccurrences(ids.first(),&error)){reportError("Synchronize component definition",error);return;}refresh();
+}
+void MainWindow::linearPatternSelectedComponentOccurrence() {
+    if(!requireBodyMode("Linear component pattern"))return;
+    const QStringList ids=selectedIds();if(ids.size()!=1){reportError("Linear component pattern","Select one free component occurrence.");return;}
+    bool accepted=false;
+    const int count=QInputDialog::getInt(this,"Linear component pattern","Total occurrences (including the selected source):",3,2,100,1,&accepted);
+    if(!accepted)return;
+    const auto spacing=valuesDialog(this,"Linear component pattern spacing",{"X spacing (mm)","Y spacing (mm)","Z spacing (mm)"},{25,0,0},-1e6,1e6);
+    if(!spacing)return;
+    QString error;
+    if(!document_.linearPatternComponentOccurrences(ids.first(),count,(*spacing)[0],(*spacing)[1],(*spacing)[2],&error)){
+        reportError("Linear component pattern",error);return;
+    }
+    refresh(true);statusBar()->showMessage(QString("Created %1 component occurrences in one undoable linear pattern.").arg(count-1),6000);
+}
+void MainWindow::circularPatternSelectedComponentOccurrence() {
+    if(!requireBodyMode("Circular component pattern"))return;
+    const QStringList ids=selectedIds();if(ids.size()!=1){reportError("Circular component pattern","Select one free component occurrence.");return;}
+    const cad::Part* source=document_.find(ids.first());if(!source)return;
+    bool accepted=false;
+    const int count=QInputDialog::getInt(this,"Circular component pattern","Total occurrences (including the selected source):",4,2,100,1,&accepted);
+    if(!accepted)return;
+    const auto center=valuesDialog(this,"Circular component pattern center",{"Center X (mm)","Center Y (mm)","Center Z (mm)"},
+        {0.0,0.0,source->placementZ},-1e6,1e6);
+    if(!center)return;
+    const double step=QInputDialog::getDouble(this,"Circular component pattern","Angle step about world Z (degrees):",90.0,-360.0,360.0,3,&accepted);
+    if(!accepted)return;
+    QString error;
+    if(!document_.circularPatternComponentOccurrences(ids.first(),count,(*center)[0],(*center)[1],(*center)[2],step,&error)){
+        reportError("Circular component pattern",error);return;
+    }
+    refresh(true);statusBar()->showMessage(QString("Created %1 component occurrences in one undoable circular pattern.").arg(count-1),6000);
 }
 void MainWindow::createRigidJoint() {
     const QStringList ids=selectedIds();if(ids.size()!=2){reportError("Create rigid joint","Select a parent occurrence first and a child occurrence second.");return;}
@@ -2545,9 +3596,11 @@ void MainWindow::editSelectedJointMotionTrack() {
         QLineEdit::Normal,existing.join(", "),&accepted);
     if(!accepted)return;
     QVector<cad::JointMotionKeyframe> keys;
-    for(const QString& entry:text.split(',',Qt::SkipEmptyParts)){
+    for(const QString& entry:text.split(',',Qt::KeepEmptyParts)){
         const QStringList pair=entry.trimmed().split(':');bool timeOkay=false,valueOkay=false;
-        if(pair.size()!=2){reportError("Edit joint motion track","Use entries in time:value format, for example 0:0, 1:45.");return;}
+        if(pair.size()!=2||pair[0].trimmed().isEmpty()||pair[1].trimmed().isEmpty()){
+            reportError("Edit joint motion track","Use nonempty entries in time:value format, for example 0:0, 1:45.");return;
+        }
         cad::JointMotionKeyframe key;key.timeSeconds=pair[0].trimmed().toDouble(&timeOkay);key.value=pair[1].trimmed().toDouble(&valueOkay);
         if(!timeOkay||!valueOkay){reportError("Edit joint motion track","Each keyframe time and value must be numeric.");return;}
         keys.append(key);
@@ -2558,6 +3611,31 @@ void MainWindow::evaluateAssemblyMotionStudy() {
     bool accepted=false;const double time=QInputDialog::getDouble(this,"Evaluate assembly motion study","Time (seconds):",0,0,3600,3,&accepted);
     if(!accepted)return;QString error;
     if(!document_.evaluateAssemblyMotionStudy(time,&error)){reportError("Evaluate assembly motion study",error);return;}refresh();
+}
+void MainWindow::scanSelectedMotionInterference() {
+    const QStringList ids=selectedIds();
+    if(ids.size()!=2){reportError("Motion interference","Select exactly two bodies in the model browser.");return;}
+    QDialog dialog(this);dialog.setWindowTitle("Scan motion-track interference");auto* form=new QFormLayout(&dialog);
+    auto* start=new QDoubleSpinBox(&dialog);start->setRange(0,3599.999);start->setDecimals(3);start->setSuffix(" s");
+    auto* end=new QDoubleSpinBox(&dialog);end->setRange(0.001,3600);end->setDecimals(3);end->setSuffix(" s");end->setValue(4);
+    auto* count=new QSpinBox(&dialog);count->setRange(2,51);count->setValue(17);
+    form->addRow("Start time:",start);form->addRow("End time:",end);form->addRow("Sample count:",count);
+    auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);form->addRow(buttons);
+    connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+    if(dialog.exec()!=QDialog::Accepted)return;
+    QVector<cad::MotionInterferenceSample> samples;QString error;
+    if(!document_.scanAssemblyMotionInterference(ids[0],ids[1],start->value(),end->value(),count->value(),&samples,&error)){
+        reportError("Motion interference",error);return;
+    }
+    int collisions=0;double maxOverlap=0.0,firstCollision=0.0,lastCollision=0.0;
+    for(const auto& sample:samples)if(sample.interfering){
+        if(collisions==0)firstCollision=sample.timeSeconds;
+        lastCollision=sample.timeSeconds;maxOverlap=std::max(maxOverlap,sample.overlapVolumeMm3);++collisions;
+    }
+    QMessageBox::information(this,"Motion interference scan",
+        collisions==0?QString("No overlap found in %1 sampled positions. This is a discrete scan; collisions between samples may be missed.").arg(samples.size()):
+        QString("Overlap found at %1 of %2 sampled positions.\nFirst sampled overlap: %3 s\nLast sampled overlap: %4 s\nMaximum sampled shared volume: %5 mm³\n\nThis is a discrete scan; collisions between samples may be missed.")
+            .arg(collisions).arg(samples.size()).arg(firstCollision,0,'f',3).arg(lastCollision,0,'f',3).arg(maxOverlap,0,'f',3));
 }
 void MainWindow::renameObject() {
     if (!requireBodyMode("Rename")) return;
@@ -2585,23 +3663,38 @@ void MainWindow::assignMaterial() {
     const auto ids=selectedIds();
     if(ids.isEmpty()){reportError("Assign material","Select one or more bodies.");return;}
     const cad::Part* part=document_.find(ids.first());if(!part)return;
-    QVector<QPair<QString,double>> library={
-        {"Unassigned",0.0},{"Aluminum 6061",2700.0},{"Carbon steel",7850.0},
-        {"Stainless steel 304",8000.0},{"Brass",8500.0},{"Copper",8960.0},
-        {"ABS plastic",1040.0},{"Nylon 6",1150.0}
+    struct MaterialChoice { QString name; double densityKgPerM3; QString label; };
+    QVector<MaterialChoice> library={
+        {"Unassigned",0.0,"Unassigned"},
+        {"Aluminum 6061",2700.0,"Aluminum 6061 (2700 kg/m³)"},
+        {"Carbon steel",7850.0,"Carbon steel (7850 kg/m³)"},
+        {"Stainless steel 304",8000.0,"Stainless steel 304 (8000 kg/m³)"},
+        {"Brass",8500.0,"Brass (8500 kg/m³)"},
+        {"Copper",8960.0,"Copper (8960 kg/m³)"},
+        {"ABS plastic",1040.0,"ABS plastic (1040 kg/m³)"},
+        {"Nylon 6",1150.0,"Nylon 6 (1150 kg/m³)"}
     };
     for(const cad::Part& body:document_.parts()){
         if(body.materialName.isEmpty())continue;
-        const bool known=std::any_of(library.cbegin(),library.cend(),[&body](const auto& choice){return choice.first==body.materialName;});
-        if(!known)library.append({body.materialName,body.materialDensityKgPerM3});
+        const bool known=std::any_of(library.cbegin(),library.cend(),[&body](const MaterialChoice& choice){
+            return choice.name==body.materialName&&choice.densityKgPerM3==body.materialDensityKgPerM3;
+        });
+        if(!known){
+            const QString density=QString::number(body.materialDensityKgPerM3,'g',8);
+            library.append({body.materialName,body.materialDensityKgPerM3,
+                QStringLiteral("%1 (%2 kg/m³)").arg(body.materialName,density)});
+        }
     }
-    library.append({"Custom...",-1.0});
+    library.append({"Custom...",-1.0,"Custom..."});
     QStringList labels;int current=0;
-    for(int i=0;i<library.size();++i){labels.append(library[i].first);if(library[i].first==part->materialName)current=i;}
+    for(int i=0;i<library.size();++i){
+        labels.append(library[i].label);
+        if(library[i].name==part->materialName&&library[i].densityKgPerM3==part->materialDensityKgPerM3)current=i;
+    }
     bool accepted=false;
     const QString selected=QInputDialog::getItem(this,"Assign material","Material:",labels,current,false,&accepted);
     if(!accepted)return;
-    QString materialName=selected;
+    QString materialName;
     double density=0.0;
     if(selected=="Custom..."){
         materialName=QInputDialog::getText(this,"Custom material","Material name:",QLineEdit::Normal,{},&accepted).trimmed();
@@ -2612,9 +3705,10 @@ void MainWindow::assignMaterial() {
     }else if(selected=="Unassigned"){
         materialName.clear();
     }else{
-        const auto preset=std::find_if(library.cbegin(),library.cend(),[&selected](const auto& entry){return entry.first==selected;});
-        if(preset==library.cend()||preset->second<0.0)return;
-        density=preset->second;
+        const auto preset=std::find_if(library.cbegin(),library.cend(),[&selected](const MaterialChoice& entry){return entry.label==selected;});
+        if(preset==library.cend()||preset->densityKgPerM3<0.0)return;
+        materialName=preset->name;
+        density=preset->densityKgPerM3;
     }
     QString error;
     if(!document_.setMaterial(ids,materialName,density,&error))reportError("Assign material",error);
@@ -2769,6 +3863,10 @@ void MainWindow::checkDrawingSheet() {
     addPolicyCheck("Projection symbol","projection_symbol",requiredConventions);
     addPolicyCheck("Auxiliary view","auxiliary_view",requiredConventions);
     addPolicyCheck("General notes","general_notes",requiredConventions);
+    addPolicyCheck("Section view","section_view",requiredConventions);
+    addPolicyCheck("Detail view","detail_view",requiredConventions);
+    addPolicyCheck("Linked parts list","linked_parts_list",requiredConventions);
+    addPolicyCheck("BOM balloons","bom_balloons",requiredConventions);
     auto* saveProjectPolicy=new QCheckBox("Save selected requirements as this project's defaults",&policyDialog);
     policyLayout->addWidget(saveProjectPolicy);
     const QStringList currentlySelected=selectedIds();
@@ -2955,6 +4053,141 @@ void MainWindow::openFile() {
     if (!document_.load(path,&error)) reportError("Open",error);
     else refresh(true);
 }
+void MainWindow::createDocumentRevision() {
+    if(document_.path().isEmpty()||document_.dirty())if(!saveFile(document_.path().isEmpty()))return;
+    bool accepted=false;
+    const QString label=QInputDialog::getText(this,"Create document revision","Revision name:",QLineEdit::Normal,{},&accepted).trimmed();
+    if(!accepted)return;
+    const QString note=QInputDialog::getText(this,"Create document revision","Optional change note:",QLineEdit::Normal,{},&accepted);
+    if(!accepted)return;
+    QString revisionId,error;
+    if(!cad::DocumentRevisionHistory::create(document_.path(),label,note,&revisionId,&error)){
+        reportError("Create document revision",error);return;
+    }
+    statusBar()->showMessage(QString("Saved revision '%1' (%2). History stays beside the scene file.").arg(label,revisionId.left(8)),8000);
+}
+void MainWindow::compareDocumentRevisions() {
+    if(document_.path().isEmpty()){reportError("Compare document revisions","Save the scene before creating or comparing named revisions.");return;}
+    QVector<cad::DocumentRevisionSummary> revisions;QString error;
+    if(!cad::DocumentRevisionHistory::list(document_.path(),&revisions,&error)){
+        reportError("Compare document revisions",error);return;
+    }
+    if(revisions.size()<2){reportError("Compare document revisions","Create at least two named revisions before comparing them.");return;}
+    QStringList labels;for(const auto& revision:revisions)
+        labels.append(QStringLiteral("%1%2 — %3 [%4]").arg(revision.label,
+            revision.tags.isEmpty()?QString():QStringLiteral(" {tags: %1}").arg(revision.tags.join(", ")),
+            revision.createdUtc,revision.id.left(8)));
+    bool accepted=false;
+    const QString olderLabel=QInputDialog::getItem(this,"Compare document revisions","Earlier revision:",labels,0,false,&accepted);
+    if(!accepted)return;
+    const int olderIndex=labels.indexOf(olderLabel);if(olderIndex<0)return;
+    QStringList newerLabels;QVector<int> newerIndexes;
+    for(int i=0;i<labels.size();++i)if(i!=olderIndex){newerLabels.append(labels[i]);newerIndexes.append(i);}
+    const QString newerLabel=QInputDialog::getItem(this,"Compare document revisions","Revision to compare against:",newerLabels,0,false,&accepted);
+    if(!accepted)return;
+    const int newerChoice=newerLabels.indexOf(newerLabel);if(newerChoice<0)return;
+    cad::DocumentRevisionDiff diff;
+    if(!cad::DocumentRevisionHistory::compare(document_.path(),revisions[olderIndex].id,
+                                               revisions[newerIndexes[newerChoice]].id,&diff,&error)){
+        reportError("Compare document revisions",error);return;
+    }
+    QStringList lines{QStringLiteral("From: %1").arg(revisions[olderIndex].label),
+                      QStringLiteral("To: %1").arg(revisions[newerIndexes[newerChoice]].label)};
+    if(diff.drawingReadinessPolicyChanged)lines.append(QStringLiteral("Project drawing-readiness settings changed."));
+    for(const auto& change:diff.bodyChanges){
+        QStringList fields;
+        if(change.added)fields.append(QStringLiteral("added"));
+        if(change.removed)fields.append(QStringLiteral("removed"));
+        if(change.geometryChanged)fields.append(QStringLiteral("geometry changed"));
+        if(change.metadataChanged)fields.append(QStringLiteral("part metadata changed"));
+        if(change.featureHistoryChanged)fields.append(QStringLiteral("saved parametric feature history changed"));
+        lines.append(QStringLiteral("• %1 (%2): %3").arg(change.bodyName,change.bodyId.left(8),fields.join(QStringLiteral(", "))));
+    }
+    const auto displayJsonValue=[](const QJsonValue& value){
+        if(value.isUndefined())return QStringLiteral("<missing>");
+        if(value.isObject())return QString::fromUtf8(QJsonDocument(value.toObject()).toJson(QJsonDocument::Compact));
+        if(value.isArray())return QString::fromUtf8(QJsonDocument(value.toArray()).toJson(QJsonDocument::Compact));
+        if(value.isNull())return QStringLiteral("null");
+        return value.toVariant().toString();
+    };
+    const int displayFieldLimit=200;
+    const qsizetype displayCount=std::min<qsizetype>(displayFieldLimit,diff.fieldChanges.size());
+    for(qsizetype i=0;i<displayCount;++i){
+        const auto& change=diff.fieldChanges[i];
+        lines.append(QStringLiteral("%1: %2 → %3").arg(change.path,displayJsonValue(change.olderValue),displayJsonValue(change.newerValue)));
+    }
+    if(diff.fieldChanges.size()>displayFieldLimit)
+        lines.append(QStringLiteral("Showing the first %1 of %2 detailed changes.").arg(displayFieldLimit).arg(diff.fieldChanges.size()));
+    if(diff.fieldChangesTruncated)lines.append(QStringLiteral("Detailed field changes were truncated at the safety limit."));
+    if(diff.bodyChanges.isEmpty()&&!diff.drawingReadinessPolicyChanged)lines.append(QStringLiteral("No stored body or project-checklist changes."));
+    QMessageBox::information(this,"Document revision comparison",lines.join('\n'));
+}
+void MainWindow::restoreDocumentRevision() {
+    if(document_.path().isEmpty()){reportError("Restore document revision","Save the scene before creating or restoring named revisions.");return;}
+    QVector<cad::DocumentRevisionSummary> revisions;QString error;
+    if(!cad::DocumentRevisionHistory::list(document_.path(),&revisions,&error)){
+        reportError("Restore document revision",error);return;
+    }
+    if(revisions.isEmpty()){reportError("Restore document revision","No named revisions are saved beside this scene.");return;}
+    QStringList labels;for(const auto& revision:revisions)
+        labels.append(QStringLiteral("%1%2 — %3 [%4]").arg(revision.label,
+            revision.tags.isEmpty()?QString():QStringLiteral(" {tags: %1}").arg(revision.tags.join(", ")),
+            revision.createdUtc,revision.id.left(8)));
+    bool accepted=false;const QString label=QInputDialog::getItem(this,"Restore document revision","Revision to restore:",labels,0,false,&accepted);
+    if(!accepted)return;const int index=labels.indexOf(label);if(index<0)return;
+    QString defaultPath=QFileInfo(document_.path()).dir().filePath(QFileInfo(document_.path()).completeBaseName()+QStringLiteral("-restored.cadscene"));
+    const QString target=QFileDialog::getSaveFileName(this,"Save restored revision as",defaultPath,"CADWorkbench (*.cadscene)");
+    if(target.isEmpty())return;
+    QString finalTarget=target;if(!finalTarget.endsWith(QStringLiteral(".cadscene"),Qt::CaseInsensitive))finalTarget+=QStringLiteral(".cadscene");
+    if(!cad::DocumentRevisionHistory::restore(document_.path(),revisions[index].id,finalTarget,&error)){
+        reportError("Restore document revision",error);return;
+    }
+    statusBar()->showMessage(QString("Restored '%1' as %2. Your open scene was left unchanged.")
+        .arg(revisions[index].label,QFileInfo(finalTarget).fileName()),10000);
+}
+void MainWindow::manageDocumentRevisionHistory() {
+    if(document_.path().isEmpty()){
+        reportError("Manage document revisions","Save the scene before managing its revision history.");return;
+    }
+    QString error;QVector<cad::DocumentRevisionSummary> revisions;
+    if(!cad::DocumentRevisionHistory::list(document_.path(),&revisions,&error)){
+        reportError("Manage document revisions",error);return;
+    }
+    if(revisions.isEmpty()){
+        reportError("Manage document revisions","No named revisions are saved beside this scene.");return;
+    }
+    const QStringList choices{QStringLiteral("Edit revision tags"),QStringLiteral("Prune older untagged revisions")};
+    bool accepted=false;const QString choice=QInputDialog::getItem(this,"Manage document revisions","Choose an action:",choices,0,false,&accepted);
+    if(!accepted)return;
+    if(choice==choices[0]){
+        QStringList labels;for(const auto& revision:revisions)
+            labels.append(QStringLiteral("%1%2 — %3 [%4]").arg(revision.label,
+                revision.tags.isEmpty()?QString():QStringLiteral(" {tags: %1}").arg(revision.tags.join(", ")),
+                revision.createdUtc,revision.id.left(8)));
+        const QString selected=QInputDialog::getItem(this,"Tag a document revision","Revision:",labels,0,false,&accepted);
+        if(!accepted)return;const int index=labels.indexOf(selected);if(index<0)return;
+        const QString entered=QInputDialog::getText(this,"Edit revision tags","Comma-separated tags (clear to remove all):",
+            QLineEdit::Normal,revisions[index].tags.join(", "),&accepted);
+        if(!accepted)return;
+        const QStringList tags=entered.split(',',Qt::SkipEmptyParts);
+        if(!cad::DocumentRevisionHistory::setTags(document_.path(),revisions[index].id,tags,&error)){
+            reportError("Tag document revision",error);return;
+        }
+        statusBar()->showMessage(QString("Updated tags for revision '%1'.").arg(revisions[index].label),8000);
+        return;
+    }
+    const int keepCount=QInputDialog::getInt(this,"Prune revision history","Keep this many newest revisions, in addition to every tagged revision:",
+                                              std::min(20,static_cast<int>(revisions.size())),1,1000,1,&accepted);
+    if(!accepted)return;
+    if(QMessageBox::question(this,"Prune revision history",
+        QStringLiteral("Remove older untagged checkpoints and keep the newest %1 plus all tagged revisions?").arg(keepCount),
+        QMessageBox::Yes|QMessageBox::Cancel,QMessageBox::Cancel)!=QMessageBox::Yes)return;
+    int removed=0;
+    if(!cad::DocumentRevisionHistory::prune(document_.path(),keepCount,&removed,&error)){
+        reportError("Prune revision history",error);return;
+    }
+    statusBar()->showMessage(QString("Removed %1 older untagged revision(s).").arg(removed),8000);
+}
 void MainWindow::importSTEPFile() {
     const QString path = QFileDialog::getOpenFileName(this,"Import STEP geometry",{},"STEP files (*.step *.stp)");
     if (path.isEmpty()) return;
@@ -2970,16 +4203,38 @@ void MainWindow::importIGESFile() {
     refresh(true);statusBar()->showMessage(QString("Imported IGES solids: %1").arg(QFileInfo(path).fileName()),8000);
 }
 void MainWindow::importOBJMeshFile() {
-    const QString path=QFileDialog::getOpenFileName(this,"Import closed OBJ mesh",{},"OBJ meshes (*.obj)");
+    const QString path=QFileDialog::getOpenFileName(this,"Import OBJ mesh",{},"OBJ meshes (*.obj)");
     if(path.isEmpty())return;
-    QString error;if(!document_.importOBJ(path,0.01,&error)){reportError("Import OBJ mesh",error);return;}
-    refresh(true);statusBar()->showMessage(QString("Imported faceted OBJ solid: %1").arg(QFileInfo(path).fileName()),8000);
+    QSettings settings;bool accepted=false;
+    const double tolerance=QInputDialog::getDouble(this,"OBJ mesh repair","Vertex weld tolerance (mm):",
+        settings.value(QStringLiteral("meshImport/weldToleranceMm"),0.01).toDouble(),1e-6,1.0,6,&accepted);
+    if(!accepted)return;
+    settings.setValue(QStringLiteral("meshImport/weldToleranceMm"),tolerance);
+    const QStringList repairChoices{QStringLiteral("Reject open boundaries (solid only)"),
+                                   QStringLiteral("Fill simple convex planar holes (up to 64 edges)"),
+                                   QStringLiteral("Keep cleaned mesh as faceted surface body")};
+    const QString repairChoice=QInputDialog::getItem(this,"OBJ mesh repair","Open-boundary handling:",repairChoices,0,false,&accepted);
+    if(!accepted)return;
+    QString error;cad::MeshImportSummary summary;
+    if(!document_.importOBJ(path,tolerance,&error,&summary,repairChoice==repairChoices[1],repairChoice==repairChoices[2])){reportError("Import OBJ mesh",error);return;}
+    refresh(true);statusBar()->showMessage(meshImportStatus("OBJ",QFileInfo(path).fileName(),summary),10000);
 }
 void MainWindow::importSTLMeshFile() {
-    const QString path=QFileDialog::getOpenFileName(this,"Import closed STL mesh",{},"STL meshes (*.stl)");
+    const QString path=QFileDialog::getOpenFileName(this,"Import STL mesh",{},"STL meshes (*.stl)");
     if(path.isEmpty())return;
-    QString error;if(!document_.importSTL(path,0.01,&error)){reportError("Import STL mesh",error);return;}
-    refresh(true);statusBar()->showMessage(QString("Imported faceted STL solid: %1").arg(QFileInfo(path).fileName()),8000);
+    QSettings settings;bool accepted=false;
+    const double tolerance=QInputDialog::getDouble(this,"STL mesh repair","Vertex weld tolerance (mm):",
+        settings.value(QStringLiteral("meshImport/weldToleranceMm"),0.01).toDouble(),1e-6,1.0,6,&accepted);
+    if(!accepted)return;
+    settings.setValue(QStringLiteral("meshImport/weldToleranceMm"),tolerance);
+    const QStringList repairChoices{QStringLiteral("Reject open boundaries (solid only)"),
+                                   QStringLiteral("Fill simple convex planar holes (up to 64 edges)"),
+                                   QStringLiteral("Keep cleaned mesh as faceted surface body")};
+    const QString repairChoice=QInputDialog::getItem(this,"STL mesh repair","Open-boundary handling:",repairChoices,0,false,&accepted);
+    if(!accepted)return;
+    QString error;cad::MeshImportSummary summary;
+    if(!document_.importSTL(path,tolerance,&error,&summary,repairChoice==repairChoices[1],repairChoice==repairChoices[2])){reportError("Import STL mesh",error);return;}
+    refresh(true);statusBar()->showMessage(meshImportStatus("STL",QFileInfo(path).fileName(),summary),10000);
 }
 
 void MainWindow::exportBodyScheduleCsv() {
@@ -3022,9 +4277,15 @@ void MainWindow::editDrawingViewLayout() {
     auto* form=new QFormLayout(&dialog);
     auto* explanation=new QLabel(QStringLiteral("Set each view center in paper millimeters (%1 × %2). All views share the automatically fitted drawing scale.").arg(maxX,0,'f',0).arg(maxY,0,'f',0),&dialog);
     explanation->setWordWrap(true);form->addRow(explanation);
-    if(part->hasDrawingSettings&&!settings.sourceGeometryToken.isEmpty()&&settings.sourceGeometryToken!=part->geometryToken){
-        auto* stale=new QLabel("The model changed since this sheet was last saved. Saving this layout will re-link the sheet to the selected body's current geometry.",&dialog);
-        stale->setWordWrap(true);stale->setStyleSheet("color:#a65b00");form->addRow(stale);
+    if(part->hasDrawingSettings){
+        const auto sourceStatus=document_.drawingSheetSourceStatus(ids.first());
+        if(sourceStatus.state==cad::DrawingSourceState::Stale||sourceStatus.state==cad::DrawingSourceState::MissingBodies){
+            const QString message=sourceStatus.state==cad::DrawingSourceState::MissingBodies
+                ? QStringLiteral("A saved drawing source body is missing. Restore it before refreshing the source link.")
+                : QStringLiteral("The saved drawing source geometry or BOM/material data is stale. Moving views keeps its saved revision until you explicitly refresh it.");
+            auto* stale=new QLabel(message,&dialog);
+            stale->setWordWrap(true);stale->setStyleSheet("color:#a65b00");form->addRow(stale);
+        }
     }
     QMap<QString,QDoubleSpinBox*> xFields,yFields;
     const QList<QPair<QString,QString>> views={{"TOP","Top"},{"FRONT","Front"},{"RIGHT","Right"},{"AUXILIARY",settings.auxiliaryView=="Section A-A"?"Section A-A":"Isometric"}};
@@ -3041,10 +4302,9 @@ void MainWindow::editDrawingViewLayout() {
     connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
     if(dialog.exec()!=QDialog::Accepted)return;
     for(const auto& view:views){const QString& key=view.first;settings.viewCenters.insert(key,QPointF(xFields.value(key)->value(),yFields.value(key)->value()));}
-    settings.sourceGeometryToken=part->geometryToken;
     QString error;
     if(!document_.setDrawingSheetSettings(ids.first(),settings,&error)){reportError("Save drawing layout",error);return;}
-    refresh();statusBar()->showMessage("Drawing sheet and four projected-view placements saved and linked to the current model revision.",8000);
+    refresh();statusBar()->showMessage("Projected-view placements saved; the existing source revision is unchanged.",8000);
 }
 void MainWindow::editDrawingNotes() {
     const QStringList ids=selectedIds();
@@ -3081,10 +4341,10 @@ void MainWindow::editDrawingNotes() {
         QString noteId;if(i<settings.noteAnnotations.size())noteId=settings.noteAnnotations[i].id;
         annotations.append({noteId,text,xFields[i]->value(),yFields[i]->value()});noteTexts.append(text);
     }
-    settings.generalNotes=noteTexts;settings.noteAnnotations=annotations;settings.sourceGeometryToken=part->geometryToken;
+    settings.generalNotes=noteTexts;settings.noteAnnotations=annotations;
     QString error;
     if(!document_.setDrawingSheetSettings(ids.first(),settings,&error)){reportError("Save drawing notes",error);return;}
-    refresh();statusBar()->showMessage("Drawing notes and positions saved with stable IDs and linked to the current model revision.",8000);
+    refresh();statusBar()->showMessage("Drawing notes saved with stable IDs; the existing source revision is unchanged.",8000);
 }
 void MainWindow::editDrawingDimensions() {
     const QStringList ids=selectedIds();
@@ -3111,10 +4371,53 @@ void MainWindow::editDrawingDimensions() {
         QString id;for(const auto& previous:settings.dimensionAnnotations)if(previous.axis==axis){id=previous.id;break;}
         annotations.append({id,axis,offsets.value(axis)->value()});
     }
-    settings.dimensionAnnotations=annotations;settings.sourceGeometryToken=part->geometryToken;
+    settings.dimensionAnnotations=annotations;
     QString error;
     if(!document_.setDrawingSheetSettings(ids.first(),settings,&error)){reportError("Save drawing dimensions",error);return;}
-    refresh();statusBar()->showMessage("Overall drawing dimensions saved with stable IDs and linked to the current model revision.",8000);
+    refresh();statusBar()->showMessage("Overall dimensions saved with stable IDs; the existing source revision is unchanged.",8000);
+}
+void MainWindow::addSelectedEdgeDrawingDimension() {
+    if(viewport_->selectionMode()!=CadViewport::SelectionMode::Edge){reportError("Drawing edge dimension","Choose Edges (inspection), then select one edge in the viewport.");return;}
+    const QVector<cad::EdgeReference> edges=viewport_->selectedEdgeReferences();
+    if(edges.size()!=1){reportError("Drawing edge dimension","Select exactly one model edge.");return;}
+    const cad::EdgeReference edge=edges.first();
+    const cad::Part* part=document_.find(edge.partId);
+    if(!part){reportError("Drawing edge dimension","The source body no longer exists.");return;}
+    QString error;double length=0.0;
+    if(!document_.measureEdgeLength(edge,&length,&error)){reportError("Drawing edge dimension",error);return;}
+    cad::DrawingSheetSettings settings=part->hasDrawingSettings?part->drawingSettings:cad::DrawingSheetSettings{};
+    if(settings.edgeDimensionAnnotations.size()>=20){reportError("Drawing edge dimension","The drawing already contains 20 selected-edge dimensions.");return;}
+    QDialog dialog(this);dialog.setWindowTitle("Add linked edge length to drawing");
+    auto* form=new QFormLayout(&dialog);
+    form->addRow(new QLabel(QString("Edge %1 currently measures %2 mm. The exported value is measured again from the saved source geometry.").arg(edge.edgeIndex).arg(length,0,'f',3),&dialog));
+    auto* view=new QComboBox(&dialog);view->addItems({"TOP","FRONT","RIGHT"});form->addRow("Drawing view:",view);
+    auto* offset=new QDoubleSpinBox(&dialog);offset->setRange(5,60);offset->setDecimals(2);offset->setSuffix(" mm");offset->setValue(9);form->addRow("Leader offset:",offset);
+    auto* buttons=new QDialogButtonBox(QDialogButtonBox::Save|QDialogButtonBox::Cancel,&dialog);form->addWidget(buttons);
+    connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+    if(dialog.exec()!=QDialog::Accepted)return;
+    settings.edgeDimensionAnnotations.append({{},edge.partId,edge.geometryToken,edge.edgeIndex,view->currentText(),offset->value()});
+    if(!document_.setDrawingSheetSettings(edge.partId,settings,&error)){reportError("Save drawing edge dimension",error);return;}
+    refresh();statusBar()->showMessage("Selected edge length linked to this body's drawing sheet.",8000);
+}
+void MainWindow::removeSelectedEdgeDrawingDimension() {
+    const QStringList ids=selectedIds();
+    if(ids.size()!=1){reportError("Remove drawing edge dimension","Select exactly one drawing source body in the model tree.");return;}
+    const cad::Part* part=document_.find(ids.first());
+    if(!part||!part->hasDrawingSettings||part->drawingSettings.edgeDimensionAnnotations.isEmpty()){
+        reportError("Remove drawing edge dimension","This body has no saved selected-edge dimensions.");return;
+    }
+    QStringList labels;
+    for(const auto& dimension:part->drawingSettings.edgeDimensionAnnotations)
+        labels.append(QString("%1 | %2 edge %3 | %4").arg(dimension.id,dimension.sourceBodyId).arg(dimension.edgeIndex).arg(dimension.view));
+    bool accepted=false;
+    const QString choice=QInputDialog::getItem(this,"Remove drawing edge dimension","Saved dimension:",labels,0,false,&accepted);
+    if(!accepted)return;
+    const int index=labels.indexOf(choice);if(index<0)return;
+    cad::DrawingSheetSettings settings=part->drawingSettings;
+    settings.edgeDimensionAnnotations.removeAt(index);
+    QString error;
+    if(!document_.setDrawingSheetSettings(ids.first(),settings,&error)){reportError("Remove drawing edge dimension",error);return;}
+    refresh();statusBar()->showMessage("Selected-edge dimension removed from drawing sheet.",8000);
 }
 void MainWindow::editDrawingPartsList() {
     const QStringList ids=selectedIds();
@@ -3135,7 +4438,7 @@ void MainWindow::editDrawingPartsList() {
     connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
     if(dialog.exec()!=QDialog::Accepted)return;
     settings.partsListAnnotation.visible=enabled->isChecked();settings.partsListAnnotation.xMm=x->value();settings.partsListAnnotation.yMm=y->value();
-    settings.sourceGeometryToken=part->geometryToken;QString error;
+    QString error;
     if(!document_.setDrawingSheetSettings(ids.first(),settings,&error)){reportError("Save drawing parts list",error);return;}
     refresh();statusBar()->showMessage(settings.partsListAnnotation.visible
         ? "Linked parts list placement saved; its rows will use the current document BOM when exported."
@@ -3189,10 +4492,11 @@ void MainWindow::editDrawingBalloons() {
         if(!body||!xOk||!yOk){reportError("Save drawing BOM balloons","Enter valid numeric paper-space X and Y coordinates for every balloon.");return;}
         balloons.append({body->data(Qt::UserRole+1).toString(),body->data(Qt::UserRole).toString(),x,y});
     }
+    // Retain source validation, but do not acknowledge changed geometry
+    // simply because BOM balloon positions were edited.
     settings.balloonAnnotations=balloons;settings.sourceBodyIds.removeDuplicates();std::sort(settings.sourceBodyIds.begin(),settings.sourceBodyIds.end());
     QVector<cad::Part> sources;for(const QString& sourceId:settings.sourceBodyIds){const cad::Part* source=document_.find(sourceId);if(source)sources.append(*source);}
     cad::Part composite;QString error;if(!cad::buildDrawingAssemblyPart(sources,&composite,&error)){reportError("Save drawing BOM balloons",error);return;}
-    settings.sourceGeometryToken=composite.geometryToken;
     if(!document_.setDrawingSheetSettings(part->id,settings,&error)){reportError("Save drawing BOM balloons",error);return;}
     refresh();statusBar()->showMessage(QString("Saved %1 BOM balloon(s) linked to the drawing source bodies.").arg(balloons.size()),8000);
 }
@@ -3302,10 +4606,10 @@ void MainWindow::inspectSavedDrawingSource() {
             QMessageBox::information(this,"Saved drawing source","The selected body has no saved drawing sheet.");return;
         case cad::DrawingSourceState::Current:
             QMessageBox::information(this,"Saved drawing source",
-                QString("Current: the saved drawing links to %1 existing source body/bodies.\n\nA new export will use the current model geometry.").arg(status.sourceBodyIds.size()));return;
+                QString("Current: the saved drawing links to %1 existing source body/bodies.\n\nA new export will use current geometry and parts-list data.").arg(status.sourceBodyIds.size()));return;
         case cad::DrawingSourceState::Stale:
             QMessageBox::warning(this,"Saved drawing source",
-                "Stale: one or more source bodies changed since the saved sheet revision. Export the drawing again to refresh its source revision.");return;
+                "Stale: source geometry or BOM/material data changed since the saved sheet revision. Export the drawing again to refresh both revisions.");return;
         case cad::DrawingSourceState::MissingBodies:
             QMessageBox::warning(this,"Saved drawing source",
                 QString("Missing source body/bodies: %1\n\nSelect the intended existing source bodies and export again to replace the saved source set.").arg(status.missingSourceBodyIds.join(", ")));return;
@@ -3319,7 +4623,8 @@ void MainWindow::refreshSavedDrawingSource() {
 }
 void MainWindow::exportDrawingSvg() { exportDrawing(false); }
 void MainWindow::exportDrawingPdf() { exportDrawing(true); }
-void MainWindow::exportDrawing(bool asPdf) {
+void MainWindow::exportDrawingDxf() { exportDrawing(false,true); }
+void MainWindow::exportDrawing(bool asPdf,bool asDxf) {
     QStringList ids=selectedIds();
     if(ids.isEmpty()||ids.size()>50){reportError("Export orthographic drawing","Select one to 50 bodies for a drawing sheet.");return;}
     std::sort(ids.begin(),ids.end());
@@ -3383,6 +4688,8 @@ void MainWindow::exportDrawing(bool asPdf) {
     cad::DrawingTitleBlock titleBlock{drawingNumber->text(),drawnBy->text(),checkedBy->text(),issueDate->date().toString(Qt::ISODate),drawingRevision->text()};
     cad::DrawingSheetSettings settings=part->hasDrawingSettings?saved:cad::DrawingSheetSettings{};
     settings.sourceBodyIds=sourceBodyIds;settings.sourceGeometryToken=drawingPart.geometryToken;
+    settings.sourceDataToken=document_.drawingSourceDataToken(sourceBodyIds,&error);
+    if(!error.isEmpty()){reportError("Prepare drawing source",error);return;}
     settings.projection=projection==cad::OrthographicProjection::FirstAngle?"First-angle":"Third-angle";
     settings.sheetSize=sheetSize==cad::DrawingSheetSize::A3Landscape?"A3":"A4";
     if(part->hasDrawingSettings&&!settings.viewCenters.isEmpty()){
@@ -3403,31 +4710,42 @@ void MainWindow::exportDrawing(bool asPdf) {
     settings.auxiliaryView=auxiliaryView==cad::DrawingAuxiliaryView::SectionA?"Section A-A":"Isometric";
     settings.sectionDepthFraction=sectionDepthFraction;settings.generalNotes=generalNotes;settings.drawingNumber=titleBlock.drawingNumber;
     settings.drawnBy=titleBlock.drawnBy;settings.checkedBy=titleBlock.checkedBy;settings.issueDate=titleBlock.issueDate;settings.revision=titleBlock.revision;
-    const QString path=QFileDialog::getSaveFileName(this,asPdf?"Export orthographic drawing PDF":"Export orthographic drawing SVG",{},
-        asPdf?"PDF drawing sheets (*.pdf)":"SVG drawings (*.svg)");
+    const QString path=QFileDialog::getSaveFileName(this,asPdf?"Export orthographic drawing PDF":
+        (asDxf?"Export orthographic drawing DXF":"Export orthographic drawing SVG"),{},
+        asPdf?"PDF drawing sheets (*.pdf)":(asDxf?"DXF drawings (*.dxf)":"SVG drawings (*.svg)"));
     if(path.isEmpty())return;
     const QVector<cad::BillOfMaterialsRow> bomRows=document_.billOfMaterials(sourceBodyIds,&error);
     if(!error.isEmpty()){reportError("Export orthographic drawing",error);return;}
-    if(!document_.setDrawingSheetSettings(masterId,settings,&error)){reportError("Save drawing setup",error);return;}
-    part=document_.find(masterId);
+    // Prepare stable IDs and validate the sheet without mutating the document.
+    // A failed render/write must never undo a prior, unrelated modeling action.
+    cad::DrawingSheetSettings prepared;
+    if(!document_.prepareDrawingSheetSettings(masterId,settings,&prepared,&error)){
+        reportError("Prepare drawing setup",error);return;
+    }
     bool exported=false;
-    if(asPdf){
+    if(asPdf||asDxf){
         QByteArray svg;
         if(cad::buildOrthographicDrawingSvg(drawingPart,&svg,&error,nullptr,nullptr,nullptr,projection,sheetSize,auxiliaryView,
-                sectionDepthFraction,generalNotes,titleBlock,part->drawingSettings.viewCenters,part->drawingSettings.viewIds,
-                part->drawingSettings.sheetId,part->drawingSettings.noteAnnotations,part->drawingSettings.dimensionAnnotations,
-                part->drawingSettings.partsListAnnotation,bomRows,sourceBodyIds,part->drawingSettings.balloonAnnotations,
-                part->drawingSettings.detailAnnotations,part->drawingSettings.sectionAnnotations))
-            exported=cad::exportOrthographicDrawingPdf(svg,path,sheetSize,&error);
+                sectionDepthFraction,generalNotes,titleBlock,prepared.viewCenters,prepared.viewIds,
+                prepared.sheetId,prepared.noteAnnotations,prepared.dimensionAnnotations,
+                prepared.partsListAnnotation,bomRows,sourceBodyIds,prepared.balloonAnnotations,
+                prepared.detailAnnotations,prepared.sectionAnnotations,prepared.edgeDimensionAnnotations,sourceBodies))
+            exported=asPdf?cad::exportOrthographicDrawingPdf(svg,path,sheetSize,&error):
+                cad::exportOrthographicDrawingDxf(svg,path,&error);
     }else{
         exported=cad::exportOrthographicDrawingSvg(drawingPart,path,&error,projection,sheetSize,auxiliaryView,sectionDepthFraction,generalNotes,titleBlock,
-                part->drawingSettings.viewCenters,part->drawingSettings.viewIds,part->drawingSettings.sheetId,
-                part->drawingSettings.noteAnnotations,part->drawingSettings.dimensionAnnotations,
-                part->drawingSettings.partsListAnnotation,bomRows,sourceBodyIds,part->drawingSettings.balloonAnnotations,
-                part->drawingSettings.detailAnnotations,part->drawingSettings.sectionAnnotations);
+                prepared.viewCenters,prepared.viewIds,prepared.sheetId,
+                prepared.noteAnnotations,prepared.dimensionAnnotations,
+                prepared.partsListAnnotation,bomRows,sourceBodyIds,prepared.balloonAnnotations,
+                prepared.detailAnnotations,prepared.sectionAnnotations,prepared.edgeDimensionAnnotations,sourceBodies);
     }
     if(!exported){
-        document_.undo();refresh();reportError("Export orthographic drawing",error);return;
+        reportError("Export orthographic drawing",error);return;
+    }
+    // Only a successful snapshot export acknowledges the current geometry revision.
+    // Reusing prepared IDs guarantees that the file and saved sheet refer to the same views.
+    if(!document_.setDrawingSheetSettings(masterId,prepared,&error)){
+        reportError("Save exported drawing setup",error);return;
     }
     refresh();
     statusBar()->showMessage(QString("Orthographic drawing exported for %1 source body/bodies: %2").arg(sourceBodyIds.size()).arg(QFileInfo(path).fileName()),8000);
@@ -3459,6 +4777,79 @@ void MainWindow::exportSheetMetalFlatPattern() {
     statusBar()->showMessage(QString("Flat pattern exported: %1 mm developed length; bend allowance %2 mm")
         .arg(pattern.flatLengthMm,0,'f',3).arg(pattern.bendAllowanceMm,0,'f',3),10000);
 }
+void MainWindow::createFoldedSheetMetal() {
+    QDialog dialog(this);dialog.setWindowTitle("Folded sheet-metal body");
+    auto* form=new QFormLayout(&dialog);
+    auto* flangeInput=new QLineEdit("40,30",&dialog);
+    auto* angleInput=new QLineEdit("90",&dialog);
+    auto* radiusInput=new QLineEdit("1.5",&dialog);
+    auto* width=new QDoubleSpinBox(&dialog);width->setRange(0.00001,1000000);width->setDecimals(3);width->setValue(25);width->setSuffix(" mm");
+    auto* thickness=new QDoubleSpinBox(&dialog);thickness->setRange(0.00001,1000000);thickness->setDecimals(3);thickness->setValue(1.5);thickness->setSuffix(" mm");
+    form->addRow("Straight neutral-surface flange lengths, in order (mm):",flangeInput);
+    form->addRow("Signed fold angles, in order (degrees):",angleInput);
+    form->addRow("Inside radii per bend, in order (mm):",radiusInput);
+    form->addRow("Sheet width (mm):",width);form->addRow("Thickness (mm):",thickness);
+    auto* note=new QLabel("Positive and negative angles fold in opposite directions. Flange values are straight neutral-surface segment lengths; the circular neutral bend arcs are added between them. Each bend can use its own positive inside radius. The result is a faceted solid; verify developed lengths against material and tooling data.",&dialog);
+    note->setWordWrap(true);form->addRow(note);
+    auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);form->addRow(buttons);
+    connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+    if(dialog.exec()!=QDialog::Accepted)return;
+    QVector<double> flanges,angles,radii;QString error;
+    if(!cad::parseSheetMetalNumberList(flangeInput->text(),&flanges,&error)||
+       !cad::parseSheetMetalNumberList(angleInput->text(),&angles,&error)||flanges.size()!=angles.size()+1){
+        if(error.isEmpty())error="Enter exactly one more straight flange length than signed fold angles.";
+        reportError("Folded sheet-metal body",error);return;
+    }
+    if(!cad::parseSheetMetalNumberList(radiusInput->text(),&radii,&error)||radii.size()!=angles.size()){
+        if(error.isEmpty())error="Enter exactly one positive inside radius for each fold angle.";
+        reportError("Folded sheet-metal body",error);return;
+    }
+    QVector<cad::FoldedSheetBend> bends;bends.reserve(angles.size());
+    for(int i=0;i<angles.size();++i)bends.append({angles[i],radii[i]});
+    if(!document_.addFoldedSheetMetal(flanges,width->value(),thickness->value(),bends,&error)){
+        reportError("Folded sheet-metal body",error);return;
+    }
+    refresh(true);statusBar()->showMessage("Folded sheet-metal body added to the scene.",6000);
+}
+void MainWindow::editFoldedSheetMetal() {
+    const QStringList ids=selectedIds();
+    if(ids.size()!=1){reportError("Edit folded sheet-metal body","Select exactly one folded sheet-metal body.");return;}
+    QVector<double> flanges;double sheetWidth=0.0,thicknessValue=0.0;QVector<cad::FoldedSheetBend> bends;bool current=false;
+    if(!document_.foldedSheetMetalDefinition(ids.first(),&flanges,&sheetWidth,&thicknessValue,&bends,&current)){
+        reportError("Edit folded sheet-metal body","The selected body has no editable folded sheet-metal definition.");return;
+    }
+    if(!current){reportError("Edit folded sheet-metal body","This definition is stale because the body was changed by another modeling operation. Recreate the folded body to edit its bend inputs.");return;}
+    QStringList flangeText,angleText,radiusText;
+    for(double value:flanges)flangeText.append(QString::number(value,'g',12));
+    for(const auto& bend:bends){angleText.append(QString::number(bend.angleDegrees,'g',12));radiusText.append(QString::number(bend.insideRadiusMm,'g',12));}
+    QDialog dialog(this);dialog.setWindowTitle("Edit folded sheet-metal body");auto* form=new QFormLayout(&dialog);
+    auto* flangeInput=new QLineEdit(flangeText.join(','),&dialog);auto* angleInput=new QLineEdit(angleText.join(','),&dialog);
+    auto* radiusInput=new QLineEdit(radiusText.join(','),&dialog);
+    auto* width=new QDoubleSpinBox(&dialog);width->setRange(0.00001,1000000);width->setDecimals(3);width->setValue(sheetWidth);width->setSuffix(" mm");
+    auto* thickness=new QDoubleSpinBox(&dialog);thickness->setRange(0.00001,1000000);thickness->setDecimals(3);thickness->setValue(thicknessValue);thickness->setSuffix(" mm");
+    form->addRow("Straight neutral-surface flange lengths, in order (mm):",flangeInput);
+    form->addRow("Signed fold angles, in order (degrees):",angleInput);form->addRow("Inside radii per bend, in order (mm):",radiusInput);
+    form->addRow("Sheet width (mm):",width);form->addRow("Thickness (mm):",thickness);
+    auto* note=new QLabel("Editing rebuilds the selected solid as one undoable operation. Direct modeling changes make this definition read-only to avoid overwriting newer geometry.",&dialog);
+    note->setWordWrap(true);form->addRow(note);auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);form->addRow(buttons);
+    connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+    if(dialog.exec()!=QDialog::Accepted)return;
+    QVector<double> angles,radii;QString error;
+    if(!cad::parseSheetMetalNumberList(flangeInput->text(),&flanges,&error)||
+       !cad::parseSheetMetalNumberList(angleInput->text(),&angles,&error)||flanges.size()!=angles.size()+1){
+        if(error.isEmpty())error="Enter exactly one more straight flange length than fold angles.";
+        reportError("Edit folded sheet-metal body",error);return;
+    }
+    if(!cad::parseSheetMetalNumberList(radiusInput->text(),&radii,&error)||radii.size()!=angles.size()){
+        if(error.isEmpty())error="Enter exactly one positive inside radius for each fold angle.";
+        reportError("Edit folded sheet-metal body",error);return;
+    }
+    bends.clear();for(int i=0;i<angles.size();++i)bends.append({angles[i],radii[i]});
+    if(!document_.editFoldedSheetMetal(ids.first(),flanges,width->value(),thickness->value(),bends,&error)){
+        reportError("Edit folded sheet-metal body",error);return;
+    }
+    refresh(true);statusBar()->showMessage("Folded sheet-metal body rebuilt.",6000);
+}
 bool MainWindow::saveFile(bool as) {
     QString path = document_.path();
     if (as || path.isEmpty()) path = QFileDialog::getSaveFileName(this,"Save project",path,"CADWorkbench (*.cadscene)");
@@ -3466,6 +4857,15 @@ bool MainWindow::saveFile(bool as) {
     if (!path.endsWith(".cadscene",Qt::CaseInsensitive)) path += ".cadscene";
     QString error;
     if (!document_.saveAs(path,&error)) { reportError("Save",error); return false; }
+    if(QSettings().value(QStringLiteral("history/automaticCheckpoint"),false).toBool()){
+        QString revisionId,historyError;
+        const QString label=QStringLiteral("Auto %1").arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")));
+        if(!cad::DocumentRevisionHistory::createIfChanged(path,label,QStringLiteral("Created automatically after saving the document."),
+                                                           &revisionId,&historyError))
+            QMessageBox::warning(this,"Automatic revision checkpoint",
+                QStringLiteral("The scene was saved, but its automatic revision checkpoint could not be created.\n\n%1")
+                    .arg(historyError));
+    }
     refresh(); return true;
 }
 void MainWindow::exportMultiBendSheetMetalDxf() {
@@ -3480,30 +4880,91 @@ void MainWindow::exportMultiBendSheetMetalDxf() {
     form->addRow("Bend angles, in order (degrees):",angles);form->addRow("Inside radii, in order (mm):",radii);
     form->addRow("K-factors, in order:",kFactors);form->addRow("Blank width (mm):",width);form->addRow("Thickness (mm):",thickness);
     form->addRow("End relief width (0 disables):",reliefWidth);form->addRow("End relief depth (0 disables):",reliefDepth);
+    auto* minRadiusRatio=new QDoubleSpinBox(&dialog);minRadiusRatio->setRange(0.0,1000.0);minRadiusRatio->setDecimals(3);minRadiusRatio->setValue(0.0);
+    auto* minStraight=new QDoubleSpinBox(&dialog);minStraight->setRange(0.0,1000000.0);minStraight->setDecimals(3);minStraight->setValue(0.0);minStraight->setSuffix(" mm");
+    form->addRow("Shop minimum inside radius / thickness (0 disables):",minRadiusRatio);
+    form->addRow("Shop minimum straight flange (0 disables):",minStraight);
     auto* explanation=new QLabel("Enter 2–50 bend stations and one more flange length than bends. Optional rectangular end reliefs are cut into the developed blank at each bend line. Folded solids and springback are not modeled.",&dialog);
     explanation->setWordWrap(true);form->addRow(explanation);
     auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);form->addRow(buttons);
     connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
     if(dialog.exec()!=QDialog::Accepted)return;
-    auto parseList=[](const QString& text,QVector<double>* values){
-        values->clear();const QStringList fields=text.split(',',Qt::SkipEmptyParts);if(fields.isEmpty())return false;
-        for(const QString& field:fields){bool ok=false;const double value=field.trimmed().toDouble(&ok);if(!ok||!std::isfinite(value))return false;values->append(value);}return true;
-    };
     QVector<double> flangeValues,angleValues,radiusValues,kValues;
-    if(!parseList(flanges->text(),&flangeValues)||!parseList(angles->text(),&angleValues)||
-       !parseList(radii->text(),&radiusValues)||!parseList(kFactors->text(),&kValues)||
+    if(!cad::parseSheetMetalNumberList(flanges->text(),&flangeValues)||
+       !cad::parseSheetMetalNumberList(angles->text(),&angleValues)||
+       !cad::parseSheetMetalNumberList(radii->text(),&radiusValues)||
+       !cad::parseSheetMetalNumberList(kFactors->text(),&kValues)||
        angleValues.size()!=radiusValues.size()||angleValues.size()!=kValues.size()){
         reportError("Multi-bend flat pattern","Enter numeric comma-separated values, with matching angle, radius, and K-factor counts.");return;
     }
     QVector<cad::SheetMetalBend> bendValues;bendValues.reserve(angleValues.size());
     for(int i=0;i<angleValues.size();++i)bendValues.append({angleValues[i],radiusValues[i],kValues[i]});
+    QString error;
+    const cad::SheetMetalShopLimits shopLimits{minRadiusRatio->value(),minStraight->value()};
+    if(!cad::validateMultiBendShopLimits(flangeValues,width->value(),thickness->value(),bendValues,shopLimits,&error)){
+        reportError("Multi-bend shop-rule check",error);return;
+    }
     const QString path=QFileDialog::getSaveFileName(this,"Export multi-bend flat pattern",{},"DXF files (*.dxf)");if(path.isEmpty())return;
-    cad::MultiBendFlatPattern pattern;QString error;
+    cad::MultiBendFlatPattern pattern;
     const cad::SheetMetalRelief relief{reliefWidth->value(),reliefDepth->value()};
     if(!cad::exportMultiBendFlatPatternDxf(flangeValues,width->value(),thickness->value(),bendValues,relief,path,&pattern,&error)){
         reportError("Export multi-bend flat pattern",error);return;
     }
     statusBar()->showMessage(QString("DXF exported: flat length %1 mm, %2 bend lines").arg(pattern.flatLengthMm,0,'f',3).arg(pattern.bendLinePositionsMm.size()),8000);
+}
+void MainWindow::exportSelectedFoldedSheetFlatPatternDxf() {
+    const QStringList ids=selectedIds();
+    if(ids.size()!=1){reportError("Export folded-sheet flat pattern","Select exactly one folded sheet-metal body.");return;}
+    QVector<double> flanges;double width=0.0,thickness=0.0;QVector<cad::FoldedSheetBend> bends;bool current=false;
+    if(!document_.foldedSheetMetalDefinition(ids.first(),&flanges,&width,&thickness,&bends,&current)){
+        reportError("Export folded-sheet flat pattern","The selected body has no folded sheet-metal definition.");return;
+    }
+    if(!current){reportError("Export folded-sheet flat pattern","The saved bend inputs are stale because the body was changed by another modeling operation.");return;}
+    QStringList defaults;for(int i=0;i<bends.size();++i)defaults.append("0.33");
+    bool accepted=false;const QString kText=QInputDialog::getText(this,"Folded-sheet DXF",
+        "K-factor for each bend, in order (0–1, comma separated):",QLineEdit::Normal,defaults.join(','),&accepted);
+    if(!accepted)return;
+    QVector<double> kFactors;QString error;
+    if(!cad::parseSheetMetalNumberList(kText,&kFactors,&error)||kFactors.size()!=bends.size()){
+        reportError("Export folded-sheet flat pattern",error.isEmpty()?QStringLiteral("Enter one K-factor for each saved bend."):error);return;
+    }
+    const QString reliefText=QInputDialog::getText(this,"Folded-sheet bend relief",
+        "End relief width and depth in mm (0,0 disables relief):",QLineEdit::Normal,"0,0",&accepted);
+    if(!accepted)return;
+    QVector<double> reliefValues;
+    if(!cad::parseSheetMetalNumberList(reliefText,&reliefValues,&error)||reliefValues.size()!=2){
+        reportError("Export folded-sheet flat pattern",error.isEmpty()?QStringLiteral("Enter relief width and depth as two comma-separated numbers."):error);return;
+    }
+    const cad::SheetMetalRelief relief{reliefValues[0],reliefValues[1]};
+    const QString path=QFileDialog::getSaveFileName(this,"Export folded-sheet flat pattern",{},"DXF files (*.dxf)");if(path.isEmpty())return;
+    cad::MultiBendFlatPattern pattern;
+    if(!cad::exportFoldedSheetFlatPatternDxf(flanges,width,thickness,bends,kFactors,relief,path,&pattern,&error)){
+        reportError("Export folded-sheet flat pattern",error);return;
+    }
+    statusBar()->showMessage(QString("Folded-body DXF exported: %1 mm flat length, %2 bend lines; per-bend K values %3")
+        .arg(pattern.flatLengthMm,0,'f',3).arg(pattern.bendLinePositionsMm.size()).arg(kText),10000);
+}
+void MainWindow::exportSelectedFoldedSheetBendTableCsv() {
+    const QStringList ids=selectedIds();
+    if(ids.size()!=1){reportError("Export folded-sheet bend table","Select exactly one folded sheet-metal body.");return;}
+    QVector<double> flanges;double width=0.0,thickness=0.0;QVector<cad::FoldedSheetBend> bends;bool current=false;
+    if(!document_.foldedSheetMetalDefinition(ids.first(),&flanges,&width,&thickness,&bends,&current)||!current){
+        reportError("Export folded-sheet bend table","Select a folded body whose saved bend definition is current.");return;
+    }
+    QStringList defaults;for(int i=0;i<bends.size();++i)defaults.append("0.33");
+    bool accepted=false;const QString kText=QInputDialog::getText(this,"Folded-sheet bend table",
+        "K-factor for each bend, in order (0–1, comma separated):",QLineEdit::Normal,defaults.join(','),&accepted);
+    if(!accepted)return;
+    QVector<double> kFactors;QString error;
+    if(!cad::parseSheetMetalNumberList(kText,&kFactors,&error)||kFactors.size()!=bends.size()){
+        reportError("Export folded-sheet bend table",error.isEmpty()?QStringLiteral("Enter one K-factor for each saved bend."):error);return;
+    }
+    const QString path=QFileDialog::getSaveFileName(this,"Export folded-sheet bend table",{},"CSV files (*.csv)");
+    if(path.isEmpty())return;
+    if(!cad::exportFoldedSheetBendTableCsv(flanges,width,thickness,bends,kFactors,path,&error)){
+        reportError("Export folded-sheet bend table",error);return;
+    }
+    statusBar()->showMessage(QString("Bend table exported for %1 folded bends.").arg(bends.size()),8000);
 }
 void MainWindow::exportFile(bool step) {
     const QString extension = step ? ".step" : ".stl";

@@ -1,10 +1,12 @@
 #include "SceneDocument.h"
+#include "MeshRepair.h"
 
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Section.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepAlgoAPI_Splitter.hxx>
 #include <Bnd_Box.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
@@ -24,6 +26,7 @@
 #include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepLib.hxx>
 #include <BRepGProp.hxx>
 #include <BRep_Tool.hxx>
@@ -62,12 +65,16 @@
 #include <StlAPI_Reader.hxx>
 #include <StlAPI_Writer.hxx>
 #include <TopAbs_ShapeEnum.hxx>
+#include <TopAbs_State.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopExp.hxx>
+#include <TopoDS_Wire.hxx>
 #include <NCollection_IndexedMap.hxx>
 #include <TopTools_ShapeMapHasher.hxx>
 #include <NCollection_List.hxx>
 #include <GeomAbs_SurfaceType.hxx>
+#include <Poly_Triangle.hxx>
+#include <Poly_Triangulation.hxx>
 #include <QCryptographicHash>
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Edge.hxx>
@@ -106,6 +113,7 @@
 #include <QUuid>
 
 #include <cmath>
+#include <functional>
 #include <algorithm>
 #include <limits>
 #include <numbers>
@@ -139,16 +147,84 @@ const QString kSchema16 = QStringLiteral("cadworkbench.scene.v16");
 const QString kSchema17 = QStringLiteral("cadworkbench.scene.v17");
 const QString kSchema18 = QStringLiteral("cadworkbench.scene.v18");
 const QString kSchema19 = QStringLiteral("cadworkbench.scene.v19");
+const QString kSchema20 = QStringLiteral("cadworkbench.scene.v20");
+const QString kSchema21 = QStringLiteral("cadworkbench.scene.v21");
+const QString kSchema22 = QStringLiteral("cadworkbench.scene.v22");
 constexpr qsizetype kMaxStlImportBytes = 512 * 1024 * 1024;
 
 bool finitePositive(double v) { return std::isfinite(v) && v > 1e-5 && v <= 1e6; }
 bool finiteOffset(double v) { return std::isfinite(v) && std::abs(v) <= 1e6; }
+// Bounded directed dependency graph for positive dimension parameters only.
+// Each target has one source. Recursion rejects cycles before any model change.
+void linkError(QString* error,const QString& message){if(error)*error=message;}
+bool linkableDimension(const QString& key) {
+    return key==QStringLiteral("width")||key==QStringLiteral("height")||
+           key==QStringLiteral("depth")||key==QStringLiteral("hole_diameter")||key==QStringLiteral("hole_depth")||
+           key==QStringLiteral("hole_pattern_spacing");
+}
+bool resolveParameterLinks(const QMap<QString,ParameterLink>& links,QMap<QString,double>& values,QString* error) {
+    if(links.size()>4){linkError(error,"Parameter dependency graph exceeds four links.");return false;}
+    QSet<QString> visiting,finished;
+    std::function<bool(const QString&)> visit=[&](const QString& target)->bool{
+        if(finished.contains(target))return true;
+        if(visiting.contains(target)){linkError(error,"Cyclic named parameter dependency.");return false;}
+        const auto it=links.constFind(target);
+        if(it==links.cend())return true;
+        if(!linkableDimension(target)||!linkableDimension(it->source)||!values.contains(target)||
+           !values.contains(it->source)||target==it->source||!std::isfinite(it->scale)||
+           it->scale<=0.0||it->scale>1e6||!finiteOffset(it->offset)){
+            linkError(error,"Unsupported named parameter dependency, scale, or offset.");return false;
+        }
+        visiting.insert(target);
+        if(!visit(it->source))return false;
+        const double result=values.value(it->source)*it->scale+it->offset;
+        if(!finitePositive(result)){linkError(error,"Dependent named parameter exceeds its supported range.");return false;}
+        values[target]=result;
+        visiting.remove(target);finished.insert(target);return true;
+    };
+    for(auto it=links.cbegin();it!=links.cend();++it)if(!visit(it.key()))return false;
+    return true;
+}
+
+
+// World placement = Rz(yaw) * Ry(pitch) * Rx(roll) about the local origin,
+// followed by XYZ translation. Joint-driven poses remain stored separately.
+gp_Trsf freeOccurrencePlacement(const Part& part) {
+    gp_Trsf placement;
+    placement.SetRotation(gp_Ax1(gp_Pnt(0,0,0),gp_Dir(0,0,1)),
+                          part.placementYawDegrees*std::numbers::pi/180.0);
+    gp_Trsf pitch;pitch.SetRotation(gp_Ax1(gp_Pnt(0,0,0),gp_Dir(0,1,0)),
+                                     part.placementPitchDegrees*std::numbers::pi/180.0);
+    gp_Trsf roll;roll.SetRotation(gp_Ax1(gp_Pnt(0,0,0),gp_Dir(1,0,0)),
+                                   part.placementRollDegrees*std::numbers::pi/180.0);
+    placement.Multiply(pitch);placement.Multiply(roll);
+    placement.SetTranslationPart(gp_Vec(part.placementX,part.placementY,part.placementZ));
+    return placement;
+}
+
+// A revolute drive is stored in the B-rep, not in the occurrence's XYZ
+// placement. Copying or synchronizing it as a definition would bake a driven
+// pose into the unposed instance. Follow rigid/prismatic ancestors as well.
+bool hasDrivenRevoluteAncestor(const Part& occurrence,const QVector<Part>& parts) {
+    const Part* cursor=&occurrence;
+    QSet<QString> visited;
+    while(cursor&&!visited.contains(cursor->id)) {
+        visited.insert(cursor->id);
+        if(cursor->assemblyJointType==QStringLiteral("Revolute")&&cursor->jointAngleDegrees!=0.0)return true;
+        if(cursor->assemblyJointParentBodyId.isEmpty())break;
+        const QString parentId=cursor->assemblyJointParentBodyId;
+        const auto parent=std::find_if(parts.cbegin(),parts.cend(),[&](const Part& p){return p.id==parentId;});
+        cursor=parent==parts.cend()?nullptr:&*parent;
+    }
+    return false;
+}
 bool validDrawingReadinessPolicy(const DrawingReadinessPolicy& policy,QString* error) {
     const QSet<QString> fields={QStringLiteral("description"),QStringLiteral("part_number"),QStringLiteral("revision"),
         QStringLiteral("drawing_number"),QStringLiteral("drawn_by"),QStringLiteral("checked_by"),
         QStringLiteral("issue_date"),QStringLiteral("material")};
     const QSet<QString> conventions={QStringLiteral("envelope_dimensions"),QStringLiteral("projection_symbol"),
-        QStringLiteral("auxiliary_view"),QStringLiteral("general_notes")};
+        QStringLiteral("auxiliary_view"),QStringLiteral("general_notes"),QStringLiteral("section_view"),
+        QStringLiteral("detail_view"),QStringLiteral("linked_parts_list"),QStringLiteral("bom_balloons")};
     QSet<QString> seen;
     for(const QString& field:policy.requiredTitleBlockFields){
         if(!fields.contains(field)||seen.contains(field)){if(error)*error="Drawing project policy contains an unsupported or duplicate title-block field.";return false;}
@@ -161,7 +237,99 @@ bool validDrawingReadinessPolicy(const DrawingReadinessPolicy& policy,QString* e
     }
     return true;
 }
+// SVG is XML 1.0: validate Unicode scalar values, not individual UTF-16 units.
+// A valid surrogate pair represents one allowed supplementary code point;
+// an unpaired surrogate cannot be serialized as well-formed XML.
+bool drawingXmlSafe(const QString& value) {
+    for (qsizetype i=0;i<value.size();++i) {
+        const ushort c=value.at(i).unicode();
+        if (c>=0xD800 && c<=0xDBFF) {
+            if (++i>=value.size()) return false;
+            const ushort low=value.at(i).unicode();
+            if (low<0xDC00 || low>0xDFFF) return false;
+            continue;
+        }
+        if ((c<0x20 && c!=0x09 && c!=0x0A && c!=0x0D) ||
+            (c>=0xDC00 && c<=0xDFFF) || c==0xFFFE || c==0xFFFF)
+            return false;
+    }
+    return true;
+}
+
+// Keep this fingerprint byte-for-byte compatible with DrawingSheet.cpp's
+// buildDrawingAssemblyPart(): previously saved multi-body sheets use this token.
+QString drawingSourceFingerprint(QVector<const Part*> sources) {
+    std::sort(sources.begin(),sources.end(),[](const Part* a,const Part* b){return a->id<b->id;});
+    QByteArray identity;
+    for(const Part* source:sources){
+        identity.append(source->id.toUtf8());
+        identity.append('|');
+        identity.append(source->geometryToken.toUtf8());
+        identity.append('\n');
+    }
+    return QString::fromLatin1(QCryptographicHash::hash(identity,QCryptographicHash::Sha256).toHex());
+}
+
+// Linked parts lists also depend on source metadata, which can change without
+// changing the B-rep geometry token. Hash the complete source BOM/material
+// identity separately so annotation edits can preserve a stale revision.
+QString drawingSourceDataFingerprint(QVector<const Part*> sources) {
+    std::sort(sources.begin(),sources.end(),[](const Part* a,const Part* b){return a->id<b->id;});
+    QJsonArray records;
+    for(const Part* source:sources){
+        QJsonObject record;
+        record.insert("id",source->id);record.insert("part_number",source->partNumber);
+        record.insert("description",source->description);record.insert("revision",source->revision);
+        record.insert("assembly_path",source->assemblyPath);record.insert("procurement_type",source->procurementType);
+        record.insert("supplier",source->supplier);record.insert("supplier_part_number",source->supplierPartNumber);
+        record.insert("material",source->materialName);record.insert("density_kg_per_m3",source->materialDensityKgPerM3);
+        record.insert("material_provenance",source->materialEngineering.provenance);
+        record.insert("youngs_modulus_gpa",source->materialEngineering.youngsModulusGPa);
+        records.append(record);
+    }
+    return QString::fromLatin1(QCryptographicHash::hash(QJsonDocument(records).toJson(QJsonDocument::Compact),
+                                                        QCryptographicHash::Sha256).toHex());
+}
+
 bool validDrawingSettings(const DrawingSheetSettings& s,QString* error) {
+    QStringList xmlStrings={s.sheetId,s.sourceGeometryToken,s.sourceDataToken,s.drawingNumber,s.drawnBy,
+                            s.checkedBy,s.issueDate,s.revision,s.partsListAnnotation.id};
+    xmlStrings.append(s.sourceBodyIds);
+    xmlStrings.append(s.generalNotes);
+    for(auto it=s.viewIds.cbegin();it!=s.viewIds.cend();++it)xmlStrings.append(it.value());
+    for(const DrawingNoteAnnotation& note:s.noteAnnotations){xmlStrings.append(note.id);xmlStrings.append(note.text);}
+    for(const DrawingDimensionAnnotation& dimension:s.dimensionAnnotations)xmlStrings.append(dimension.id);
+    for(const DrawingEdgeDimensionAnnotation& dimension:s.edgeDimensionAnnotations){xmlStrings.append(dimension.id);xmlStrings.append(dimension.sourceBodyId);xmlStrings.append(dimension.sourceGeometryToken);}
+    for(const DrawingBalloonAnnotation& balloon:s.balloonAnnotations){xmlStrings.append(balloon.id);xmlStrings.append(balloon.sourceBodyId);}
+    for(const DrawingDetailAnnotation& detail:s.detailAnnotations)xmlStrings.append(detail.id);
+    for(const DrawingSectionAnnotation& section:s.sectionAnnotations)xmlStrings.append(section.id);
+    for(const QString& value:xmlStrings)if(!drawingXmlSafe(value)){
+        if(error)*error="Drawing text and persistent identities must contain XML-safe characters.";
+        return false;
+    }
+    // XML 1.0 permits tab/newline in attributes, but an XML reader normalizes
+    // them to spaces. Persisted IDs must survive an SVG metadata round trip.
+    QStringList identityStrings={s.sheetId,s.sourceGeometryToken,s.sourceDataToken,s.partsListAnnotation.id};
+    identityStrings.append(s.sourceBodyIds);
+    for(auto it=s.viewIds.cbegin();it!=s.viewIds.cend();++it)identityStrings.append(it.value());
+    for(const DrawingNoteAnnotation& note:s.noteAnnotations)identityStrings.append(note.id);
+    for(const DrawingDimensionAnnotation& dimension:s.dimensionAnnotations)identityStrings.append(dimension.id);
+    for(const DrawingEdgeDimensionAnnotation& dimension:s.edgeDimensionAnnotations){identityStrings.append(dimension.id);identityStrings.append(dimension.sourceBodyId);identityStrings.append(dimension.sourceGeometryToken);}
+    for(const DrawingBalloonAnnotation& balloon:s.balloonAnnotations){identityStrings.append(balloon.id);identityStrings.append(balloon.sourceBodyId);}
+    for(const DrawingDetailAnnotation& detail:s.detailAnnotations)identityStrings.append(detail.id);
+    for(const DrawingSectionAnnotation& section:s.sectionAnnotations)identityStrings.append(section.id);
+    for(const QString& value:identityStrings)if(value.contains(QLatin1Char('\t'))||
+            value.contains(QLatin1Char('\n'))||value.contains(QLatin1Char('\r'))){
+        if(error)*error="Persistent drawing identities cannot contain XML-normalized whitespace.";
+        return false;
+    }
+    // The SVG stores the source set as comma-separated data, so allowing a
+    // literal comma in a source ID would make its membership ambiguous.
+    for(const QString& sourceId:s.sourceBodyIds)if(sourceId.contains(QLatin1Char(','))){
+        if(error)*error="Drawing source body IDs cannot contain commas.";
+        return false;
+    }
+
     const bool projection=s.projection=="First-angle"||s.projection=="Third-angle";
     const bool sheet=s.sheetSize=="A4"||s.sheetSize=="A3";
     const bool auxiliary=s.auxiliaryView=="Isometric"||s.auxiliaryView=="Section A-A";
@@ -188,6 +356,7 @@ bool validDrawingSettings(const DrawingSheetSettings& s,QString* error) {
         }
     }
     if(s.sheetId.trimmed().isEmpty()||s.sheetId.size()>64||s.sourceGeometryToken.trimmed().isEmpty()||s.sourceGeometryToken.size()>64||
+       (!s.sourceDataToken.isEmpty()&&s.sourceDataToken.size()>64)||
        std::any_of(s.sheetId.cbegin(),s.sheetId.cend(),[](QChar c){return c.category()==QChar::Other_Control;})||
        std::any_of(s.sourceGeometryToken.cbegin(),s.sourceGeometryToken.cend(),[](QChar c){return c.category()==QChar::Other_Control;})){
         if(error)*error="Invalid persistent drawing sheet identity or source revision.";return false;
@@ -229,6 +398,16 @@ bool validDrawingSettings(const DrawingSheetSettings& s,QString* error) {
         dimensionAxes.insert(dimension.axis);annotationIds.insert(dimension.id);
     }
     if(!s.dimensionAnnotations.isEmpty()&&dimensionAxes.size()!=3){if(error)*error="Persistent drawing dimensions must include X, Y, and Z.";return false;}
+    if(s.edgeDimensionAnnotations.size()>20){if(error)*error="A drawing sheet can contain at most 20 selected-edge dimensions.";return false;}
+    for(const DrawingEdgeDimensionAnnotation& dimension:s.edgeDimensionAnnotations){
+        if(dimension.id.trimmed().isEmpty()||dimension.id.size()>64||uniqueIds.contains(dimension.id)||annotationIds.contains(dimension.id)||
+           !sourceIds.contains(dimension.sourceBodyId)||dimension.sourceGeometryToken.trimmed().isEmpty()||dimension.sourceGeometryToken.size()>64||
+           dimension.edgeIndex<1||!QSet<QString>{"TOP","FRONT","RIGHT"}.contains(dimension.view)||
+           !std::isfinite(dimension.offsetMm)||dimension.offsetMm<5.0||dimension.offsetMm>60.0){
+            if(error)*error="Selected-edge dimensions need a unique ID, drawing source body, edge index, orthographic view, and 5-60 mm offset.";return false;
+        }
+        annotationIds.insert(dimension.id);
+    }
     const DrawingPartsListAnnotation& partsList=s.partsListAnnotation;
     if(partsList.id.trimmed().isEmpty()||partsList.id.size()>64||uniqueIds.contains(partsList.id)||annotationIds.contains(partsList.id)||
        !std::isfinite(partsList.xMm)||!std::isfinite(partsList.yMm)||partsList.xMm<10.0||partsList.xMm>maxX-155.0||
@@ -276,6 +455,7 @@ bool validDrawingSettings(const DrawingSheetSettings& s,QString* error) {
 void inheritMaterial(Part& destination, const Part& source) {
     destination.materialName = source.materialName;
     destination.materialDensityKgPerM3 = source.materialDensityKgPerM3;
+    destination.materialEngineering = source.materialEngineering;
     destination.partNumber = source.partNumber;
     destination.description = source.description;
     destination.revision = source.revision;
@@ -330,9 +510,62 @@ bool hasSolid(const TopoDS_Shape& shape) {
     for (TopExp_Explorer explorer(shape, TopAbs_SOLID); explorer.More(); explorer.Next()) return true;
     return false;
 }
+bool validSurfaceBodyShape(const TopoDS_Shape& shape,QString* error) {
+    if(shape.IsNull()||(shape.ShapeType()!=TopAbs_FACE&&shape.ShapeType()!=TopAbs_SHELL)){
+        if(error)*error="A surface body must be one valid face or shell.";
+        return false;
+    }
+    if(!BRepCheck_Analyzer(shape).IsValid()){
+        if(error)*error="Surface body failed OCCT topology validation.";
+        return false;
+    }
+    GProp_GProps area;
+    BRepGProp::SurfaceProperties(shape,area);
+    if(!std::isfinite(area.Mass())||area.Mass()<=1e-9){
+        if(error)*error="Surface body must have finite, non-zero area.";
+        return false;
+    }
+    return true;
+}
+bool rejectSurfaceOnlyInput(const Part& part,const QString& operation,QString* error) {
+    if(!part.isSurfaceBody)return false;
+    if(error)*error=QStringLiteral("%1 requires a solid body. Surface bodies can be transformed or renamed, but this operation does not edit surfaces.").arg(operation);
+    return true;
+}
+TopoDS_Shape makeFoldedSheetSolid(const QVector<double>& flanges,double width,double thickness,
+                                  const QVector<FoldedSheetBend>& bends,QString* error) {
+    QVector<QPointF> outline;
+    if(!buildFoldedSheetOutline(flanges,width,thickness,bends,&outline,error))return {};
+    BRepBuilderAPI_MakePolygon boundary;
+    for(const QPointF& point:outline)boundary.Add(gp_Pnt(point.x(),point.y(),0.0));
+    boundary.Close();
+    if(!boundary.IsDone()){if(error)*error="Could not close the folded sheet cross-section.";return {};}
+    BRepBuilderAPI_MakeFace face(boundary.Wire());
+    if(!face.IsDone()){if(error)*error="The folded sheet profile is self-intersecting or has invalid thickness.";return {};}
+    return BRepPrimAPI_MakePrism(face.Face(),gp_Vec(0.0,0.0,width)).Shape();
+}
 } // namespace
 
 void SceneDocument::setError(QString* error, const QString& text) { if (error) *error = text; }
+
+namespace {
+MeshImportSummary summarizeMeshRepair(const mesh::RepairStats& stats) {
+    MeshImportSummary summary;
+    summary.inputVertices=static_cast<quint64>(stats.inputVertices);
+    summary.outputVertices=static_cast<quint64>(stats.outputVertices);
+    summary.inputTriangles=static_cast<quint64>(stats.inputTriangles);
+    summary.outputTriangles=static_cast<quint64>(stats.outputTriangles);
+    summary.weldedVertices=static_cast<quint64>(stats.weldedVertices);
+    summary.removedDegenerateTriangles=static_cast<quint64>(stats.removedDegenerateTriangles);
+    summary.removedDuplicateTriangles=static_cast<quint64>(stats.removedDuplicateTriangles);
+    summary.reorientedTriangles=static_cast<quint64>(stats.flippedTriangles);
+    summary.filledHoles=static_cast<quint64>(stats.filledHoles);
+    summary.filledHoleTriangles=static_cast<quint64>(stats.filledHoleTriangles);
+    summary.boundaryEdges=static_cast<quint64>(stats.boundaryEdges);
+    summary.nonManifoldEdges=static_cast<quint64>(stats.nonManifoldEdges);
+    return summary;
+}
+}
 
 bool SceneDocument::validShape(const TopoDS_Shape& shape, QString* error) {
     if (shape.IsNull()) { setError(error, "The kernel returned a null shape."); return false; }
@@ -346,6 +579,120 @@ bool SceneDocument::validShape(const TopoDS_Shape& shape, QString* error) {
         setError(error, "Solid has zero or invalid volume."); return false;
     }
     return true;
+}
+
+namespace {
+bool rebuildParametricSolid(const Part& part,const QMap<QString,double>& parameters,
+                            const QStringList& suppressed,TopoDS_Shape* result,QString* error) {
+    if(!result){if(error)*error="Provide an output shape for parametric rebuild.";return false;}
+    const double originX=parameters.value(QStringLiteral("origin_x"));
+    const double originY=parameters.value(QStringLiteral("origin_y"));
+    const double width=parameters.value(QStringLiteral("width"));
+    const double height=parameters.value(QStringLiteral("height"));
+    const double depth=parameters.value(QStringLiteral("depth"));
+    if(!finiteOffset(originX+width)||!finiteOffset(originY+height)){
+        if(error)*error="Sketch rectangle coordinates exceed the supported range.";return false;
+    }
+    const bool hasBlindHole=part.featureHistory.contains(QStringLiteral("Cut: Parametric blind hole"));
+    const bool hasThroughHole=part.featureHistory.contains(QStringLiteral("Cut: Parametric through-hole"));
+    const bool hasHole=hasBlindHole||hasThroughHole;
+    const bool hasPattern=part.featureHistory.contains(QStringLiteral("Pattern: Linear through-hole array along X"))||
+                          part.featureHistory.contains(QStringLiteral("Pattern: Linear through-hole array along Y"))||
+                          part.featureHistory.contains(QStringLiteral("Pattern: Linear blind-hole array along X"))||
+                          part.featureHistory.contains(QStringLiteral("Pattern: Linear blind-hole array along Y"));
+    const bool hasChamfer=part.featureHistory.contains(QStringLiteral("Chamfer: All edges"));
+    const bool hasFillet=part.featureHistory.contains(QStringLiteral("Fillet: All edges"));
+    const QString holeSuppressionId=hasBlindHole?QStringLiteral("blind_hole"):QStringLiteral("through_hole");
+    const bool activeHole=hasHole&&!suppressed.contains(holeSuppressionId);
+    const bool activePattern=activeHole&&hasPattern&&!suppressed.contains(QStringLiteral("linear_hole_pattern"));
+    const bool activeChamfer=hasChamfer&&!suppressed.contains(QStringLiteral("edge_chamfer"));
+    const bool activeFillet=hasFillet&&!suppressed.contains(QStringLiteral("edge_fillet"));
+    TopoDS_Shape rebuilt=BRepPrimAPI_MakeBox(gp_Pnt(originX,originY,0),
+        gp_Pnt(originX+width,originY+height,depth)).Shape();
+    if(hasHole){
+        const double diameter=parameters.value(QStringLiteral("hole_diameter"));
+        const double holeDepth=hasBlindHole?parameters.value(QStringLiteral("hole_depth")):depth;
+        const double radius=diameter/2.0;
+        const double x=parameters.value(QStringLiteral("hole_x"));
+        const double y=parameters.value(QStringLiteral("hole_y"));
+        const int fullPatternCount=hasPattern?static_cast<int>(parameters.value(QStringLiteral("hole_pattern_count"))):1;
+        const double spacing=parameters.value(QStringLiteral("hole_pattern_spacing"));
+        const bool alongX=part.holePatternAxis==QStringLiteral("X");
+        const double lastX=x+(hasPattern&&alongX?spacing*(fullPatternCount-1):0.0);
+        const double lastY=y+(hasPattern&&!alongX?spacing*(fullPatternCount-1):0.0);
+        const double minimumFloor=std::max(0.01,depth*1e-5);
+        if(!finitePositive(diameter)||(hasBlindHole&&(!finitePositive(holeDepth)||holeDepth>=depth-minimumFloor))||
+           x-radius<=originX||y-radius<=originY||
+           lastX+radius>=originX+width||lastY+radius>=originY+height||
+           (hasPattern&&spacing<diameter)){
+            if(error)*error="The parametric through-hole feature would leave the rectangular profile or overlap its pattern.";
+            return false;
+        }
+        if(activeHole){
+        const int count=activePattern?fullPatternCount:1;
+        BRep_Builder builder;TopoDS_Compound cutters;builder.MakeCompound(cutters);
+        for(int i=0;i<count;++i){
+            const double holeX=x+(activePattern&&alongX?spacing*i:0.0);
+            const double holeY=y+(activePattern&&!alongX?spacing*i:0.0);
+            const double startZ=hasBlindHole?depth-holeDepth:-0.01;
+            const double cutterDepth=hasBlindHole?holeDepth+0.01:depth+0.02;
+            builder.Add(cutters,BRepPrimAPI_MakeCylinder(
+                gp_Ax2(gp_Pnt(holeX,holeY,startZ),gp_Dir(0,0,1)),radius,cutterDepth).Shape());
+        }
+        BRepAlgoAPI_Cut cut(rebuilt,cutters);cut.Build();
+        if(!cut.IsDone()||cut.HasErrors()){
+            if(error)*error="The parametric through-hole rebuild failed.";return false;
+        }
+        rebuilt=cut.Shape();
+        }
+    }
+    if(activeChamfer){
+        const double distance=parameters.value(QStringLiteral("chamfer_distance"));
+        if(!finitePositive(distance)||distance>=0.5*std::min({width,height,depth})){
+            if(error)*error="The parametric all-edge chamfer must be positive and smaller than half the smallest base dimension.";
+            return false;
+        }
+        BRepFilletAPI_MakeChamfer chamfer(rebuilt);
+        int edgeCount=0;
+        for(TopExp_Explorer edges(rebuilt,TopAbs_EDGE);edges.More();edges.Next()){
+            chamfer.Add(distance,TopoDS::Edge(edges.Current()));++edgeCount;
+        }
+        if(edgeCount==0){if(error)*error="The parametric chamfer found no solid edges.";return false;}
+        chamfer.Build();
+        if(!chamfer.IsDone()){
+            if(error)*error="The parametric distance cannot be applied to all current solid edges.";
+            return false;
+        }
+        rebuilt=chamfer.Shape();
+    }
+    if(activeFillet){
+        const double radius=parameters.value(QStringLiteral("fillet_radius"));
+        if(!finitePositive(radius)||radius>=0.5*std::min({width,height,depth})){
+            if(error)*error="The parametric all-edge fillet must be positive and smaller than half the smallest base dimension.";
+            return false;
+        }
+        BRepFilletAPI_MakeFillet fillet(rebuilt);
+        int edgeCount=0;
+        for(TopExp_Explorer edges(rebuilt,TopAbs_EDGE);edges.More();edges.Next()){
+            fillet.Add(radius,TopoDS::Edge(edges.Current()));++edgeCount;
+        }
+        if(edgeCount==0){if(error)*error="The parametric fillet found no solid edges.";return false;}
+        fillet.Build();
+        if(!fillet.IsDone()){
+            if(error)*error="The parametric radius cannot be applied to all current solid edges.";
+            return false;
+        }
+        rebuilt=fillet.Shape();
+    }
+    if(rebuilt.IsNull()||!hasSolid(rebuilt)||!BRepCheck_Analyzer(rebuilt).IsValid()){
+        if(error)*error="Parametric feature rebuild produced invalid solid topology.";return false;
+    }
+    GProp_GProps volume;BRepGProp::VolumeProperties(rebuilt,volume);
+    if(!std::isfinite(volume.Mass())||volume.Mass()<=1e-12){
+        if(error)*error="Parametric feature rebuild produced zero or invalid volume.";return false;
+    }
+    *result=rebuilt;return true;
+}
 }
 
 const Part* SceneDocument::find(const QString& id) const {
@@ -526,6 +873,364 @@ bool SceneDocument::addPrimitive(Primitive kind, const QVector<double>& dimensio
         return true;
     } catch (const Standard_Failure& e) { setError(error, QStringLiteral("CAD kernel error: %1").arg(e.what())); }
       catch (const std::exception& e) { setError(error, QString::fromUtf8(e.what())); }
+    return false;
+}
+
+bool SceneDocument::addSurfaceBody(const QString& name,const TopoDS_Shape& shape,QString* error) {
+    const QString cleanName=name.trimmed();
+    if(cleanName.isEmpty()||cleanName.size()>120||cleanName.contains('\n')||cleanName.contains('\r')){
+        setError(error,"Surface body names must contain 1 to 120 single-line characters.");return false;
+    }
+    if(parts_.size()>=kMaxObjects){setError(error,"Scene object limit reached.");return false;}
+    for(const Part& part:parts_)if(part.name.compare(cleanName,Qt::CaseInsensitive)==0){
+        setError(error,"Another body already uses this name.");return false;
+    }
+    if(!validSurfaceBodyShape(shape,error))return false;
+    Part part;part.id=generatedId();part.name=cleanName;part.shape=shape;part.isSurfaceBody=true;
+    checkpoint();parts_.append(std::move(part));return true;
+}
+
+bool SceneDocument::thickenSurfaceBody(const QString& surfaceBodyId,double thicknessMm,QString* error) {
+    const Part* source=find(surfaceBodyId);
+    if(!source||!source->isSurfaceBody){setError(error,"Select a persisted surface body to thicken.");return false;}
+    if(!std::isfinite(thicknessMm)||std::abs(thicknessMm)<1e-5||std::abs(thicknessMm)>1e6){
+        setError(error,"Surface thickness must be finite, non-zero, and no greater than 1,000,000 mm in magnitude.");return false;
+    }
+    if(parts_.size()>=kMaxObjects){setError(error,"Scene object limit reached.");return false;}
+    try{
+        TopoDS_Shape solid;
+        TopExp_Explorer faceExplorer(source->shape,TopAbs_FACE);
+        const bool singleFace=faceExplorer.More() && ([&](){faceExplorer.Next();return !faceExplorer.More();})();
+        if(singleFace && BRepAdaptor_Surface(TopoDS::Face(TopExp_Explorer(source->shape,TopAbs_FACE).Current()),true).GetType()==GeomAbs_Plane){
+            const TopoDS_Face face=TopoDS::Face(TopExp_Explorer(source->shape,TopAbs_FACE).Current());
+            const gp_Dir normal=BRepAdaptor_Surface(face,true).Plane().Axis().Direction();
+            BRepPrimAPI_MakePrism prism(face,gp_Vec(normal)*thicknessMm,true);
+            if(!prism.IsDone()){setError(error,"OCCT could not extrude this planar surface into a solid.");return false;}
+            solid=prism.Shape();
+        }else{
+            BRepOffsetAPI_MakeThickSolid thickener;
+            thickener.MakeThickSolidBySimple(source->shape,thicknessMm);
+            if(!thickener.IsDone()){setError(error,"OCCT could not thicken this surface without invalid or self-intersecting geometry.");return false;}
+            solid=thickener.Shape();
+        }
+        int solidCount=0;for(TopExp_Explorer explorer(solid,TopAbs_SOLID);explorer.More();explorer.Next())++solidCount;
+        if(solidCount!=1||!validShape(solid,error)){
+            if(error&&error->isEmpty())setError(error,"Thickening must produce exactly one valid solid.");
+            return false;
+        }
+        Part result{generatedId(),uniqueName(source->name+QStringLiteral(" Thickened")),solid,source->visible,source->color};
+        result.materialName=source->materialName;result.materialDensityKgPerM3=source->materialDensityKgPerM3;
+        result.materialEngineering=source->materialEngineering;
+        checkpoint();parts_.append(std::move(result));return true;
+    }catch(const Standard_Failure& failure){setError(error,QStringLiteral("Surface-thickening kernel error: %1").arg(failure.what()));}
+     catch(const std::exception& failure){setError(error,QStringLiteral("Surface thickening failed: %1").arg(QString::fromUtf8(failure.what())));}
+    return false;
+}
+
+bool SceneDocument::stitchSurfaceBodies(const QStringList& surfaceBodyIds,double toleranceMm,QString* error) {
+    if(surfaceBodyIds.isEmpty()||surfaceBodyIds.size()>100){setError(error,"Select between one and 100 surface bodies to stitch.");return false;}
+    if(!std::isfinite(toleranceMm)||toleranceMm<1e-7||toleranceMm>1.0){setError(error,"Stitch tolerance must be finite and between 0.0000001 and 1 mm.");return false;}
+    if(parts_.size()>=kMaxObjects){setError(error,"Scene object limit reached.");return false;}
+    QSet<QString> unique;QVector<const Part*> sources;sources.reserve(surfaceBodyIds.size());
+    for(const QString& id:surfaceBodyIds){
+        if(unique.contains(id)){setError(error,"A surface body was selected more than once.");return false;}
+        unique.insert(id);const Part* part=find(id);
+        if(!part||!part->isSurfaceBody){setError(error,"Every selected body must be a persisted surface body.");return false;}
+        sources.append(part);
+    }
+    try{
+        BRepBuilderAPI_Sewing sewing(toleranceMm,true,true,true,false);
+        for(const Part* source:sources)sewing.Add(source->shape);
+        sewing.Perform();const TopoDS_Shape stitched=sewing.SewedShape();
+        if(stitched.IsNull()){setError(error,"OCCT could not sew the selected surface bodies.");return false;}
+        BRep_Builder builder;TopoDS_Compound solids;builder.MakeCompound(solids);int solidCount=0;
+        for(TopExp_Explorer explorer(stitched,TopAbs_SOLID);explorer.More();explorer.Next()){
+            const TopoDS_Shape solid=explorer.Current();if(!validShape(solid,error))return false;
+            builder.Add(solids,solid);++solidCount;
+        }
+        if(solidCount==0){
+            for(TopExp_Explorer explorer(stitched,TopAbs_SHELL);explorer.More();explorer.Next()){
+                const TopoDS_Shell shell=TopoDS::Shell(explorer.Current());
+                if(!BRep_Tool::IsClosed(shell)){setError(error,"The stitched surfaces still have open boundary edges; no solid was created.");return false;}
+                BRepBuilderAPI_MakeSolid makeSolid(shell);
+                if(!makeSolid.IsDone()){setError(error,"The closed stitched shell could not be converted to a solid.");return false;}
+                TopoDS_Solid solid=makeSolid.Solid();
+                if(!BRepLib::OrientClosedSolid(solid)||!validShape(solid,error))return false;
+                builder.Add(solids,solid);++solidCount;
+            }
+        }
+        if(solidCount==0||!validShape(solids,error)){
+            if(error&&error->isEmpty())setError(error,"Stitching did not produce a closed valid solid.");
+            return false;
+        }
+        Part result{generatedId(),uniqueName(QStringLiteral("Stitched Surface Solid")),solids,true,sources.first()->color};
+        result.materialName=sources.first()->materialName;
+        result.materialDensityKgPerM3=sources.first()->materialDensityKgPerM3;
+        result.materialEngineering=sources.first()->materialEngineering;
+        checkpoint();parts_.append(std::move(result));return true;
+    }catch(const Standard_Failure& failure){setError(error,QStringLiteral("Surface stitching kernel error: %1").arg(failure.what()));}
+     catch(const std::exception& failure){setError(error,QStringLiteral("Surface stitching failed: %1").arg(QString::fromUtf8(failure.what())));}
+    return false;
+}
+
+bool SceneDocument::sewSurfaceBodies(const QStringList& surfaceBodyIds,double toleranceMm,QString* error) {
+    if(surfaceBodyIds.size()<2||surfaceBodyIds.size()>100){
+        setError(error,"Select between two and 100 surface bodies to merge into a shell.");return false;
+    }
+    if(!std::isfinite(toleranceMm)||toleranceMm<1e-7||toleranceMm>1.0){
+        setError(error,"Sewing tolerance must be finite and between 0.0000001 and 1 mm.");return false;
+    }
+    if(parts_.size()>=kMaxObjects){setError(error,"Scene object limit reached.");return false;}
+    QSet<QString> unique;QVector<const Part*> sources;sources.reserve(surfaceBodyIds.size());
+    for(const QString& id:surfaceBodyIds){
+        if(unique.contains(id)){setError(error,"A surface body was selected more than once.");return false;}
+        unique.insert(id);const Part* part=find(id);
+        if(!part||!part->isSurfaceBody){setError(error,"Every selected body must be a persisted surface body.");return false;}
+        sources.append(part);
+    }
+    try{
+        BRepBuilderAPI_Sewing sewing(toleranceMm,true,true,true,false);
+        NCollection_IndexedMap<TopoDS_Shape,TopTools_ShapeMapHasher> inputFaces;
+        for(const Part* source:sources){
+            sewing.Add(source->shape);
+            TopExp::MapShapes(source->shape,TopAbs_FACE,inputFaces);
+        }
+        sewing.Perform();
+        const TopoDS_Shape sewn=sewing.SewedShape();
+        if(sewn.IsNull()){setError(error,"The CAD kernel could not sew the selected surface bodies.");return false;}
+        QVector<TopoDS_Shape> shells;
+        for(TopExp_Explorer explorer(sewn,TopAbs_SHELL);explorer.More();explorer.Next())
+            shells.append(explorer.Current());
+        if(shells.size()!=1){
+            setError(error,"The selected surfaces did not sew into one connected shell. Check that their boundary edges meet within the chosen tolerance.");return false;
+        }
+        NCollection_IndexedMap<TopoDS_Shape,TopTools_ShapeMapHasher> sewnFaces;
+        TopExp::MapShapes(shells.first(),TopAbs_FACE,sewnFaces);
+        if(sewnFaces.Extent()!=inputFaces.Extent()){
+            setError(error,"Sewing would omit or merge selected faces; no surface body was created.");return false;
+        }
+        if(!validSurfaceBodyShape(shells.first(),error))return false;
+        Part result{generatedId(),uniqueName(QStringLiteral("Sewn Surface Shell")),shells.first(),true,sources.first()->color};
+        result.isSurfaceBody=true;
+        result.materialName=sources.first()->materialName;
+        result.materialDensityKgPerM3=sources.first()->materialDensityKgPerM3;
+        result.materialEngineering=sources.first()->materialEngineering;
+        checkpoint();parts_.append(std::move(result));return true;
+    }catch(const Standard_Failure& failure){setError(error,QStringLiteral("Surface-shell sewing kernel error: %1").arg(failure.what()));}
+     catch(const std::exception& failure){setError(error,QStringLiteral("Surface-shell sewing failed: %1").arg(QString::fromUtf8(failure.what())));}
+    return false;
+}
+
+bool SceneDocument::trimSurfaceBody(const QString& surfaceBodyId,const QString& cutterSolidId,
+                                    bool keepInsideCutter,QString* error) {
+    const Part* source=find(surfaceBodyId);
+    const Part* cutter=find(cutterSolidId);
+    if(!source||!source->isSurfaceBody){setError(error,"Select a persisted surface body to trim.");return false;}
+    if(!cutter||cutter->isSurfaceBody||!hasSolid(cutter->shape)){
+        setError(error,"Select a solid body as the trimming tool.");return false;
+    }
+    if(surfaceBodyId==cutterSolidId){setError(error,"The surface and trimming tool must be different bodies.");return false;}
+    if(parts_.size()>=kMaxObjects){setError(error,"Scene object limit reached.");return false;}
+    try{
+        TopoDS_Shape booleanResult;
+        if(keepInsideCutter){
+            BRepAlgoAPI_Common common(source->shape,cutter->shape);common.Build();
+            if(!common.IsDone()){setError(error,"The CAD kernel could not intersect the surface with the trimming solid.");return false;}
+            booleanResult=common.Shape();
+        }else{
+            BRepAlgoAPI_Cut cut(source->shape,cutter->shape);cut.Build();
+            if(!cut.IsDone()){setError(error,"The CAD kernel could not subtract the trimming solid from the surface.");return false;}
+            booleanResult=cut.Shape();
+        }
+        if(booleanResult.IsNull()){setError(error,"The trimming operation produced no surface area.");return false;}
+
+        BRepBuilderAPI_Sewing sewing(1e-7,true,true,true,false);
+        int faceCount=0;
+        for(TopExp_Explorer faces(booleanResult,TopAbs_FACE);faces.More();faces.Next()){
+            sewing.Add(faces.Current());++faceCount;
+        }
+        if(faceCount==0){setError(error,"The trimming operation did not leave any surface faces.");return false;}
+        sewing.Perform();
+        const TopoDS_Shape sewn=sewing.SewedShape();
+        if(sewn.IsNull()){setError(error,"The trimmed faces could not be joined into valid surface bodies.");return false;}
+
+        QVector<TopoDS_Shape> surfacePieces;
+        for(TopExp_Explorer shells(sewn,TopAbs_SHELL);shells.More();shells.Next())
+            surfacePieces.append(shells.Current());
+        if(surfacePieces.isEmpty()){
+            if(sewn.ShapeType()==TopAbs_FACE)surfacePieces.append(sewn);
+            else for(TopExp_Explorer faces(sewn,TopAbs_FACE);faces.More();faces.Next())
+                surfacePieces.append(faces.Current());
+        }
+        if(surfacePieces.isEmpty()){setError(error,"The trimmed result contains no valid surface body.");return false;}
+
+        GProp_GProps originalArea;BRepGProp::SurfaceProperties(source->shape,originalArea);
+        double resultArea=0.0;
+        for(const TopoDS_Shape& piece:surfacePieces){
+            if(!validSurfaceBodyShape(piece,error))return false;
+            GProp_GProps pieceArea;BRepGProp::SurfaceProperties(piece,pieceArea);resultArea+=pieceArea.Mass();
+        }
+        if(!std::isfinite(resultArea)||resultArea<=1e-9){setError(error,"The trimmed result has no finite surface area.");return false;}
+        if(std::abs(resultArea-originalArea.Mass())<=std::max(1e-8,originalArea.Mass()*1e-9)){
+            setError(error,"The trimming solid did not change the selected surface.");return false;
+        }
+        if(parts_.size()+surfacePieces.size()>kMaxObjects){setError(error,"Trimming would exceed the scene body limit.");return false;}
+
+        QSet<QString> reservedNames;
+        for(const Part& part:parts_)reservedNames.insert(part.name.toCaseFolded());
+        QVector<Part> results;results.reserve(surfacePieces.size());
+        const QString baseName=source->name.left(100).trimmed()+QStringLiteral(" Trimmed");
+        for(int i=0;i<surfacePieces.size();++i){
+            QString name=surfacePieces.size()==1?baseName:baseName+QStringLiteral(" %1").arg(i+1);
+            const QString stem=name;int suffix=2;
+            while(reservedNames.contains(name.toCaseFolded()))name=stem+QStringLiteral(" %1").arg(suffix++);
+            reservedNames.insert(name.toCaseFolded());
+            Part result{generatedId(),name,surfacePieces[i],source->visible,source->color};
+            result.isSurfaceBody=true;
+            result.materialName=source->materialName;
+            result.materialDensityKgPerM3=source->materialDensityKgPerM3;
+            result.materialEngineering=source->materialEngineering;
+            results.append(std::move(result));
+        }
+        checkpoint();
+        for(Part& result:results)parts_.append(std::move(result));
+        return true;
+    }catch(const Standard_Failure& failure){setError(error,QStringLiteral("Surface-trimming kernel error: %1").arg(failure.what()));}
+     catch(const std::exception& failure){setError(error,QStringLiteral("Surface trimming failed: %1").arg(QString::fromUtf8(failure.what())));}
+    return false;
+}
+
+bool SceneDocument::splitSurfaceBodyBySolid(const QString& surfaceBodyId,const QString& cutterSolidId,QString* error) {
+    const Part* source=find(surfaceBodyId);
+    const Part* cutter=find(cutterSolidId);
+    if(!source||!source->isSurfaceBody){setError(error,"Select a persisted surface body to split.");return false;}
+    if(!validSurfaceBodyShape(source->shape,error))return false;
+    if(!cutter||cutter->isSurfaceBody||!hasSolid(cutter->shape)){
+        setError(error,"Select a solid body as the splitting tool.");return false;
+    }
+    if(surfaceBodyId==cutterSolidId){setError(error,"The surface and splitting tool must be different bodies.");return false;}
+    if(parts_.size()>=kMaxObjects){setError(error,"Scene object limit reached.");return false;}
+    try{
+        QVector<TopoDS_Shape> sourceFaces;
+        for(TopExp_Explorer faces(source->shape,TopAbs_FACE);faces.More();faces.Next())
+            sourceFaces.append(faces.Current());
+        if(sourceFaces.isEmpty()){setError(error,"The surface body contains no faces to split.");return false;}
+        if(sourceFaces.size()>5000){
+            setError(error,"Solid-guided splitting is limited to surface bodies with at most 5,000 faces to keep the operation responsive.");return false;
+        }
+        QVector<TopoDS_Shape> faceFragments;
+        for(const TopoDS_Shape& sourceFace:sourceFaces){
+            NCollection_List<TopoDS_Shape> arguments,tools;
+            arguments.Append(sourceFace);tools.Append(cutter->shape);
+            BRepAlgoAPI_Splitter splitter;
+            splitter.SetArguments(arguments);splitter.SetTools(tools);splitter.Build();
+            if(!splitter.IsDone()){
+                setError(error,"The CAD kernel could not split every face of the surface body.");return false;
+            }
+            const TopoDS_Shape splitResult=splitter.Shape();
+            if(splitResult.IsNull()){setError(error,"The split operation produced no surface fragments.");return false;}
+            if(splitResult.ShapeType()==TopAbs_FACE)faceFragments.append(splitResult);
+            else for(TopExp_Explorer faces(splitResult,TopAbs_FACE);faces.More();faces.Next())
+                faceFragments.append(faces.Current());
+        }
+        if(faceFragments.size()<=sourceFaces.size()){
+            setError(error,"The solid did not divide the selected surface into multiple fragments.");return false;
+        }
+        // Persist every split face independently. This accepts whole sewn
+        // shells and leaves each result face directly selectable for reuse.
+        QVector<TopoDS_Shape> fragments=std::move(faceFragments);
+        if(fragments.size()<2){
+            setError(error,QStringLiteral("The solid did not divide the selected surface into multiple fragments (%1 source faces, %2 split faces, %3 grouped bodies).")
+                .arg(sourceFaces.size()).arg(faceFragments.size()).arg(fragments.size()));return false;
+        }
+        GProp_GProps originalArea;BRepGProp::SurfaceProperties(source->shape,originalArea);
+        double fragmentArea=0.0;
+        for(const TopoDS_Shape& fragment:fragments){
+            if(!validSurfaceBodyShape(fragment,error))return false;
+            GProp_GProps area;BRepGProp::SurfaceProperties(fragment,area);fragmentArea+=area.Mass();
+        }
+        const double areaTolerance=std::max(1e-7,originalArea.Mass()*1e-7);
+        if(!std::isfinite(fragmentArea)||std::abs(fragmentArea-originalArea.Mass())>areaTolerance){
+            setError(error,QStringLiteral("The split fragments failed surface-area conservation (%1 mm² from %2 mm² across %3 fragments); the scene was not changed.")
+                .arg(fragmentArea,0,'g',12).arg(originalArea.Mass(),0,'g',12).arg(fragments.size()));return false;
+        }
+        if(parts_.size()+fragments.size()>kMaxObjects){setError(error,"Splitting would exceed the scene body limit.");return false;}
+
+        QSet<QString> reservedNames;
+        for(const Part& part:parts_)reservedNames.insert(part.name.toCaseFolded());
+        QVector<Part> results;results.reserve(fragments.size());
+        const QString baseName=source->name.left(90).trimmed()+QStringLiteral(" Split");
+        for(int i=0;i<fragments.size();++i){
+            const QString stem=baseName+QStringLiteral(" %1").arg(i+1);
+            QString name=stem;int suffix=2;
+            while(reservedNames.contains(name.toCaseFolded()))name=stem+QStringLiteral(" %1").arg(suffix++);
+            reservedNames.insert(name.toCaseFolded());
+            Part result{generatedId(),name,fragments[i],source->visible,source->color};
+            result.isSurfaceBody=true;
+            result.materialName=source->materialName;
+            result.materialDensityKgPerM3=source->materialDensityKgPerM3;
+            result.materialEngineering=source->materialEngineering;
+            results.append(std::move(result));
+        }
+        checkpoint();
+        for(Part& result:results)parts_.append(std::move(result));
+        return true;
+    }catch(const Standard_Failure& failure){setError(error,QStringLiteral("Surface-splitting kernel error: %1").arg(failure.what()));}
+     catch(const std::exception& failure){setError(error,QStringLiteral("Surface splitting failed: %1").arg(QString::fromUtf8(failure.what())));}
+    return false;
+}
+
+bool SceneDocument::addFoldedSheetMetal(const QVector<double>& flanges,double sheetWidth,double thickness,
+        const QVector<FoldedSheetBend>& bends,QString* error) {
+    if(parts_.size()>=kMaxObjects){setError(error,"Scene object limit reached.");return false;}
+    try{
+        const TopoDS_Shape shape=makeFoldedSheetSolid(flanges,sheetWidth,thickness,bends,error);
+        if(!validShape(shape,error))return false;
+        const QString name=uniqueName(QStringLiteral("Folded Sheet Metal"));
+        checkpoint();parts_.append({generatedId(),name,shape,true,QStringLiteral("#8ba6b8")});
+        Part& part=parts_.last();part.hasFoldedSheetMetalDefinition=true;part.foldedSheetGeometryToken=part.geometryToken;
+        part.foldedSheetFlangesMm=flanges;part.foldedSheetWidthMm=sheetWidth;
+        part.foldedSheetThicknessMm=thickness;part.foldedSheetBends=bends;
+        return true;
+    }catch(const Standard_Failure& e){setError(error,QStringLiteral("Folded sheet-metal kernel error: %1").arg(e.what()));}
+     catch(const std::exception& e){setError(error,QString::fromUtf8(e.what()));}
+    return false;
+}
+
+bool SceneDocument::foldedSheetMetalDefinition(const QString& partId,QVector<double>* flanges,
+        double* width,double* thickness,QVector<FoldedSheetBend>* bends,bool* current) const {
+    const Part* part=find(partId);
+    if(!part||!part->hasFoldedSheetMetalDefinition)return false;
+    if(flanges)*flanges=part->foldedSheetFlangesMm;
+    if(width)*width=part->foldedSheetWidthMm;
+    if(thickness)*thickness=part->foldedSheetThicknessMm;
+    if(bends)*bends=part->foldedSheetBends;
+    if(current)*current=part->geometryToken==part->foldedSheetGeometryToken;
+    return true;
+}
+
+bool SceneDocument::editFoldedSheetMetal(const QString& partId,const QVector<double>& flanges,
+        double width,double thickness,const QVector<FoldedSheetBend>& bends,QString* error) {
+    const auto found=std::find_if(parts_.begin(),parts_.end(),[&](const Part& part){return part.id==partId;});
+    if(found==parts_.end()||!found->hasFoldedSheetMetalDefinition){setError(error,"Selected body has no editable folded sheet-metal definition.");return false;}
+    if(found->geometryToken!=found->foldedSheetGeometryToken){setError(error,"Folded sheet-metal definition is stale because the body was changed by another modeling operation.");return false;}
+    try{
+        const TopoDS_Shape rebuilt=makeFoldedSheetSolid(flanges,width,thickness,bends,error);
+        if(!validShape(rebuilt,error))return false;
+        if(flanges==found->foldedSheetFlangesMm&&width==found->foldedSheetWidthMm&&
+           thickness==found->foldedSheetThicknessMm&&bends.size()==found->foldedSheetBends.size()){
+            bool same=true;for(int i=0;i<bends.size();++i)same=same&&bends[i].angleDegrees==found->foldedSheetBends[i].angleDegrees&&
+                bends[i].insideRadiusMm==found->foldedSheetBends[i].insideRadiusMm;
+            if(same)return true;
+        }
+        checkpoint();
+        Part& part=*std::find_if(parts_.begin(),parts_.end(),[&](const Part& candidate){return candidate.id==partId;});
+        part.shape=rebuilt;part.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);
+        part.foldedSheetGeometryToken=part.geometryToken;part.foldedSheetFlangesMm=flanges;
+        part.foldedSheetWidthMm=width;part.foldedSheetThicknessMm=thickness;part.foldedSheetBends=bends;
+        return true;
+    }catch(const Standard_Failure& e){setError(error,QStringLiteral("Folded sheet-metal rebuild failed: %1").arg(e.what()));}
+     catch(const std::exception& e){setError(error,QString::fromUtf8(e.what()));}
     return false;
 }
 
@@ -853,11 +1558,15 @@ bool SceneDocument::translate(const QString& id, double x, double y, double z, Q
             int index=-1;for(int i=0;i<parts_.size();++i)if(parts_[i].id==movingId){index=i;break;}
             if(index<0){setError(error,"A jointed occurrence is missing from the current assembly.");return false;}
             const TopoDS_Shape result=BRepBuilderAPI_Transform(parts_[index].shape,transform,true).Shape();
-            if(!validShape(result,error))return false;
             const Part& target=parts_[index];
+            if(target.isSurfaceBody?!validSurfaceBodyShape(result,error):!validShape(result,error))return false;
             if(!target.componentDefinitionId.isEmpty()&&
                (!finiteOffset(target.placementX+x)||!finiteOffset(target.placementY+y)||!finiteOffset(target.placementZ+z))){
                 setError(error,"Assembly occurrence placement would exceed the supported coordinate range.");return false;
+            }
+            if((target.assemblyJointType==QStringLiteral("Revolute")||target.assemblyJointType==QStringLiteral("Prismatic"))&&
+               (!finiteOffset(target.jointOriginX+x)||!finiteOffset(target.jointOriginY+y)||!finiteOffset(target.jointOriginZ+z))){
+                setError(error,"Assembly joint origin would exceed the supported coordinate range.");return false;
             }
             updates.append({index,result});
         }
@@ -888,17 +1597,36 @@ bool SceneDocument::rotate(const QString& id, Axis axis, double degrees, QString
         for(int cursor=0;cursor<movingIds.size();++cursor)
             for(const Part& candidate:parts_)
                 if(candidate.assemblyJointParentBodyId==movingIds[cursor]&&!movingIds.contains(candidate.id))movingIds.append(candidate.id);
+        // Existing world-axis rotation can be represented as another yaw only
+        // for world Z. Reject X/Y on already yaw-placed occurrences rather
+        // than silently invalidating their persisted placement metadata.
+        for(const Part& target:parts_){
+            if(!movingIds.contains(target.id)||target.componentDefinitionId.isEmpty())continue;
+            const bool unsupported=(axis==Axis::X&&(target.placementYawDegrees!=0.0||target.placementPitchDegrees!=0.0))||
+                (axis==Axis::Y&&target.placementYawDegrees!=0.0);
+            const double destinationAngle=axis==Axis::X?target.placementRollDegrees+degrees:
+                axis==Axis::Y?target.placementPitchDegrees+degrees:target.placementYawDegrees+degrees;
+            if(unsupported||!std::isfinite(destinationAngle)||std::abs(destinationAngle)>36000.0){
+                setError(error,"This world-axis rotation cannot be represented by the occurrence's saved orientation.");return false;
+            }
+        }
         struct RotationUpdate{int index;TopoDS_Shape shape;};QVector<RotationUpdate> updates;updates.reserve(movingIds.size());
         for(const QString& movingId:movingIds){
             int index=-1;for(int i=0;i<parts_.size();++i)if(parts_[i].id==movingId){index=i;break;}
             if(index<0){setError(error,"A jointed occurrence is missing from the current assembly.");return false;}
             const TopoDS_Shape result=BRepBuilderAPI_Transform(parts_[index].shape,transform,true).Shape();
-            if(!validShape(result,error))return false;
             const Part& target=parts_[index];
+            if(target.isSurfaceBody?!validSurfaceBodyShape(result,error):!validShape(result,error))return false;
             if(!target.componentDefinitionId.isEmpty()){
                 const gp_Pnt position=gp_Pnt(target.placementX,target.placementY,target.placementZ).Transformed(transform);
                 if(!finiteOffset(position.X())||!finiteOffset(position.Y())||!finiteOffset(position.Z())){
                     setError(error,"Assembly occurrence placement would exceed the supported coordinate range.");return false;
+                }
+            }
+            if(target.assemblyJointType==QStringLiteral("Revolute")||target.assemblyJointType==QStringLiteral("Prismatic")){
+                const gp_Pnt origin=gp_Pnt(target.jointOriginX,target.jointOriginY,target.jointOriginZ).Transformed(transform);
+                if(!finiteOffset(origin.X())||!finiteOffset(origin.Y())||!finiteOffset(origin.Z())){
+                    setError(error,"Assembly joint origin would exceed the supported coordinate range.");return false;
                 }
             }
             updates.append({index,result});
@@ -909,6 +1637,9 @@ bool SceneDocument::rotate(const QString& id, Axis axis, double degrees, QString
             if(!target.componentDefinitionId.isEmpty()){
                 const gp_Pnt position=gp_Pnt(target.placementX,target.placementY,target.placementZ).Transformed(transform);
                 target.placementX=position.X();target.placementY=position.Y();target.placementZ=position.Z();
+                if(axis==Axis::X)target.placementRollDegrees+=degrees;
+                else if(axis==Axis::Y)target.placementPitchDegrees+=degrees;
+                else target.placementYawDegrees+=degrees;
             }
             if(target.assemblyJointType==QStringLiteral("Revolute")||target.assemblyJointType==QStringLiteral("Prismatic")){
                 const gp_Pnt origin=gp_Pnt(target.jointOriginX,target.jointOriginY,target.jointOriginZ).Transformed(transform);
@@ -933,7 +1664,7 @@ bool SceneDocument::scale(const QString& id, double factor, QString* error) {
         gp_Trsf transform;
         transform.SetScale(gp_Pnt(0,0,0), factor);
         const TopoDS_Shape result = BRepBuilderAPI_Transform(part->shape, transform, true).Shape();
-        if (!validShape(result, error)) return false;
+        if(part->isSurfaceBody?!validSurfaceBodyShape(result,error):!validShape(result,error))return false;
         checkpoint();
         for (auto& target : parts_) if (target.id == id) { target.shape = result; target.geometryToken = QUuid::createUuid().toString(QUuid::WithoutBraces); break; }
         return true;
@@ -954,7 +1685,7 @@ bool SceneDocument::scaleNonUniform(const QString& id,double factorX,double fact
     try{
         const gp_GTrsf transform(gp_Mat(factorX,0,0,0,factorY,0,0,0,factorZ),gp_XYZ(0,0,0));
         const TopoDS_Shape result=BRepBuilderAPI_GTransform(part->shape,transform,true).Shape();
-        if(!validShape(result,error))return false;
+        if(part->isSurfaceBody?!validSurfaceBodyShape(result,error):!validShape(result,error))return false;
         checkpoint();
         for(auto& target:parts_)if(target.id==id){target.shape=result;target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);break;}
         return true;
@@ -967,19 +1698,38 @@ bool SceneDocument::duplicate(const QString& id, double dx, double dy, double dz
     const Part* part = find(id);
     if (!part) { setError(error, "Object not found."); return false; }
     if (!finiteOffset(dx) || !finiteOffset(dy) || !finiteOffset(dz)) { setError(error, "Duplicate offset out of range."); return false; }
+    if (!part->componentDefinitionId.isEmpty()&&hasDrivenRevoluteAncestor(*part,parts_)) {
+        setError(error,"Reset revolute joints to zero before duplicating a component occurrence."); return false;
+    }
     if (parts_.size() >= kMaxObjects) { setError(error, "Scene object limit reached."); return false; }
+    if (!part->componentDefinitionId.isEmpty() &&
+        (!finiteOffset(part->placementX+dx) || !finiteOffset(part->placementY+dy) ||
+         !finiteOffset(part->placementZ+dz))) {
+        setError(error, "Duplicated occurrence placement would exceed the supported coordinate range."); return false;
+    }
     try {
         gp_Trsf trsf;
         trsf.SetTranslation(gp_Vec(dx,dy,dz));
         const TopoDS_Shape result = BRepBuilderAPI_Transform(part->shape, trsf, true).Shape();
-        if (!validShape(result, error)) return false;
+        if(part->isSurfaceBody?!validSurfaceBodyShape(result,error):!validShape(result,error))return false;
         Part copied{generatedId(), uniqueName(part->name + " Copy"), result, part->visible, part->color};
+        copied.isSurfaceBody=part->isSurfaceBody;
         inheritMaterial(copied, *part);
+        // A new occurrence shares the source component's BOM identity.
+        if (!part->componentDefinitionId.isEmpty()) {
+            copied.partNumber=part->partNumber; copied.description=part->description;
+            copied.revision=part->revision; copied.assemblyPath=part->assemblyPath;
+            copied.procurementType=part->procurementType; copied.supplier=part->supplier;
+            copied.supplierPartNumber=part->supplierPartNumber;
+        }
         copied.componentDefinitionId = part->componentDefinitionId;
         copied.componentName = part->componentName;
         if (!copied.componentDefinitionId.isEmpty()) {
             copied.occurrenceId = QUuid::createUuid().toString(QUuid::WithoutBraces);
             copied.placementX = part->placementX + dx; copied.placementY = part->placementY + dy; copied.placementZ = part->placementZ + dz;
+            copied.placementYawDegrees = part->placementYawDegrees;
+            copied.placementPitchDegrees = part->placementPitchDegrees;
+            copied.placementRollDegrees = part->placementRollDegrees;
         }
         checkpoint();
         parts_.append(copied);
@@ -1008,15 +1758,25 @@ bool SceneDocument::insertComponentOccurrence(const QString& sourceBodyId,double
     const Part* source = find(sourceBodyId);
     if (!source) { setError(error,"Source body not found."); return false; }
     if (source->componentDefinitionId.isEmpty()) { setError(error,"Make the source body a component before inserting occurrences."); return false; }
+    if (hasDrivenRevoluteAncestor(*source,parts_)) {
+        setError(error,"Reset revolute joints to zero before inserting from a component occurrence."); return false;
+    }
     if (!finiteOffset(x) || !finiteOffset(y) || !finiteOffset(z)) { setError(error,"Occurrence placement is out of range."); return false; }
     if (parts_.size() >= kMaxObjects) { setError(error,"Scene object limit reached."); return false; }
     try {
-        gp_Trsf transform;
-        transform.SetTranslation(gp_Vec(x-source->placementX,y-source->placementY,z-source->placementZ));
-        const TopoDS_Shape placed = BRepBuilderAPI_Transform(source->shape,transform,true).Shape();
+        // Remove the source's stored rigid placement before placing a fresh,
+        // unrotated occurrence at the requested world XYZ position.
+        const TopoDS_Shape local=BRepBuilderAPI_Transform(source->shape,freeOccurrencePlacement(*source).Inverted(),true).Shape();
+        gp_Trsf destination;destination.SetTranslation(gp_Vec(x,y,z));
+        const TopoDS_Shape placed=BRepBuilderAPI_Transform(local,destination,true).Shape();
         if (!validShape(placed,error)) return false;
         Part occurrence{generatedId(),uniqueName(source->componentName),placed,source->visible,source->color};
         inheritMaterial(occurrence,*source);
+        // Copy BOM identity with the definition so a new instance groups correctly.
+        occurrence.partNumber=source->partNumber; occurrence.description=source->description;
+        occurrence.revision=source->revision; occurrence.assemblyPath=source->assemblyPath;
+        occurrence.procurementType=source->procurementType; occurrence.supplier=source->supplier;
+        occurrence.supplierPartNumber=source->supplierPartNumber;
         occurrence.componentDefinitionId=source->componentDefinitionId;
         occurrence.componentName=source->componentName;
         occurrence.occurrenceId=QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -1025,6 +1785,46 @@ bool SceneDocument::insertComponentOccurrence(const QString& sourceBodyId,double
         return true;
     } catch (const Standard_Failure& e) { setError(error,QStringLiteral("CAD kernel error: %1").arg(e.what())); }
       catch (const std::exception& e) { setError(error,QString::fromUtf8(e.what())); }
+    return false;
+}
+
+bool SceneDocument::setFreeOccurrenceYaw(const QString& bodyId,double degrees,QString* error) {
+    const Part* current=find(bodyId);
+    return setFreeOccurrenceOrientation(bodyId,current?current->placementRollDegrees:0.0,
+                                        current?current->placementPitchDegrees:0.0,degrees,error);
+}
+
+bool SceneDocument::setFreeOccurrenceOrientation(const QString& bodyId,double rollDegrees,double pitchDegrees,
+                                                  double yawDegrees,QString* error) {
+    if(!std::isfinite(rollDegrees)||!std::isfinite(pitchDegrees)||!std::isfinite(yawDegrees)||
+       std::abs(rollDegrees)>36000.0||std::abs(pitchDegrees)>36000.0||std::abs(yawDegrees)>36000.0){
+        setError(error,"Occurrence roll, pitch, and yaw must be finite and within +/-36,000 degrees.");return false;
+    }
+    Part* source=nullptr;
+    for(Part& part:parts_)if(part.id==bodyId){source=&part;break;}
+    if(!source||source->componentDefinitionId.isEmpty()){
+        setError(error,"Select a component occurrence before setting its orientation.");return false;
+    }
+    // Do not confuse independent placement orientation with saved joint poses.
+    if(!source->assemblyJointType.isEmpty()||
+       std::any_of(parts_.cbegin(),parts_.cend(),[&](const Part& part){return part.assemblyJointParentBodyId==bodyId;})){
+        setError(error,"Free occurrence orientation requires an occurrence without joints or joint descendants.");return false;
+    }
+    if(rollDegrees==source->placementRollDegrees&&pitchDegrees==source->placementPitchDegrees&&
+       yawDegrees==source->placementYawDegrees)return true;
+    try{
+        const gp_Trsf oldPose=freeOccurrencePlacement(*source);
+        Part proposed=*source;proposed.placementRollDegrees=rollDegrees;
+        proposed.placementPitchDegrees=pitchDegrees;proposed.placementYawDegrees=yawDegrees;
+        const TopoDS_Shape local=BRepBuilderAPI_Transform(source->shape,oldPose.Inverted(),true).Shape();
+        const TopoDS_Shape changed=BRepBuilderAPI_Transform(local,freeOccurrencePlacement(proposed),true).Shape();
+        if(!validShape(changed,error))return false;
+        checkpoint();source->shape=changed;source->placementYawDegrees=yawDegrees;
+        source->placementPitchDegrees=pitchDegrees;source->placementRollDegrees=rollDegrees;
+        source->geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);
+        return true;
+    }catch(const Standard_Failure& e){setError(error,QStringLiteral("Occurrence orientation failed: %1").arg(e.what()));}
+    catch(const std::exception& e){setError(error,QString::fromUtf8(e.what()));}
     return false;
 }
 
@@ -1037,23 +1837,131 @@ bool SceneDocument::synchronizeComponentOccurrences(const QString& sourceBodyId,
     for(int i=0;i<parts_.size();++i)
         if(parts_[i].componentDefinitionId==source->componentDefinitionId&&parts_[i].id!=sourceBodyId)targets.append(i);
     if(targets.isEmpty())return true;
+    // Translation-only synchronization cannot preserve a driven revolute pose.
+    if(hasDrivenRevoluteAncestor(*source,parts_)){
+        setError(error,"Reset revolute joints to zero before synchronizing component occurrences.");return false;
+    }
+    for(int index:targets)if(hasDrivenRevoluteAncestor(parts_[index],parts_)){
+        setError(error,"Reset revolute joints to zero before synchronizing component occurrences.");return false;
+    }
     try{
-        gp_Trsf unplace;unplace.SetTranslation(gp_Vec(-source->placementX,-source->placementY,-source->placementZ));
-        const TopoDS_Shape local=BRepBuilderAPI_Transform(source->shape,unplace,true).Shape();
+        const TopoDS_Shape local=BRepBuilderAPI_Transform(source->shape,freeOccurrencePlacement(*source).Inverted(),true).Shape();
         if(!validShape(local,error))return false;
         struct Update{int index;TopoDS_Shape shape;};QVector<Update> updates;updates.reserve(targets.size());
         for(int index:targets){
-            const Part& occurrence=parts_[index];gp_Trsf place;
-            place.SetTranslation(gp_Vec(occurrence.placementX,occurrence.placementY,occurrence.placementZ));
+            const Part& occurrence=parts_[index];
+            const gp_Trsf place=freeOccurrencePlacement(occurrence);
             const TopoDS_Shape updated=BRepBuilderAPI_Transform(local,place,true).Shape();
             if(!validShape(updated,error))return false;
             updates.append({index,updated});
         }
         checkpoint();
-        for(const Update& update:updates){Part& occurrence=parts_[update.index];occurrence.shape=update.shape;
-            occurrence.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);}
+        for(const Update& update:updates){
+            Part& occurrence=parts_[update.index];occurrence.shape=update.shape;
+            occurrence.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);
+            // Reusable instances share the definition's BOM and material data
+            // as well as its geometry. Placement and visibility remain local
+            // to each occurrence.
+            inheritMaterial(occurrence,*source);
+            occurrence.componentName=source->componentName;
+            occurrence.color=source->color;
+        }
         return true;
     }catch(const Standard_Failure& e){setError(error,QStringLiteral("Component-definition update failed: %1").arg(e.what()));}
+    catch(const std::exception& e){setError(error,QString::fromUtf8(e.what()));}
+    return false;
+}
+
+bool SceneDocument::linearPatternComponentOccurrences(const QString& sourceBodyId,int instanceCount,
+        double spacingX,double spacingY,double spacingZ,QString* error) {
+    const Part* source=find(sourceBodyId);
+    if(!source||source->componentDefinitionId.isEmpty()||source->isSurfaceBody){
+        setError(error,"Linear component patterns require one solid component occurrence.");return false;
+    }
+    if(instanceCount<2||instanceCount>100||!finiteOffset(spacingX)||!finiteOffset(spacingY)||!finiteOffset(spacingZ)||
+       (spacingX==0.0&&spacingY==0.0&&spacingZ==0.0)){
+        setError(error,"Choose 2 to 100 total occurrences and a nonzero finite XYZ spacing vector.");return false;
+    }
+    if(!source->assemblyJointType.isEmpty()||hasDrivenRevoluteAncestor(*source,parts_)||
+       std::any_of(parts_.cbegin(),parts_.cend(),[&](const Part& part){return part.assemblyJointParentBodyId==sourceBodyId;})){
+        setError(error,"Pattern a free component occurrence without joint links or joint descendants.");return false;
+    }
+    if(parts_.size()+instanceCount-1>kMaxObjects){setError(error,"The component pattern exceeds the scene object limit.");return false;}
+    const double lastX=source->placementX+spacingX*(instanceCount-1);
+    const double lastY=source->placementY+spacingY*(instanceCount-1);
+    const double lastZ=source->placementZ+spacingZ*(instanceCount-1);
+    if(!finiteOffset(lastX)||!finiteOffset(lastY)||!finiteOffset(lastZ)){
+        setError(error,"The last patterned occurrence would exceed the supported coordinate range.");return false;
+    }
+    try{
+        QVector<Part> occurrences;occurrences.reserve(instanceCount-1);
+        for(int index=1;index<instanceCount;++index){
+            const double dx=spacingX*index,dy=spacingY*index,dz=spacingZ*index;
+            gp_Trsf placement;placement.SetTranslation(gp_Vec(dx,dy,dz));
+            const TopoDS_Shape shape=BRepBuilderAPI_Transform(source->shape,placement,true).Shape();
+            if(!validShape(shape,error))return false;
+            Part occurrence{generatedId(),uniqueName(QStringLiteral("%1 Pattern %2").arg(source->name).arg(index+1)),
+                            shape,source->visible,source->color};
+            inheritMaterial(occurrence,*source);
+            occurrence.componentDefinitionId=source->componentDefinitionId;
+            occurrence.componentName=source->componentName;
+            occurrence.occurrenceId=QUuid::createUuid().toString(QUuid::WithoutBraces);
+            occurrence.placementX=source->placementX+dx;occurrence.placementY=source->placementY+dy;
+            occurrence.placementZ=source->placementZ+dz;occurrence.placementYawDegrees=source->placementYawDegrees;
+            occurrence.placementPitchDegrees=source->placementPitchDegrees;
+            occurrence.placementRollDegrees=source->placementRollDegrees;
+            occurrences.append(std::move(occurrence));
+        }
+        checkpoint();for(Part& occurrence:occurrences)parts_.append(std::move(occurrence));return true;
+    }catch(const Standard_Failure& e){setError(error,QStringLiteral("Linear component pattern failed: %1").arg(e.what()));}
+    catch(const std::exception& e){setError(error,QString::fromUtf8(e.what()));}
+    return false;
+}
+
+bool SceneDocument::circularPatternComponentOccurrences(const QString& sourceBodyId,int instanceCount,
+        double centerX,double centerY,double centerZ,double angleStepDegrees,QString* error) {
+    const Part* source=find(sourceBodyId);
+    if(!source||source->componentDefinitionId.isEmpty()||source->isSurfaceBody){
+        setError(error,"Circular component patterns require one solid component occurrence.");return false;
+    }
+    if(instanceCount<2||instanceCount>100||!finiteOffset(centerX)||!finiteOffset(centerY)||!finiteOffset(centerZ)||
+       !std::isfinite(angleStepDegrees)||angleStepDegrees==0.0||std::abs(angleStepDegrees)>360.0||
+       !std::isfinite(source->placementYawDegrees+angleStepDegrees*(instanceCount-1))||
+       std::abs(source->placementYawDegrees+angleStepDegrees*(instanceCount-1))>36000.0){
+        setError(error,"Choose 2 to 100 total occurrences, a valid axis center, and a nonzero Z-axis angle step within ±360 degrees.");return false;
+    }
+    if(!source->assemblyJointType.isEmpty()||hasDrivenRevoluteAncestor(*source,parts_)||
+       std::any_of(parts_.cbegin(),parts_.cend(),[&](const Part& part){return part.assemblyJointParentBodyId==sourceBodyId;})){
+        setError(error,"Pattern a free component occurrence without joint links or joint descendants.");return false;
+    }
+    if(parts_.size()+instanceCount-1>kMaxObjects){setError(error,"The component pattern exceeds the scene object limit.");return false;}
+    try{
+        QVector<Part> occurrences;occurrences.reserve(instanceCount-1);
+        const gp_Pnt center(centerX,centerY,centerZ);const gp_Ax1 axis(center,gp_Dir(0,0,1));
+        for(int index=1;index<instanceCount;++index){
+            const double angle=angleStepDegrees*index;
+            gp_Trsf rotation;rotation.SetRotation(axis,angle*std::numbers::pi/180.0);
+            const TopoDS_Shape shape=BRepBuilderAPI_Transform(source->shape,rotation,true).Shape();
+            if(!validShape(shape,error))return false;
+            gp_Pnt position(source->placementX,source->placementY,source->placementZ);position.Transform(rotation);
+            const double yaw=source->placementYawDegrees+angle;
+            if(!finiteOffset(position.X())||!finiteOffset(position.Y())||!finiteOffset(position.Z())||std::abs(yaw)>36000.0){
+                setError(error,"A circularly patterned occurrence would exceed the supported placement range.");return false;
+            }
+            Part occurrence{generatedId(),uniqueName(QStringLiteral("%1 Circular Pattern %2").arg(source->name).arg(index+1)),
+                            shape,source->visible,source->color};
+            inheritMaterial(occurrence,*source);
+            occurrence.componentDefinitionId=source->componentDefinitionId;
+            occurrence.componentName=source->componentName;
+            occurrence.occurrenceId=QUuid::createUuid().toString(QUuid::WithoutBraces);
+            occurrence.placementX=position.X();occurrence.placementY=position.Y();occurrence.placementZ=position.Z();
+            occurrence.placementYawDegrees=yaw;
+            occurrence.placementPitchDegrees=source->placementPitchDegrees;
+            occurrence.placementRollDegrees=source->placementRollDegrees;
+            occurrences.append(std::move(occurrence));
+        }
+        checkpoint();for(Part& occurrence:occurrences)parts_.append(std::move(occurrence));return true;
+    }catch(const Standard_Failure& e){setError(error,QStringLiteral("Circular component pattern failed: %1").arg(e.what()));}
     catch(const std::exception& e){setError(error,QString::fromUtf8(e.what()));}
     return false;
 }
@@ -1085,8 +1993,11 @@ bool SceneDocument::addRevoluteJoint(const QString& parentBodyId,const QString& 
     }
     if(!child->assemblyJointType.isEmpty()){setError(error,"The child occurrence already belongs to a joint.");return false;}
     if(!finiteOffset(originX)||!finiteOffset(originY)||!finiteOffset(originZ)||!std::isfinite(axisLength)||axisLength<1e-9||
-       !std::isfinite(minimumDegrees)||!std::isfinite(maximumDegrees)||minimumDegrees<-3600||maximumDegrees>3600||minimumDegrees>=maximumDegrees){
-        setError(error,"Revolute joint axis, origin, or angle limits are invalid.");return false;
+       !std::isfinite(minimumDegrees)||!std::isfinite(maximumDegrees)||minimumDegrees<-3600||maximumDegrees>3600||
+       minimumDegrees>=maximumDegrees||minimumDegrees>0.0||maximumDegrees<0.0){
+        // A new joint starts at zero degrees. Excluding zero creates an in-memory
+        // joint that the scene loader would reject after save/reopen.
+        setError(error,"Revolute joint axis, origin, or angle limits are invalid; limits must include zero degrees.");return false;
     }
     for(const Part* cursor=parent;cursor;){
         if(cursor->id==childBodyId){setError(error,"Assembly joints cannot create a cycle.");return false;}
@@ -1134,7 +2045,11 @@ bool SceneDocument::driveRevoluteJoint(const QString& childBodyId,double angleDe
             gp_Pnt jointOrigin(target.jointOriginX,target.jointOriginY,target.jointOriginZ);
             gp_Dir jointAxis(target.jointAxisX,target.jointAxisY,target.jointAxisZ);
             if(id!=childBodyId&&!target.assemblyJointType.isEmpty()){
-                jointOrigin.Transform(rotation);gp_Vec axis(target.jointAxisX,target.jointAxisY,target.jointAxisZ);
+                jointOrigin.Transform(rotation);
+                if(!finiteOffset(jointOrigin.X())||!finiteOffset(jointOrigin.Y())||!finiteOffset(jointOrigin.Z())){
+                    setError(error,"Nested joint origin would exceed the supported coordinate range.");return false;
+                }
+                gp_Vec axis(target.jointAxisX,target.jointAxisY,target.jointAxisZ);
                 axis.Transform(rotation);jointAxis=gp_Dir(axis);
             }
             updates.append({index,moved,placement,jointOrigin,jointAxis});
@@ -1166,6 +2081,9 @@ bool SceneDocument::addPrismaticJoint(const QString& parentBodyId,const QString&
         setError(error,"Prismatic joints require two different component occurrences in the current scene.");return false;
     }
     if(!child->assemblyJointType.isEmpty()){setError(error,"The child occurrence already belongs to a joint.");return false;}
+    if(!finiteOffset(parent->placementX)||!finiteOffset(parent->placementY)||!finiteOffset(parent->placementZ)){
+        setError(error,"Prismatic joint origin would exceed the supported coordinate range.");return false;
+    }
     if(!std::isfinite(axisLength)||axisLength<1e-9||!std::isfinite(minimumMm)||!std::isfinite(maximumMm)||
        minimumMm<-1e6||maximumMm>1e6||minimumMm>=0.0||maximumMm<=0.0||minimumMm>=maximumMm){
         setError(error,"Prismatic joint axis or travel limits are invalid; limits must include the current zero position.");return false;
@@ -1213,6 +2131,10 @@ bool SceneDocument::drivePrismaticJoint(const QString& childBodyId,double offset
                 if(!finiteOffset(placement.X())||!finiteOffset(placement.Y())||!finiteOffset(placement.Z())){
                     setError(error,"Assembly occurrence placement would exceed the supported coordinate range.");return false;
                 }
+            }
+            if(id!=childBodyId&&!target.assemblyJointType.isEmpty()&&
+               (!finiteOffset(target.jointOriginX+dx)||!finiteOffset(target.jointOriginY+dy)||!finiteOffset(target.jointOriginZ+dz))){
+                setError(error,"Nested joint origin would exceed the supported coordinate range.");return false;
             }
             updates.append({index,moved,placement});
         }
@@ -1316,17 +2238,106 @@ bool SceneDocument::evaluateAssemblyMotionStudy(double timeSeconds,QString* erro
     return solveAssemblyPose(targets,error);
 }
 
+bool SceneDocument::scanAssemblyMotionInterference(const QString& firstId,const QString& secondId,
+                                                    double startSeconds,double endSeconds,int sampleCount,
+                                                    QVector<MotionInterferenceSample>* samples,QString* error) const {
+    if(!samples){setError(error,"Provide an output list for motion interference samples.");return false;}
+    if(firstId==secondId||!find(firstId)||!find(secondId)){
+        setError(error,"Select two distinct existing bodies for the motion scan.");return false;
+    }
+    if(!std::isfinite(startSeconds)||!std::isfinite(endSeconds)||startSeconds<0||endSeconds>3600||
+       endSeconds<=startSeconds||sampleCount<2||sampleCount>51){
+        setError(error,"Motion scan needs increasing times within 0-3,600 seconds and 2-51 samples.");return false;
+    }
+    QVector<MotionInterferenceSample> candidate;candidate.reserve(sampleCount);
+    for(int index=0;index<sampleCount;++index){
+        const double time=startSeconds+(endSeconds-startSeconds)*index/(sampleCount-1);
+        SceneDocument frame;frame.parts_=parts_;
+        QString frameError;
+        if(!frame.evaluateAssemblyMotionStudy(time,&frameError)){
+            setError(error,QStringLiteral("Motion scan failed at %1 s: %2").arg(time,0,'f',3).arg(frameError));return false;
+        }
+        InterferenceResult interference;
+        if(!frame.measureInterference(firstId,secondId,&interference,&frameError)){
+            setError(error,QStringLiteral("Interference scan failed at %1 s: %2").arg(time,0,'f',3).arg(frameError));return false;
+        }
+        candidate.append({time,interference.volume,interference.volume>1e-7});
+    }
+    *samples=std::move(candidate);return true;
+}
+
 bool SceneDocument::setDrawingSheetSettings(const QString& partId,const DrawingSheetSettings& settings,QString* error) {
+    DrawingSheetSettings persisted;
+    if(!prepareDrawingSheetSettings(partId,settings,&persisted,error))return false;
     Part* part=nullptr;for(Part& candidate:parts_)if(candidate.id==partId){part=&candidate;break;}
+    // An unchanged sheet does not consume undo history or clear redo.
+    if(part->hasDrawingSettings&&part->drawingSettings==persisted)return true;
+    checkpoint();part->drawingSettings=std::move(persisted);part->hasDrawingSettings=true;return true;
+}
+
+// Validate and assign stable drawing identities without modifying the scene.
+// Exporters use this preflight so failed SVG/PDF output never consumes undo history.
+bool SceneDocument::prepareDrawingSheetSettings(const QString& partId,const DrawingSheetSettings& settings,
+                                                DrawingSheetSettings* prepared,QString* error) const {
+    if(!prepared){setError(error,"Provide an output record for prepared drawing settings.");return false;}
+    const Part* part=find(partId);
     if(!part){setError(error,"Object not found.");return false;}
     DrawingSheetSettings persisted=settings;
-    if(persisted.sourceBodyIds.isEmpty())persisted.sourceBodyIds.append(partId);
+    if(persisted.sourceBodyIds.isEmpty()){
+        // An annotation update that omits the source list must not reduce
+        // an existing multi-body drawing to its sheet owner.
+        if(part->hasDrawingSettings&&!part->drawingSettings.sourceBodyIds.isEmpty())
+            persisted.sourceBodyIds=part->drawingSettings.sourceBodyIds;
+        else
+            persisted.sourceBodyIds.append(partId);
+    }
     for(const QString& sourceId:persisted.sourceBodyIds)if(!find(sourceId)){
         setError(error,"A drawing source body no longer exists in this scene.");return false;
     }
+    const bool sourceSetChanged=part->hasDrawingSettings&&
+        persisted.sourceBodyIds!=part->drawingSettings.sourceBodyIds;
+    // Omitted stable IDs in a partial sheet update must not silently create
+    // a different sheet, set of projected views, or linked parts-list record.
+    // An explicit nonempty ID is still honored (e.g. a new export revision).
+    if(part->hasDrawingSettings){
+        const DrawingSheetSettings& previous=part->drawingSettings;
+        if(persisted.sheetId.isEmpty())persisted.sheetId=previous.sheetId;
+        if(persisted.partsListAnnotation.id.isEmpty())persisted.partsListAnnotation.id=previous.partsListAnnotation.id;
+        for(auto it=previous.viewIds.cbegin();it!=previous.viewIds.cend();++it)
+            if(persisted.viewIds.value(it.key()).isEmpty())persisted.viewIds.insert(it.key(),it.value());
+        if(persisted.dimensionAnnotations.isEmpty())persisted.dimensionAnnotations=previous.dimensionAnnotations;
+        if(persisted.noteAnnotations.isEmpty()&&!persisted.generalNotes.isEmpty()){
+            for(int i=0;i<persisted.generalNotes.size()&&i<previous.noteAnnotations.size();++i){
+                DrawingNoteAnnotation note=previous.noteAnnotations[i];
+                note.text=persisted.generalNotes[i];
+                persisted.noteAnnotations.append(note);
+            }
+        }
+    }
     if(persisted.sheetId.isEmpty())persisted.sheetId=QUuid::createUuid().toString(QUuid::WithoutBraces);
     if(persisted.partsListAnnotation.id.isEmpty())persisted.partsListAnnotation.id=QUuid::createUuid().toString(QUuid::WithoutBraces);
-    if(persisted.sourceGeometryToken.isEmpty())persisted.sourceGeometryToken=part->geometryToken;
+    if(persisted.sourceGeometryToken.isEmpty()){
+        // Leaving an existing sheet's token blank must not silently acknowledge
+        // geometry changes. Only refreshDrawingSheetSource() explicitly re-links it.
+        if(part->hasDrawingSettings){
+            persisted.sourceGeometryToken=part->drawingSettings.sourceGeometryToken;
+        }else if(persisted.sourceBodyIds.size()==1){
+            persisted.sourceGeometryToken=find(persisted.sourceBodyIds.first())->geometryToken;
+        }else{
+            QVector<const Part*> sources;
+            sources.reserve(persisted.sourceBodyIds.size());
+            for(const QString& id:persisted.sourceBodyIds)sources.append(find(id));
+            persisted.sourceGeometryToken=drawingSourceFingerprint(sources);
+        }
+    }
+    if(persisted.sourceDataToken.isEmpty()||sourceSetChanged){
+        if(part->hasDrawingSettings&&!sourceSetChanged)persisted.sourceDataToken=part->drawingSettings.sourceDataToken;
+        else{
+            QVector<const Part*> sources;sources.reserve(persisted.sourceBodyIds.size());
+            for(const QString& id:persisted.sourceBodyIds)sources.append(find(id));
+            persisted.sourceDataToken=drawingSourceDataFingerprint(sources);
+        }
+    }
     for(const QString& view:{QStringLiteral("TOP"),QStringLiteral("FRONT"),QStringLiteral("RIGHT"),QStringLiteral("AUXILIARY")})
         if(persisted.viewIds.value(view).isEmpty())persisted.viewIds.insert(view,QUuid::createUuid().toString(QUuid::WithoutBraces));
     const double paperScale=persisted.sheetSize=="A3"?420.0/297.0:1.0;
@@ -1353,6 +2364,8 @@ bool SceneDocument::setDrawingSheetSettings(const QString& partId,const DrawingS
             persisted.dimensionAnnotations.append({QUuid::createUuid().toString(QUuid::WithoutBraces),axis,9.0});
     }else for(DrawingDimensionAnnotation& dimension:persisted.dimensionAnnotations)
         if(dimension.id.isEmpty())dimension.id=QUuid::createUuid().toString(QUuid::WithoutBraces);
+    for(DrawingEdgeDimensionAnnotation& dimension:persisted.edgeDimensionAnnotations)
+        if(dimension.id.isEmpty())dimension.id=QUuid::createUuid().toString(QUuid::WithoutBraces);
     for(DrawingBalloonAnnotation& balloon:persisted.balloonAnnotations)
         if(balloon.id.isEmpty())balloon.id=QUuid::createUuid().toString(QUuid::WithoutBraces);
     for(DrawingDetailAnnotation& detail:persisted.detailAnnotations)
@@ -1360,7 +2373,15 @@ bool SceneDocument::setDrawingSheetSettings(const QString& partId,const DrawingS
     for(DrawingSectionAnnotation& section:persisted.sectionAnnotations)
         if(section.id.isEmpty())section.id=QUuid::createUuid().toString(QUuid::WithoutBraces);
     if(!validDrawingSettings(persisted,error))return false;
-    checkpoint();part->drawingSettings=persisted;part->hasDrawingSettings=true;return true;
+    // A persistent sheet is a document-level identity, not merely a per-body
+    // label. Duplicate IDs make saved view/annotation links ambiguous.
+    for(const Part& other:parts_){
+        if(other.id!=partId&&other.hasDrawingSettings&&other.drawingSettings.sheetId==persisted.sheetId){
+            setError(error,"Another saved drawing sheet already uses this sheet identity.");return false;
+        }
+    }
+    *prepared=std::move(persisted);
+    return true;
 }
 
 DrawingSheetSourceStatus SceneDocument::drawingSheetSourceStatus(const QString& partId) const {
@@ -1369,6 +2390,7 @@ DrawingSheetSourceStatus SceneDocument::drawingSheetSourceStatus(const QString& 
     report.sourceBodyIds=master->drawingSettings.sourceBodyIds;
     if(report.sourceBodyIds.isEmpty())report.sourceBodyIds.append(master->id);
     report.storedGeometryToken=master->drawingSettings.sourceGeometryToken;
+    report.storedDataToken=master->drawingSettings.sourceDataToken;
     if(report.sourceBodyIds.size()>50){report.state=DrawingSourceState::Stale;return report;}
     QVector<const Part*> sources;sources.reserve(report.sourceBodyIds.size());
     for(const QString& sourceId:report.sourceBodyIds){
@@ -1380,14 +2402,24 @@ DrawingSheetSourceStatus SceneDocument::drawingSheetSourceStatus(const QString& 
         report.missingSourceBodyIds.removeDuplicates();report.missingSourceBodyIds.sort();
         report.state=DrawingSourceState::MissingBodies;return report;
     }
-    std::sort(sources.begin(),sources.end(),[](const Part* a,const Part* b){return a->id<b->id;});
-    QByteArray identity;
-    for(const Part* source:sources){identity.append(source->id.toUtf8());identity.append('|');identity.append(source->geometryToken.toUtf8());identity.append('\n');}
-    report.currentGeometryToken=QString::fromLatin1(QCryptographicHash::hash(identity,QCryptographicHash::Sha256).toHex());
+    report.currentGeometryToken=drawingSourceFingerprint(sources);
+    report.currentDataToken=drawingSourceDataFingerprint(sources);
     const bool matchesAggregate=report.storedGeometryToken==report.currentGeometryToken;
     const bool matchesSingleBody=sources.size()==1&&report.storedGeometryToken==sources.first()->geometryToken;
-    report.state=(matchesAggregate||matchesSingleBody)?DrawingSourceState::Current:DrawingSourceState::Stale;
+    const bool metadataMatches=report.storedDataToken==report.currentDataToken;
+    report.state=((matchesAggregate||matchesSingleBody)&&metadataMatches)?DrawingSourceState::Current:DrawingSourceState::Stale;
     return report;
+}
+
+QString SceneDocument::drawingSourceDataToken(const QStringList& sourceBodyIds,QString* error) const {
+    if(sourceBodyIds.isEmpty()||sourceBodyIds.size()>50){setError(error,"A drawing source-data token requires one to 50 source bodies.");return {};}
+    QVector<const Part*> sources;sources.reserve(sourceBodyIds.size());QSet<QString> unique;
+    for(const QString& id:sourceBodyIds){
+        const Part* source=find(id);
+        if(id.isEmpty()||unique.contains(id)||!source){setError(error,"Drawing source-data IDs must be unique and refer to existing bodies.");return {};}
+        unique.insert(id);sources.append(source);
+    }
+    return drawingSourceDataFingerprint(sources);
 }
 
 bool SceneDocument::refreshDrawingSheetSource(const QString& partId,QString* error) {
@@ -1402,11 +2434,10 @@ bool SceneDocument::refreshDrawingSheetSource(const QString& partId,QString* err
         if(!source){setError(error,QStringLiteral("Drawing source body '%1' is missing; restore it before refreshing the sheet link.").arg(id));return false;}
         sources.append(source);
     }
-    std::sort(sources.begin(),sources.end(),[](const Part* a,const Part* b){return a->id<b->id;});
-    QByteArray identity;for(const Part* source:sources){identity.append(source->id.toUtf8());identity.append('|');identity.append(source->geometryToken.toUtf8());identity.append('\n');}
-    const QString current=QString::fromLatin1(QCryptographicHash::hash(identity,QCryptographicHash::Sha256).toHex());
-    if(master->drawingSettings.sourceGeometryToken==current)return true;
-    checkpoint();master->drawingSettings.sourceGeometryToken=current;return true;
+    const QString current=drawingSourceFingerprint(sources);
+    const QString currentData=drawingSourceDataFingerprint(sources);
+    if(master->drawingSettings.sourceGeometryToken==current&&master->drawingSettings.sourceDataToken==currentData)return true;
+    checkpoint();master->drawingSettings.sourceGeometryToken=current;master->drawingSettings.sourceDataToken=currentData;return true;
 }
 
 bool SceneDocument::addParametricRectangularExtrusion(double width,double height,double depth,QString* error) {
@@ -1430,6 +2461,119 @@ bool SceneDocument::addParametricRectangularExtrusion(double width,double height
     }catch(const Standard_Failure& e){setError(error,QStringLiteral("Parametric sketch kernel error: %1").arg(e.what()));}
     catch(const std::exception& e){setError(error,QString::fromUtf8(e.what()));}
     return false;
+}
+
+bool SceneDocument::addConstrainedPolygonExtrusion(const SketchModel& sketch,const QStringList& boundaryPointIds,
+                                                    double depth,QString* error) {
+    if(!finitePositive(depth)||boundaryPointIds.size()<3||boundaryPointIds.size()>64||
+       sketch.points.size()>64||sketch.segments.size()>128||sketch.circles.size()>64||sketch.constraints.size()>128){
+        setError(error,"A constrained polygon needs 3–64 boundary points, finite positive depth, and at most 128 segments or constraints.");return false;
+    }
+    if(parts_.size()>=kMaxObjects){setError(error,"Scene object limit reached.");return false;}
+    const SketchSolveResult solved=SketchSolver::solve(sketch);
+    if(!solved.success){setError(error,solved.message);return false;}
+    QMap<QString,QPointF> positions;
+    for(int i=0;i<sketch.points.size();++i)positions.insert(sketch.points[i].id,solved.solvedPoints[i]);
+    QSet<QString> unique;
+    QVector<QPointF> boundary;boundary.reserve(boundaryPointIds.size());
+    for(const QString& id:boundaryPointIds){
+        if(unique.contains(id)||!positions.contains(id)){setError(error,"Polygon boundary point IDs must be unique and present in the sketch.");return false;}
+        unique.insert(id);const QPointF point=positions.value(id);
+        if(!std::isfinite(point.x())||!std::isfinite(point.y())||std::abs(point.x())>1e6||std::abs(point.y())>1e6){
+            setError(error,"Solved sketch point exceeds the supported coordinate range.");return false;
+        }
+        boundary.append(point);
+    }
+    const int count=boundary.size();
+    double twiceArea=0.0;
+    for(int i=0;i<count;++i){
+        const QPointF a=boundary[i],b=boundary[(i+1)%count];
+        if(std::hypot(a.x()-b.x(),a.y()-b.y())<1e-5){setError(error,"Polygon has a zero-length boundary edge.");return false;}
+        twiceArea+=a.x()*b.y()-a.y()*b.x();
+    }
+    if(std::abs(twiceArea)<1e-8){setError(error,"Polygon boundary has zero area.");return false;}
+    auto cross=[](const QPointF& a,const QPointF& b,const QPointF& c){
+        return (b.x()-a.x())*(c.y()-a.y())-(b.y()-a.y())*(c.x()-a.x());
+    };
+    for(int i=0;i<count;++i)for(int j=i+1;j<count;++j){
+        if(j==i+1||(i==0&&j==count-1))continue;
+        const QPointF a=boundary[i],b=boundary[(i+1)%count],c=boundary[j],d=boundary[(j+1)%count];
+        const double abC=cross(a,b,c),abD=cross(a,b,d),cdA=cross(c,d,a),cdB=cross(c,d,b);
+        if((abC*abD<=0.0)&&(cdA*cdB<=0.0)){
+            setError(error,"Polygon boundary crosses or touches itself.");return false;
+        }
+    }
+    struct Cutout { QPointF center; double radius; };
+    QVector<Cutout> cutouts;
+    for(int circleIndex=0;circleIndex<sketch.circles.size();++circleIndex){
+        const SketchCircle& circle=sketch.circles[circleIndex];
+        if(!circle.cutout)continue;
+        const QPointF center=positions.value(circle.centerPointId);
+        const double radius=solved.solvedCircleRadii[circleIndex];
+        if(!std::isfinite(center.x())||!std::isfinite(center.y())||
+           std::abs(center.x())>1e6||std::abs(center.y())>1e6||!std::isfinite(radius)||radius<1e-5||radius>1e6){
+            setError(error,"A circular sketch cutout exceeds the supported coordinate or radius range.");return false;
+        }
+        bool inside=false;
+        double nearestEdge=std::numeric_limits<double>::infinity();
+        for(int i=0,j=count-1;i<count;j=i++){
+            const QPointF a=boundary[i],b=boundary[j];
+            if((a.y()>center.y())!=(b.y()>center.y())&&
+               center.x()<(b.x()-a.x())*(center.y()-a.y())/(b.y()-a.y())+a.x())inside=!inside;
+            const double dx=b.x()-a.x(),dy=b.y()-a.y();
+            const double t=std::clamp(((center.x()-a.x())*dx+(center.y()-a.y())*dy)/(dx*dx+dy*dy),0.0,1.0);
+            nearestEdge=std::min(nearestEdge,std::hypot(center.x()-a.x()-t*dx,center.y()-a.y()-t*dy));
+        }
+        if(!inside||nearestEdge<=radius+1e-5){setError(error,"Circular sketch cutouts must lie entirely inside the polygon with clearance from its boundary.");return false;}
+        for(const Cutout& other:cutouts)if(std::hypot(center.x()-other.center.x(),center.y()-other.center.y())<=radius+other.radius+1e-5){
+            setError(error,"Circular sketch cutouts must not overlap or touch.");return false;
+        }
+        cutouts.append({center,radius});
+    }
+    try{
+        BRepBuilderAPI_MakePolygon polygon;
+        for(const QPointF& p:boundary)polygon.Add(gp_Pnt(p.x(),p.y(),0));
+        polygon.Close();
+        if(!polygon.IsDone()){setError(error,"Could not close the constrained polygon.");return false;}
+        BRepBuilderAPI_MakeFace face(polygon.Wire());
+        for(const Cutout& cutout:cutouts){
+            const gp_Circ circle(gp_Ax2(gp_Pnt(cutout.center.x(),cutout.center.y(),0),gp_Dir(0,0,1)),cutout.radius);
+            const TopoDS_Edge edge=BRepBuilderAPI_MakeEdge(circle).Edge();
+            TopoDS_Wire wire=BRepBuilderAPI_MakeWire(edge).Wire();
+            if(twiceArea>0)wire.Reverse();
+            face.Add(wire);
+        }
+        if(!face.IsDone()){setError(error,"Could not build a face from the constrained polygon.");return false;}
+        BRepPrimAPI_MakePrism prism(face.Face(),gp_Vec(0,0,depth));
+        if(!prism.IsDone()||!validShape(prism.Shape(),error))return false;
+        Part part{generatedId(),uniqueName(QStringLiteral("Constrained Polygon Extrusion")),prism.Shape()};
+        part.hasConstrainedPolygonDefinition=true;part.constrainedPolygonSketch=sketch;
+        part.constrainedPolygonBoundary=boundaryPointIds;part.constrainedPolygonDepthMm=depth;
+        part.constrainedPolygonGeometryToken=part.geometryToken;
+        checkpoint();parts_.append(std::move(part));
+        return true;
+    }catch(const Standard_Failure& e){setError(error,QStringLiteral("Constrained sketch kernel error: %1").arg(e.what()));}
+    catch(const std::exception& e){setError(error,QString::fromUtf8(e.what()));}
+    return false;
+}
+
+bool SceneDocument::updateConstrainedPolygonExtrusion(const QString& partId,const SketchModel& sketch,
+                                                       const QStringList& boundaryPointIds,double depth,QString* error) {
+    Part* part=nullptr;for(Part& candidate:parts_)if(candidate.id==partId){part=&candidate;break;}
+    if(!part||!part->hasConstrainedPolygonDefinition){setError(error,"Select a constrained polygon extrusion.");return false;}
+    if(part->geometryToken!=part->constrainedPolygonGeometryToken){
+        setError(error,"The constrained sketch history is stale after a direct geometry edit.");return false;
+    }
+    if(depth==part->constrainedPolygonDepthMm&&boundaryPointIds==part->constrainedPolygonBoundary&&
+       sketchModelToJson(sketch)==sketchModelToJson(part->constrainedPolygonSketch))return true;
+    SceneDocument rebuilt;
+    if(!rebuilt.addConstrainedPolygonExtrusion(sketch,boundaryPointIds,depth,error))return false;
+    const TopoDS_Shape shape=rebuilt.parts().first().shape;
+    checkpoint();part->shape=shape;part->geometryToken=generatedId();
+    part->constrainedPolygonGeometryToken=part->geometryToken;
+    part->constrainedPolygonSketch=sketch;part->constrainedPolygonBoundary=boundaryPointIds;
+    part->constrainedPolygonDepthMm=depth;
+    return true;
 }
 
 bool SceneDocument::addParametricRectangularExtrusionAt(double originX,double originY,double width,double height,double depth,QString* error) {
@@ -1501,6 +2645,54 @@ bool SceneDocument::addParametricThroughHole(const QString& partId,double diamet
     return false;
 }
 
+bool SceneDocument::addParametricBlindHole(const QString& partId,double diameter,double centerX,double centerY,
+                                           double holeDepthMm,QString* error) {
+    int index=-1;for(int i=0;i<parts_.size();++i)if(parts_[i].id==partId){index=i;break;}
+    if(index<0){setError(error,"Select an existing parametric base extrusion.");return false;}
+    const Part& current=parts_[index];
+    const bool offsetProfile=current.namedParameters.contains(QStringLiteral("origin_x"));
+    const QStringList expectedBaseHistory=offsetProfile?
+        QStringList({QStringLiteral("Sketch: XY rectangle with editable origin (fully constrained)"),QStringLiteral("Extrude: Base solid (depth parameter)")}):
+        QStringList({QStringLiteral("Sketch: XY rectangle (fully constrained)"),QStringLiteral("Extrude: Base solid (depth parameter)")});
+    if(!current.hasParametricDefinition||!parametricDefinitionCurrent(partId)||current.featureHistory!=expectedBaseHistory){
+        setError(error,"A parametric blind hole can be added once to a current rectangle-and-extrusion history.");return false;
+    }
+    const double baseDepth=current.namedParameters.value(QStringLiteral("depth"));
+    if(!finitePositive(diameter)||!finiteOffset(centerX)||!finiteOffset(centerY)||
+       !finitePositive(holeDepthMm)||holeDepthMm>=baseDepth-std::max(0.01,baseDepth*1e-5)){
+        setError(error,"Hole diameter and depth must be positive; blind-hole depth must remain below the extrusion depth, and the center coordinates must be finite.");return false;
+    }
+    const double width=current.namedParameters.value(QStringLiteral("width"));
+    const double height=current.namedParameters.value(QStringLiteral("height"));
+    const double originX=current.namedParameters.value(QStringLiteral("origin_x"));
+    const double originY=current.namedParameters.value(QStringLiteral("origin_y"));
+    const double radius=diameter/2.0;
+    if(centerX-radius<=originX||centerY-radius<=originY||centerX+radius>=originX+width||centerY+radius>=originY+height){
+        setError(error,"The blind-hole circle must remain fully inside the rectangular sketch profile.");return false;
+    }
+    try{
+        const TopoDS_Shape cutter=BRepPrimAPI_MakeCylinder(
+            gp_Ax2(gp_Pnt(centerX,centerY,baseDepth-holeDepthMm),gp_Dir(0,0,1)),radius,holeDepthMm+0.01).Shape();
+        BRepAlgoAPI_Cut cut(current.shape,cutter);cut.Build();
+        if(!cut.IsDone()||cut.HasErrors()){setError(error,"The parametric blind-hole cut failed.");return false;}
+        const TopoDS_Shape result=cut.Shape();if(!validShape(result,error))return false;
+        checkpoint();Part& updated=parts_[index];updated.shape=result;
+        updated.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);updated.parametricGeometryToken=updated.geometryToken;
+        updated.namedParameters.insert(QStringLiteral("hole_diameter"),diameter);
+        updated.namedParameters.insert(QStringLiteral("hole_x"),centerX);updated.namedParameters.insert(QStringLiteral("hole_y"),centerY);
+        updated.namedParameters.insert(QStringLiteral("hole_depth"),holeDepthMm);
+        updated.sketchConstraints.append(QStringLiteral("Coincident: circle center = named hole X/Y parameters"));
+        updated.sketchConstraints.append(QStringLiteral("Dimension: circle diameter = hole_diameter parameter"));
+        updated.sketchConstraints.append(QStringLiteral("Dimension: blind cut depth = hole_depth parameter"));
+        updated.sketchConstraints.append(QStringLiteral("Containment: circle remains inside the rectangular profile"));
+        updated.featureHistory.append(QStringLiteral("Sketch: XY circle (fully constrained by center and diameter)"));
+        updated.featureHistory.append(QStringLiteral("Cut: Parametric blind hole"));
+        return true;
+    }catch(const Standard_Failure& e){setError(error,QStringLiteral("Parametric blind-hole kernel error: %1").arg(e.what()));}
+    catch(const std::exception& e){setError(error,QString::fromUtf8(e.what()));}
+    return false;
+}
+
 bool SceneDocument::addParametricLinearHolePattern(const QString& partId,int holeCount,double spacingMm,QString* error) {
     return addParametricLinearHolePattern(partId,holeCount,spacingMm,QStringLiteral("X"),error);
 }
@@ -1508,13 +2700,18 @@ bool SceneDocument::addParametricLinearHolePattern(const QString& partId,int hol
 bool SceneDocument::addParametricLinearHolePattern(const QString& partId,int holeCount,double spacingMm,
                                                    const QString& axis,QString* error) {
     int index=-1;for(int i=0;i<parts_.size();++i)if(parts_[i].id==partId){index=i;break;}
-    if(index<0){setError(error,"Select a parametric body with a through-hole.");return false;}
+    if(index<0){setError(error,"Select a parametric body with a through-hole or blind hole.");return false;}
     const Part& current=parts_[index];
+    const bool blind=current.featureHistory.contains(QStringLiteral("Cut: Parametric blind hole"));
     if(!current.hasParametricDefinition||!parametricDefinitionCurrent(partId)||
-       !current.featureHistory.contains(QStringLiteral("Cut: Parametric through-hole"))||
+       (!blind&&!current.featureHistory.contains(QStringLiteral("Cut: Parametric through-hole")))||
        (current.featureHistory.contains(QStringLiteral("Pattern: Linear through-hole array along X"))||
-        current.featureHistory.contains(QStringLiteral("Pattern: Linear through-hole array along Y")))){
-        setError(error,"Add one parametric through-hole to a current rectangular extrusion before creating its linear pattern.");return false;
+        current.featureHistory.contains(QStringLiteral("Pattern: Linear through-hole array along Y"))||
+        current.featureHistory.contains(QStringLiteral("Pattern: Linear blind-hole array along X"))||
+        current.featureHistory.contains(QStringLiteral("Pattern: Linear blind-hole array along Y")))||
+       current.featureHistory.contains(QStringLiteral("Chamfer: All edges"))||
+       current.featureHistory.contains(QStringLiteral("Fillet: All edges"))){
+        setError(error,"Add one parametric through-hole or blind hole to a current rectangular extrusion before creating its linear pattern.");return false;
     }
     if(holeCount<2||holeCount>100||!finitePositive(spacingMm)||(axis!="X"&&axis!="Y")){
         setError(error,"A linear hole pattern needs 2 to 100 instances and positive spacing up to 1,000,000 mm.");return false;
@@ -1534,14 +2731,20 @@ bool SceneDocument::addParametricLinearHolePattern(const QString& partId,int hol
         setError(error,"Pattern instances must be separated by at least the hole diameter and remain fully inside the rectangular profile.");return false;
     }
     try{
-        TopoDS_Shape result=current.shape;
+        // Subtract all additional pattern holes in one Boolean operation,
+        // rather than repeatedly reclassifying a growing result for each cut.
+        BRep_Builder builder;TopoDS_Compound cutters;builder.MakeCompound(cutters);
+        const double baseDepth=p.value(QStringLiteral("depth"));
+        const double cutDepth=blind?p.value(QStringLiteral("hole_depth")):baseDepth;
+        const double startZ=blind?baseDepth-cutDepth:-0.01;
         for(int i=1;i<holeCount;++i){
             const double x=firstX+(alongX?spacingMm*i:0.0),y=centerY+(alongX?0.0:spacingMm*i);
-            const TopoDS_Shape cutter=BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(x,y,-0.01),gp_Dir(0,0,1)),radius,p.value(QStringLiteral("depth"))+0.02).Shape();
-            BRepAlgoAPI_Cut cut(result,cutter);cut.Build();
-            if(!cut.IsDone()||cut.HasErrors()){setError(error,"A linear-pattern through-hole cut failed.");return false;}
-            result=cut.Shape();
+            builder.Add(cutters,BRepPrimAPI_MakeCylinder(
+                gp_Ax2(gp_Pnt(x,y,startZ),gp_Dir(0,0,1)),radius,cutDepth+(blind?0.01:0.02)).Shape());
         }
+        BRepAlgoAPI_Cut cut(current.shape,cutters);cut.Build();
+        if(!cut.IsDone()||cut.HasErrors()){setError(error,"A linear-pattern through-hole cut failed.");return false;}
+        const TopoDS_Shape result=cut.Shape();
         if(!validShape(result,error))return false;
         checkpoint();Part& updated=parts_[index];updated.shape=result;
         updated.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);updated.parametricGeometryToken=updated.geometryToken;
@@ -1550,28 +2753,157 @@ bool SceneDocument::addParametricLinearHolePattern(const QString& partId,int hol
         updated.holePatternAxis=axis;
         updated.sketchConstraints.append(QStringLiteral("Pattern: hole centers spaced by hole_pattern_spacing along ")+axis);
         updated.sketchConstraints.append(QStringLiteral("Dimension: hole_pattern_count is an integer from 2 to 100"));
-        updated.featureHistory.append(QStringLiteral("Pattern: Linear through-hole array along ")+axis);
+        updated.featureHistory.append(blind?QStringLiteral("Pattern: Linear blind-hole array along ")+axis:
+                                              QStringLiteral("Pattern: Linear through-hole array along ")+axis);
         return true;
     }catch(const Standard_Failure& e){setError(error,QStringLiteral("Parametric hole-pattern kernel error: %1").arg(e.what()));}
     catch(const std::exception& e){setError(error,QString::fromUtf8(e.what()));}
     return false;
 }
 
+bool SceneDocument::addParametricAllEdgeChamfer(const QString& partId,double distanceMm,QString* error) {
+    int index=-1;for(int i=0;i<parts_.size();++i)if(parts_[i].id==partId){index=i;break;}
+    if(index<0){setError(error,"Select an existing parametric solid.");return false;}
+    const Part& current=parts_[index];
+    if(!current.hasParametricDefinition||!parametricDefinitionCurrent(partId)||
+       !current.featureHistory.contains(QStringLiteral("Extrude: Base solid (depth parameter)"))){
+        setError(error,"A current rectangle-and-extrusion feature history is required for a parametric chamfer.");return false;
+    }
+    if(current.featureHistory.contains(QStringLiteral("Chamfer: All edges"))){
+        setError(error,"This parametric history already contains an all-edge chamfer.");return false;
+    }
+    if(current.featureHistory.contains(QStringLiteral("Fillet: All edges"))){
+        setError(error,"This bounded parametric history supports either an all-edge fillet or chamfer, not both.");return false;
+    }
+    if(!finitePositive(distanceMm)||distanceMm>=0.5*std::min({current.namedParameters.value(QStringLiteral("width")),
+        current.namedParameters.value(QStringLiteral("height")),current.namedParameters.value(QStringLiteral("depth"))})){
+        setError(error,"Chamfer distance must be positive and less than half the smallest base dimension.");return false;
+    }
+    try{
+        Part proposed=current;
+        proposed.namedParameters.insert(QStringLiteral("chamfer_distance"),distanceMm);
+        proposed.sketchConstraints.append(QStringLiteral("Dimension: all-edge chamfer = chamfer_distance parameter"));
+        proposed.featureHistory.append(QStringLiteral("Chamfer: All edges"));
+        TopoDS_Shape rebuilt;
+        if(!rebuildParametricSolid(proposed,proposed.namedParameters,proposed.suppressedParametricFeatures,&rebuilt,error))return false;
+        checkpoint();
+        Part& updated=parts_[index];updated.shape=rebuilt;
+        updated.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);
+        updated.parametricGeometryToken=updated.geometryToken;
+        updated.namedParameters=std::move(proposed.namedParameters);
+        updated.sketchConstraints=std::move(proposed.sketchConstraints);
+        updated.featureHistory=std::move(proposed.featureHistory);
+        return true;
+    }catch(const Standard_Failure& failure){setError(error,QStringLiteral("Parametric chamfer kernel error: %1").arg(failure.what()));}
+     catch(const std::exception& failure){setError(error,QStringLiteral("Parametric chamfer failed: %1").arg(QString::fromUtf8(failure.what())));}
+    return false;
+}
+
+bool SceneDocument::addParametricAllEdgeFillet(const QString& partId,double radiusMm,QString* error) {
+    int index=-1;for(int i=0;i<parts_.size();++i)if(parts_[i].id==partId){index=i;break;}
+    if(index<0){setError(error,"Select an existing parametric solid.");return false;}
+    const Part& current=parts_[index];
+    if(!current.hasParametricDefinition||!parametricDefinitionCurrent(partId)||
+       !current.featureHistory.contains(QStringLiteral("Extrude: Base solid (depth parameter)"))){
+        setError(error,"A current rectangle-and-extrusion feature history is required for a parametric fillet.");return false;
+    }
+    if(current.featureHistory.contains(QStringLiteral("Fillet: All edges"))){
+        setError(error,"This parametric history already contains an all-edge fillet.");return false;
+    }
+    if(!finitePositive(radiusMm)||radiusMm>=0.5*std::min({current.namedParameters.value(QStringLiteral("width")),
+        current.namedParameters.value(QStringLiteral("height")),current.namedParameters.value(QStringLiteral("depth"))})){
+        setError(error,"Fillet radius must be positive and less than half the smallest base dimension.");return false;
+    }
+    try{
+        Part proposed=current;
+        proposed.namedParameters.insert(QStringLiteral("fillet_radius"),radiusMm);
+        proposed.sketchConstraints.append(QStringLiteral("Dimension: all-edge fillet = fillet_radius parameter"));
+        proposed.featureHistory.append(QStringLiteral("Fillet: All edges"));
+        TopoDS_Shape rebuilt;
+        if(!rebuildParametricSolid(proposed,proposed.namedParameters,proposed.suppressedParametricFeatures,&rebuilt,error))return false;
+        checkpoint();
+        Part& updated=parts_[index];updated.shape=rebuilt;
+        updated.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);
+        updated.parametricGeometryToken=updated.geometryToken;
+        updated.namedParameters=std::move(proposed.namedParameters);
+        updated.sketchConstraints=std::move(proposed.sketchConstraints);
+        updated.featureHistory=std::move(proposed.featureHistory);
+        return true;
+    }catch(const Standard_Failure& failure){setError(error,QStringLiteral("Parametric fillet kernel error: %1").arg(failure.what()));}
+     catch(const std::exception& failure){setError(error,QStringLiteral("Parametric fillet failed: %1").arg(QString::fromUtf8(failure.what())));}
+    return false;
+}
+
+bool SceneDocument::setParameterLink(const QString& partId,const QString& target,const QString& source,
+                                     double scale,QString* error) {
+    return setParameterLink(partId,target,source,scale,0.0,error);
+}
+
+bool SceneDocument::setParameterLink(const QString& partId,const QString& target,const QString& source,
+                                     double scale,double offset,QString* error) {
+    int index=-1;for(int i=0;i<parts_.size();++i)if(parts_[i].id==partId){index=i;break;}
+    if(index<0){setError(error,"Object not found.");return false;}
+    const Part& current=parts_[index];
+    if(!current.hasParametricDefinition||!parametricDefinitionCurrent(partId)){
+        setError(error,"An editable parametric history is required for parameter dependencies.");return false;
+    }
+    QMap<QString,ParameterLink> links=current.parameterLinks;
+    if(links.value(target).source==source&&links.value(target).scale==scale&&links.value(target).offset==offset)return true;
+    // Replacing a link is one transaction. Validate the proposed complete
+    // graph before touching geometry so a cycle or downstream constraint
+    // failure leaves both the old dependency and its driven value intact.
+    links.insert(target,ParameterLink{source,scale,offset});
+    QMap<QString,double> resolved=current.namedParameters;
+    if(!resolveParameterLinks(links,resolved,error))return false;
+    const bool geometryChanges=resolved!=current.namedParameters;
+    if(geometryChanges){
+        // Reuse the ordinary geometry transaction with the proposed graph so
+        // downstream constraints are checked before either link or solid changes.
+        if(!setNamedParametersWithLinks(partId,{},links,true,error))return false;
+    }else checkpoint();
+    parts_[index].parameterLinks=std::move(links);
+    return true;
+}
+
+bool SceneDocument::removeParameterLink(const QString& partId,const QString& target,QString* error) {
+    int index=-1;for(int i=0;i<parts_.size();++i)if(parts_[i].id==partId){index=i;break;}
+    if(index<0){setError(error,"Object not found.");return false;}
+    if(!parts_[index].hasParametricDefinition||!parametricDefinitionCurrent(partId)||
+       !parts_[index].parameterLinks.contains(target)){
+        setError(error,"No editable parameter dependency exists for this target.");return false;
+    }
+    checkpoint();parts_[index].parameterLinks.remove(target);return true;
+}
+
+QMap<QString,ParameterLink> SceneDocument::parameterLinks(const QString& partId) const {
+    const Part* part=find(partId);
+    return part&&part->hasParametricDefinition?part->parameterLinks:QMap<QString,ParameterLink>{};
+}
+
+
 bool SceneDocument::setNamedParameter(const QString& partId,const QString& parameterName,double value,QString* error) {
     return setNamedParameters(partId,QMap<QString,double>{{parameterName,value}},error);
 }
 
 bool SceneDocument::setNamedParameters(const QString& partId,const QMap<QString,double>& values,QString* error) {
+    return setNamedParametersWithLinks(partId,values,parameterLinks(partId),false,error);
+}
+
+bool SceneDocument::setNamedParametersWithLinks(const QString& partId,const QMap<QString,double>& values,
+        const QMap<QString,ParameterLink>& links,bool allowEmpty,QString* error) {
     int index=-1;
     for(int i=0;i<parts_.size();++i)if(parts_[i].id==partId){index=i;break;}
     if(index<0){setError(error,"Object not found.");return false;}
     const Part& current=parts_[index];
     if(!current.hasParametricDefinition){setError(error,"The selected body has no editable parametric feature history.");return false;}
     if(current.geometryToken!=current.parametricGeometryToken){setError(error,"This body has geometry edits after its parametric feature history. The old parameters are read-only; rebuild a new parametric feature before editing dimensions.");return false;}
-    if(values.isEmpty()){setError(error,"Provide at least one named parameter value to edit.");return false;}
+    if(values.isEmpty()&&!allowEmpty){setError(error,"Provide at least one named parameter value to edit.");return false;}
     QMap<QString,double> updated=current.namedParameters;
     for(auto it=values.cbegin();it!=values.cend();++it){
         if(!updated.contains(it.key())){setError(error,"The named parameter does not exist on this feature history.");return false;}
+        if(links.contains(it.key())){
+            setError(error,"A driven named parameter must be edited through its source or its dependency removed.");return false;
+        }
         const bool coordinate=it.key()==QStringLiteral("origin_x")||it.key()==QStringLiteral("origin_y")||
             it.key()==QStringLiteral("hole_x")||it.key()==QStringLiteral("hole_y");
         const bool patternCount=it.key()==QStringLiteral("hole_pattern_count");
@@ -1579,39 +2911,12 @@ bool SceneDocument::setNamedParameters(const QString& partId,const QMap<QString,
            (coordinate?!finiteOffset(it.value()):!finitePositive(it.value()))){setError(error,"Named dimensions must be finite and positive; origins and hole centers may range from -1,000,000 to 1,000,000 mm, and pattern count must be an integer from 2 to 100.");return false;}
         updated[it.key()]=it.value();
     }
+    if(!resolveParameterLinks(links,updated,error))return false;
+    // Valid no-op edits must not invoke OpenCASCADE or disturb undo/redo state.
+    if(current.namedParameters==updated)return true;
     try{
-        const double originX=updated.value(QStringLiteral("origin_x")),originY=updated.value(QStringLiteral("origin_y"));
-        const double width=updated.value(QStringLiteral("width")),height=updated.value(QStringLiteral("height"));
-        if(!finiteOffset(originX+width)||!finiteOffset(originY+height)){setError(error,"Sketch rectangle coordinates exceed the supported range.");return false;}
-        TopoDS_Shape rebuilt=BRepPrimAPI_MakeBox(gp_Pnt(originX,originY,0),gp_Pnt(originX+width,originY+height,updated.value(QStringLiteral("depth")))).Shape();
-        if(current.featureHistory.contains(QStringLiteral("Cut: Parametric through-hole"))){
-            const double radius=updated.value(QStringLiteral("hole_diameter"))/2.0;
-            const double x=updated.value(QStringLiteral("hole_x")),y=updated.value(QStringLiteral("hole_y"));
-            if(!finitePositive(updated.value(QStringLiteral("hole_diameter")))||x-radius<=originX||y-radius<=originY||
-               x+radius>=originX+width||y+radius>=originY+height){
-                setError(error,"The parameter edit would move the through-hole outside the rectangular sketch profile.");return false;
-            }
-            const double depth=updated.value(QStringLiteral("depth"));
-            const int holeCount=current.featureHistory.contains(QStringLiteral("Pattern: Linear through-hole array along X"))?
-                static_cast<int>(updated.value(QStringLiteral("hole_pattern_count"))):
-                current.featureHistory.contains(QStringLiteral("Pattern: Linear through-hole array along Y"))?
-                static_cast<int>(updated.value(QStringLiteral("hole_pattern_count"))):1;
-            const double spacing=updated.value(QStringLiteral("hole_pattern_spacing"));
-            const bool patternX=current.holePatternAxis=="X";
-            if(holeCount>1&&(spacing<updated.value(QStringLiteral("hole_diameter"))||
-               (patternX?(x+spacing*(holeCount-1)+radius>=originX+width):
-                         (y+spacing*(holeCount-1)+radius>=originY+height)))){
-                setError(error,"The parameter edit makes the linear hole pattern overlap or extend outside the profile.");return false;
-            }
-            for(int i=0;i<holeCount;++i){
-                const TopoDS_Shape cutter=BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(x+(patternX?spacing*i:0.0),y+(patternX?0.0:spacing*i),-0.01),gp_Dir(0,0,1)),radius,depth+0.02).Shape();
-                BRepAlgoAPI_Cut cut(rebuilt,cutter);cut.Build();
-                if(!cut.IsDone()||cut.HasErrors()){setError(error,"The parametric through-hole rebuild failed.");return false;}
-                rebuilt=cut.Shape();
-            }
-        }
-        if(!validShape(rebuilt,error))return false;
-        if(current.namedParameters==updated)return true;
+        TopoDS_Shape rebuilt;
+        if(!rebuildParametricSolid(current,updated,current.suppressedParametricFeatures,&rebuilt,error))return false;
         checkpoint();
         parts_[index].shape=rebuilt;parts_[index].geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);
         parts_[index].parametricGeometryToken=parts_[index].geometryToken;
@@ -1623,6 +2928,69 @@ bool SceneDocument::setNamedParameters(const QString& partId,const QMap<QString,
 
 QMap<QString,double> SceneDocument::namedParameters(const QString& partId) const {
     const Part* part=find(partId);return part&&part->hasParametricDefinition?part->namedParameters:QMap<QString,double>{};
+}
+QStringList SceneDocument::suppressedParametricFeatures(const QString& partId) const {
+    const Part* part=find(partId);return part&&part->hasParametricDefinition?part->suppressedParametricFeatures:QStringList{};
+}
+static bool optionalParametricFeaturePresent(const Part& part,const QString& featureId){
+    if(featureId==QStringLiteral("through_hole"))
+        return part.featureHistory.contains(QStringLiteral("Cut: Parametric through-hole"));
+    if(featureId==QStringLiteral("blind_hole"))
+        return part.featureHistory.contains(QStringLiteral("Cut: Parametric blind hole"));
+    if(featureId==QStringLiteral("linear_hole_pattern"))
+        return part.featureHistory.contains(QStringLiteral("Pattern: Linear through-hole array along X"))||
+               part.featureHistory.contains(QStringLiteral("Pattern: Linear through-hole array along Y"))||
+               part.featureHistory.contains(QStringLiteral("Pattern: Linear blind-hole array along X"))||
+               part.featureHistory.contains(QStringLiteral("Pattern: Linear blind-hole array along Y"));
+    if(featureId==QStringLiteral("edge_chamfer"))
+        return part.featureHistory.contains(QStringLiteral("Chamfer: All edges"));
+    if(featureId==QStringLiteral("edge_fillet"))
+        return part.featureHistory.contains(QStringLiteral("Fillet: All edges"));
+    return false;
+}
+bool SceneDocument::setParametricFeatureSuppressed(const QString& partId,const QString& featureId,
+                                                   bool suppressed,QString* error) {
+    const Part* current=find(partId);
+    if(!current){setError(error,"The parametric body was not found.");return false;}
+    if(!current->hasParametricDefinition||!parametricDefinitionCurrent(partId)){
+        setError(error,"A current editable feature history is required to change feature suppression.");return false;
+    }
+    if(!optionalParametricFeaturePresent(*current,featureId)){
+        setError(error,"The requested optional operation is not present in this parametric feature history.");return false;
+    }
+    QStringList proposed=current->suppressedParametricFeatures;
+    if(suppressed){if(!proposed.contains(featureId))proposed.append(featureId);}
+    else proposed.removeAll(featureId);
+    return setParametricFeaturesSuppressed(partId,proposed,error);
+}
+bool SceneDocument::setParametricFeaturesSuppressed(const QString& partId,const QStringList& featureIds,
+                                                    QString* error) {
+    int index=-1;for(int i=0;i<parts_.size();++i)if(parts_[i].id==partId){index=i;break;}
+    if(index<0){setError(error,"The parametric body was not found.");return false;}
+    const Part& current=parts_[index];
+    if(!current.hasParametricDefinition||!parametricDefinitionCurrent(partId)){
+        setError(error,"A current editable feature history is required to change feature suppression.");return false;
+    }
+    QStringList proposed=featureIds;
+    proposed.sort();
+    for(int i=0;i<proposed.size();++i){
+        if(!optionalParametricFeaturePresent(current,proposed[i])||
+           (i>0&&proposed[i]==proposed[i-1])){
+            setError(error,"The suppression list contains an unavailable or duplicate optional feature.");return false;
+        }
+    }
+    if(proposed==current.suppressedParametricFeatures)return true;
+    try{
+        TopoDS_Shape rebuilt;
+        if(!rebuildParametricSolid(current,current.namedParameters,proposed,&rebuilt,error))return false;
+        checkpoint();Part& updated=parts_[index];updated.shape=rebuilt;
+        updated.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);
+        updated.parametricGeometryToken=updated.geometryToken;
+        updated.suppressedParametricFeatures=std::move(proposed);
+        return true;
+    }catch(const Standard_Failure& e){setError(error,QStringLiteral("Feature suppression rebuild failed: %1").arg(e.what()));}
+    catch(const std::exception& e){setError(error,QString::fromUtf8(e.what()));}
+    return false;
 }
 QStringList SceneDocument::sketchConstraints(const QString& partId) const {
     const Part* part=find(partId);return part&&part->hasParametricDefinition?part->sketchConstraints:QStringList{};
@@ -1639,6 +3007,8 @@ bool SceneDocument::booleanOperation(BooleanOp op, const QString& firstId, const
     const Part* a = find(firstId);
     const Part* b = find(secondId);
     if (!a || !b) { setError(error, "Both solids must exist."); return false; }
+    if(rejectSurfaceOnlyInput(*a,QStringLiteral("Boolean operations"),error)||
+       rejectSurfaceOnlyInput(*b,QStringLiteral("Boolean operations"),error))return false;
     try {
         TopoDS_Shape result;
         if (op == BooleanOp::Fuse) {
@@ -1662,8 +3032,13 @@ bool SceneDocument::booleanOperation(BooleanOp op, const QString& firstId, const
         const QString name = uniqueName(label);
         const QString color = a->color;
         const QString commonMaterial = (!a->materialName.isEmpty() && a->materialName == b->materialName &&
-                                        a->materialDensityKgPerM3 == b->materialDensityKgPerM3) ? a->materialName : QString();
+                                        a->materialDensityKgPerM3 == b->materialDensityKgPerM3 &&
+                                        a->materialEngineering.provenance == b->materialEngineering.provenance &&
+                                        a->materialEngineering.youngsModulusGPa == b->materialEngineering.youngsModulusGPa)
+                                        ? a->materialName : QString();
         const double commonDensity = commonMaterial.isEmpty() ? 0.0 : a->materialDensityKgPerM3;
+        const MaterialEngineeringData commonEngineering = commonMaterial.isEmpty()
+            ? MaterialEngineeringData{} : a->materialEngineering;
         checkpoint();
         for (int i = parts_.size()-1; i >= 0; --i) {
             if (parts_[i].id == firstId || parts_[i].id == secondId) parts_.removeAt(i);
@@ -1672,6 +3047,7 @@ bool SceneDocument::booleanOperation(BooleanOp op, const QString& firstId, const
         if (!commonMaterial.isEmpty()) {
             fused.materialName = commonMaterial;
             fused.materialDensityKgPerM3 = commonDensity;
+            fused.materialEngineering = commonEngineering;
         }
         parts_.append(fused);
         return true;
@@ -2089,6 +3465,7 @@ bool SceneDocument::filletEdge(const EdgeReference& reference, double radius, QS
 bool SceneDocument::filletAllEdges(const QString& id,double radius,QString* error) {
     if(!finitePositive(radius)){setError(error,"Fillet radius must be finite and positive.");return false;}
     const Part* part=find(id);if(!part){setError(error,"Object not found.");return false;}
+    if(rejectSurfaceOnlyInput(*part,QStringLiteral("Fillet"),error))return false;
     try{
         BRepFilletAPI_MakeFillet operation(part->shape);
         int edgeCount=0;
@@ -2120,6 +3497,7 @@ bool SceneDocument::prepareFillet(const QVector<EdgeReference>& references,doubl
     const EdgeReference& reference=references.first();
     const Part* part = find(reference.partId);
     if (!part) { setError(error, "The selected body no longer exists."); return false; }
+    if(rejectSurfaceOnlyInput(*part,QStringLiteral("Fillet"),error))return false;
     QVector<TopoDS_Edge> resolved;
     QSet<int> uniqueIndices;
     for (const EdgeReference& selected:references) {
@@ -2193,6 +3571,7 @@ bool SceneDocument::chamferEdge(const EdgeReference& reference, double distance,
 bool SceneDocument::chamferAllEdges(const QString& id,double distance,QString* error) {
     if(!finitePositive(distance)){setError(error,"Chamfer distance must be finite and positive.");return false;}
     const Part* part=find(id);if(!part){setError(error,"Object not found.");return false;}
+    if(rejectSurfaceOnlyInput(*part,QStringLiteral("Chamfer"),error))return false;
     try{
         BRepFilletAPI_MakeChamfer operation(part->shape);
         int edgeCount=0;
@@ -2218,6 +3597,7 @@ bool SceneDocument::draftFace(const QString& id,int faceIndex,Axis pullAxis,doub
         setError(error,"Draft face index, pull axis, neutral plane, or angle is invalid.");return false;
     }
     const Part* part=find(id);if(!part){setError(error,"Object not found.");return false;}
+    if(rejectSurfaceOnlyInput(*part,QStringLiteral("Draft"),error))return false;
     TopoDS_Face face;int index=0;
     for(TopExp_Explorer explorer(part->shape,TopAbs_FACE);explorer.More();explorer.Next())
         if(++index==faceIndex){face=TopoDS::Face(explorer.Current());break;}
@@ -2929,6 +4309,9 @@ bool SceneDocument::rotateAboutAxis(const QString& id,double ox,double oy,double
     const Part* source=find(id);
     if (!source) { setError(error,"Object not found."); return false; }
     if (degrees==0.0) return true;
+    if(!source->componentDefinitionId.isEmpty()){
+        setError(error,"Use the occurrence orientation command for component placements.");return false;
+    }
     try {
         gp_Trsf transform;
         transform.SetRotation(gp_Ax1(gp_Pnt(ox,oy,oz),gp_Dir(ax,ay,az)),degrees*std::numbers::pi/180.0);
@@ -3151,6 +4534,7 @@ bool SceneDocument::prepareHole(const QString& id, double x, double y, double en
     if (!throughAll && !finitePositive(depth)) { setError(error,"Blind hole depth must be between 0.00001 and 1,000,000 mm."); return false; }
     const Part* part=find(id);
     if (!part) { setError(error,"Object not found."); return false; }
+    if(rejectSurfaceOnlyInput(*part,QStringLiteral("Hole"),error))return false;
     command->partId=id;
     command->geometryToken=part->geometryToken;
     command->sourceShape=BRepBuilderAPI_Copy(part->shape).Shape();
@@ -3972,6 +5356,7 @@ bool SceneDocument::circularPatternAboutAxis(const QString& id,double originX,do
 bool SceneDocument::splitBody(const QString& id, Axis axis, double planeOffset, QString* error) {
     const Part* source=find(id);
     if (!source) { setError(error,"Object not found."); return false; }
+    if(rejectSurfaceOnlyInput(*source,QStringLiteral("Split solid"),error))return false;
     if (!finiteOffset(planeOffset)) { setError(error,"Split plane offset must be finite and within +/-1,000,000 mm."); return false; }
     if (axis!=Axis::X && axis!=Axis::Y && axis!=Axis::Z) { setError(error,"Choose X, Y, or Z as the split plane normal."); return false; }
     Bnd_Box bounds;
@@ -4025,6 +5410,7 @@ bool SceneDocument::shellBodyWithOpenings(const QString& id,const QVector<ShellO
                                           double thickness,QString* error) {
     const Part* source=find(id);
     if (!source) { setError(error,"Object not found."); return false; }
+    if(rejectSurfaceOnlyInput(*source,QStringLiteral("Shell"),error))return false;
     if (requestedOpenings.isEmpty() || requestedOpenings.size()>6 || !finitePositive(thickness)) {
         setError(error,"Choose one to six unique planar opening faces and a positive shell thickness."); return false;
     }
@@ -4145,9 +5531,9 @@ bool SceneDocument::setMaterial(const QStringList& ids,const QString& materialNa
     for(const QString& id:requested)if(!find(id)){setError(error,"One or more selected bodies no longer exist.");return false;}
     const QString name=materialName.trimmed();
     const bool clearing=name.isEmpty()&&densityKgPerM3==0.0;
-    if(!clearing&&(name.isEmpty()||name.size()>80||!std::isfinite(densityKgPerM3)||
-                   densityKgPerM3<0.00001||densityKgPerM3>1000000.0)){
-        setError(error,"Choose a material name and a finite density from 0.00001 to 1,000,000 kg/m^3, or clear both.");return false;
+    if(!clearing&&(name.isEmpty()||name.size()>80||name.contains('\n')||name.contains('\r')||
+                   !std::isfinite(densityKgPerM3)||densityKgPerM3<0.00001||densityKgPerM3>1000000.0)){
+        setError(error,"Choose a single-line material name and a finite density from 0.00001 to 1,000,000 kg/m^3, or clear both.");return false;
     }
     bool changed=false;
     for(const QString& id:requested){
@@ -4156,9 +5542,54 @@ bool SceneDocument::setMaterial(const QStringList& ids,const QString& materialNa
     }
     if(!changed)return true;
     checkpoint();
-    for(Part& item:parts_)if(requested.contains(item.id)){item.materialName=name;item.materialDensityKgPerM3=densityKgPerM3;}
+    for(Part& item:parts_)if(requested.contains(item.id)){
+        item.materialName=name;item.materialDensityKgPerM3=densityKgPerM3;
+        item.materialEngineering={}; // A new material must not inherit the old one's properties.
+    }
     return true;
 }
+
+bool SceneDocument::setMaterialEngineering(const QStringList& ids, const QString& provenance,
+                                           double youngsModulusGPa, QString* error) {
+    QSet<QString> requested;
+    for(const QString& id:ids)requested.insert(id);
+    if(requested.isEmpty()){setError(error,"Select at least one body.");return false;}
+    const QString source=provenance.trimmed();
+    if(source.size()>200 || provenance.contains('\n') || provenance.contains('\r') ||
+       !std::isfinite(youngsModulusGPa) || youngsModulusGPa<0.0 || youngsModulusGPa>2000.0){
+        setError(error,"Provide single-line provenance (max 200 characters) and Young's modulus from 0 to 2000 GPa (0 = unknown).");
+        return false;
+    }
+    bool changed=false;
+    for(const QString& id:requested){
+        const Part* part=find(id);
+        if(!part || part->materialName.isEmpty() || part->materialDensityKgPerM3<=0.0){
+            setError(error,"Engineering data requires an existing assigned material on every body.");return false;
+        }
+        if(part->materialEngineering.provenance!=source ||
+           part->materialEngineering.youngsModulusGPa!=youngsModulusGPa)changed=true;
+    }
+    if(!changed)return true;
+    checkpoint();
+    for(Part& part:parts_)if(requested.contains(part.id)){
+        part.materialEngineering={source,youngsModulusGPa};
+    }
+    return true;
+}
+QVector<MaterialLibraryEntry> SceneDocument::documentMaterialLibrary() const {
+    QVector<MaterialLibraryEntry> library;
+    for(const Part& part:parts_){
+        if(part.materialName.isEmpty())continue;
+        const bool present=std::any_of(library.cbegin(),library.cend(),[&part](const MaterialLibraryEntry& entry){
+            return entry.name==part.materialName && entry.densityKgPerM3==part.materialDensityKgPerM3 &&
+                   entry.engineering.provenance==part.materialEngineering.provenance &&
+                   entry.engineering.youngsModulusGPa==part.materialEngineering.youngsModulusGPa;
+        });
+        if(!present)library.append({part.materialName,part.materialDensityKgPerM3,part.materialEngineering});
+    }
+    return library;
+}
+
 
 bool SceneDocument::erase(const QString& id, QString* error) { return eraseMany({id}, error); }
 bool SceneDocument::eraseMany(const QStringList& ids, QString* error) {
@@ -4208,9 +5639,16 @@ bool SceneDocument::saveAs(const QString& path, QString* error) {
             QJsonObject item;
             item.insert("id",part.id); item.insert("name",part.name);
             item.insert("brep",brepToText(part.shape));
+            if(part.isSurfaceBody)item.insert("body_type",QStringLiteral("surface"));
             item.insert("visible",part.visible); item.insert("color",part.color);
             item.insert("material",part.materialName);
             item.insert("density_kg_per_m3",part.materialDensityKgPerM3);
+            if(!part.materialEngineering.provenance.isEmpty() || part.materialEngineering.youngsModulusGPa>0.0){
+                QJsonObject engineering;
+                engineering.insert("provenance",part.materialEngineering.provenance);
+                engineering.insert("youngs_modulus_gpa",part.materialEngineering.youngsModulusGPa);
+                item.insert("material_engineering",engineering);
+            }
             item.insert("part_number",part.partNumber);
             item.insert("description",part.description);
             item.insert("revision",part.revision);
@@ -4223,6 +5661,12 @@ bool SceneDocument::saveAs(const QString& path, QString* error) {
             item.insert("component_name",part.componentName);
             item.insert("occurrence_id",part.occurrenceId);
             item.insert("placement_x",part.placementX); item.insert("placement_y",part.placementY); item.insert("placement_z",part.placementZ);
+            if(!part.componentDefinitionId.isEmpty()&&part.placementYawDegrees!=0.0)
+                item.insert("placement_yaw_degrees",part.placementYawDegrees);
+            if(!part.componentDefinitionId.isEmpty()&&part.placementPitchDegrees!=0.0)
+                item.insert("placement_pitch_degrees",part.placementPitchDegrees);
+            if(!part.componentDefinitionId.isEmpty()&&part.placementRollDegrees!=0.0)
+                item.insert("placement_roll_degrees",part.placementRollDegrees);
             if(!part.assemblyJointType.isEmpty()){
                 QJsonObject joint;joint.insert("type",part.assemblyJointType);joint.insert("parent_body_id",part.assemblyJointParentBodyId);
                 joint.insert("origin_x",part.jointOriginX);joint.insert("origin_y",part.jointOriginY);joint.insert("origin_z",part.jointOriginZ);
@@ -4251,6 +5695,12 @@ bool SceneDocument::saveAs(const QString& path, QString* error) {
                 for(const DrawingDimensionAnnotation& dimension:part.drawingSettings.dimensionAnnotations){
                     QJsonObject annotation;annotation.insert("id",dimension.id);annotation.insert("axis",dimension.axis);annotation.insert("offset_mm",dimension.offsetMm);dimensions.append(annotation);
                 }
+                QJsonArray edgeDimensions;
+                for(const DrawingEdgeDimensionAnnotation& dimension:part.drawingSettings.edgeDimensionAnnotations){
+                    QJsonObject annotation;annotation.insert("id",dimension.id);annotation.insert("source_body_id",dimension.sourceBodyId);
+                    annotation.insert("source_geometry_token",dimension.sourceGeometryToken);annotation.insert("edge_index",dimension.edgeIndex);
+                    annotation.insert("view",dimension.view);annotation.insert("offset_mm",dimension.offsetMm);edgeDimensions.append(annotation);
+                }
                 QJsonObject partsList;partsList.insert("id",part.drawingSettings.partsListAnnotation.id);
                 partsList.insert("visible",part.drawingSettings.partsListAnnotation.visible);
                 partsList.insert("x_mm",part.drawingSettings.partsListAnnotation.xMm);
@@ -4274,9 +5724,11 @@ bool SceneDocument::saveAs(const QString& path, QString* error) {
                     annotation.insert("x_mm",section.xMm);annotation.insert("y_mm",section.yMm);sectionViews.append(annotation);
                 }
                 QJsonObject drawing;drawing.insert("sheet_id",part.drawingSettings.sheetId);drawing.insert("source_geometry_token",part.drawingSettings.sourceGeometryToken);
+                drawing.insert("source_data_token",part.drawingSettings.sourceDataToken);
                 QJsonArray sourceBodies;for(const QString& id:part.drawingSettings.sourceBodyIds)sourceBodies.append(id);drawing.insert("source_body_ids",sourceBodies);
                 drawing.insert("view_ids",views);drawing.insert("view_centers",centers);drawing.insert("note_annotations",annotations);
                 drawing.insert("dimension_annotations",dimensions);
+                drawing.insert("edge_dimension_annotations",edgeDimensions);
                 drawing.insert("linked_parts_list",partsList);
                 drawing.insert("balloon_annotations",balloons);
                 drawing.insert("detail_views",detailViews);
@@ -4288,30 +5740,68 @@ bool SceneDocument::saveAs(const QString& path, QString* error) {
                 drawing.insert("checked_by",part.drawingSettings.checkedBy);drawing.insert("issue_date",part.drawingSettings.issueDate);drawing.insert("revision",part.drawingSettings.revision);
                 item.insert("drawing_settings",drawing);
             }else item.insert("drawing_settings",QJsonValue::Null);
-            if(part.hasParametricDefinition){
+            if(part.hasConstrainedPolygonDefinition){
+                QJsonObject definition;definition.insert("type","constrained-polygon-extrusion-v1");
+                definition.insert("sketch",sketchModelToJson(part.constrainedPolygonSketch));
+                QJsonArray boundary;for(const QString& id:part.constrainedPolygonBoundary)boundary.append(id);
+                definition.insert("boundary",boundary);definition.insert("depth_mm",part.constrainedPolygonDepthMm);
+                definition.insert("geometry_token",part.constrainedPolygonGeometryToken);
+                item.insert("parametric_definition",definition);
+            }else if(part.hasParametricDefinition){
                 const bool hasThroughHole=part.featureHistory.contains(QStringLiteral("Cut: Parametric through-hole"));
+                const bool hasBlindHole=part.featureHistory.contains(QStringLiteral("Cut: Parametric blind hole"));
                 const bool hasHolePattern=part.featureHistory.contains(QStringLiteral("Pattern: Linear through-hole array along X"))||
-                    part.featureHistory.contains(QStringLiteral("Pattern: Linear through-hole array along Y"));
+                    part.featureHistory.contains(QStringLiteral("Pattern: Linear through-hole array along Y"))||
+                    part.featureHistory.contains(QStringLiteral("Pattern: Linear blind-hole array along X"))||
+                    part.featureHistory.contains(QStringLiteral("Pattern: Linear blind-hole array along Y"));
                 const bool offsetProfile=part.namedParameters.contains(QStringLiteral("origin_x"));
                 QString type;
-                if(offsetProfile)type=hasHolePattern?QStringLiteral("rectangle-extrusion-offset-through-hole-pattern-v1"):
-                    hasThroughHole?QStringLiteral("rectangle-extrusion-offset-through-hole-v1"):QStringLiteral("rectangle-extrusion-offset-v1");
-                else type=hasHolePattern?QStringLiteral("rectangle-extrusion-through-hole-pattern-v1"):
-                    hasThroughHole?QStringLiteral("rectangle-extrusion-through-hole-v2"):QStringLiteral("rectangle-extrusion-v1");
+                if(offsetProfile)type=hasHolePattern&&hasBlindHole?QStringLiteral("rectangle-extrusion-offset-blind-hole-pattern-v1"):
+                    hasHolePattern?QStringLiteral("rectangle-extrusion-offset-through-hole-pattern-v1"):
+                    hasThroughHole?QStringLiteral("rectangle-extrusion-offset-through-hole-v1"):
+                    hasBlindHole?QStringLiteral("rectangle-extrusion-offset-blind-hole-v1"):QStringLiteral("rectangle-extrusion-offset-v1");
+                else type=hasHolePattern&&hasBlindHole?QStringLiteral("rectangle-extrusion-blind-hole-pattern-v1"):
+                    hasHolePattern?QStringLiteral("rectangle-extrusion-through-hole-pattern-v1"):
+                    hasThroughHole?QStringLiteral("rectangle-extrusion-through-hole-v2"):
+                    hasBlindHole?QStringLiteral("rectangle-extrusion-blind-hole-v1"):QStringLiteral("rectangle-extrusion-v1");
                 QJsonObject definition;definition.insert("type",type);
                 QJsonObject parameters;for(auto it=part.namedParameters.cbegin();it!=part.namedParameters.cend();++it)parameters.insert(it.key(),it.value());
                 definition.insert("parameters",parameters);
+                if(!part.parameterLinks.isEmpty()){
+                    QJsonObject links;
+                    for(auto it=part.parameterLinks.cbegin();it!=part.parameterLinks.cend();++it){
+                        QJsonObject rule;rule.insert("source",it->source);rule.insert("scale",it->scale);
+                        if(it->offset!=0.0)rule.insert("offset",it->offset);
+                        links.insert(it.key(),rule);
+                    }
+                    definition.insert("parameter_links",links);
+                }
                 if(hasHolePattern)definition.insert("pattern_axis",part.holePatternAxis);
                 QJsonArray constraints;for(const QString& constraint:part.sketchConstraints)constraints.append(constraint);
                 definition.insert("sketch_constraints",constraints);
                 QJsonArray history;for(const QString& feature:part.featureHistory)history.append(feature);
-                definition.insert("feature_history",history);definition.insert("geometry_token",part.parametricGeometryToken);
+                definition.insert("feature_history",history);
+                if(!part.suppressedParametricFeatures.isEmpty()){
+                    QJsonArray suppressed;for(const QString& featureId:part.suppressedParametricFeatures)suppressed.append(featureId);
+                    definition.insert("suppressed_features",suppressed);
+                }
+                definition.insert("geometry_token",part.parametricGeometryToken);
                 item.insert("parametric_definition",definition);
             }else item.insert("parametric_definition",QJsonValue::Null);
+            if(part.hasFoldedSheetMetalDefinition){
+                QJsonObject definition;definition.insert("type","faceted-folded-sheet-v1");
+                definition.insert("geometry_token",part.foldedSheetGeometryToken);
+                definition.insert("sheet_width_mm",part.foldedSheetWidthMm);
+                definition.insert("thickness_mm",part.foldedSheetThicknessMm);
+                QJsonArray flanges;for(double value:part.foldedSheetFlangesMm)flanges.append(value);
+                QJsonArray bends;for(const FoldedSheetBend& bend:part.foldedSheetBends){QJsonObject entry;entry.insert("angle_degrees",bend.angleDegrees);entry.insert("inside_radius_mm",bend.insideRadiusMm);bends.append(entry);}
+                definition.insert("straight_flanges_mm",flanges);definition.insert("bends",bends);
+                item.insert("folded_sheet_definition",definition);
+            }else item.insert("folded_sheet_definition",QJsonValue::Null);
             array.append(item);
         }
         QJsonObject root;
-        root.insert("schema",kSchema19);
+        root.insert("schema",kSchema22);
         root.insert("units","mm");
         QJsonObject readinessPolicy;
         QJsonArray requiredFields;for(const QString& field:drawingReadinessPolicy_.requiredTitleBlockFields)requiredFields.append(field);
@@ -4344,11 +5834,11 @@ bool SceneDocument::load(const QString& path, QString* error) {
     if (parseError.error != QJsonParseError::NoError || !json.isObject()) { setError(error,"Invalid project JSON."); return false; }
     const QJsonObject root = json.object();
     const QString schema = root.value("schema").toString();
-    if ((schema != kSchema1 && schema != kSchema2 && schema != kSchema3 && schema != kSchema4 && schema != kSchema5 && schema != kSchema6 && schema != kSchema7 && schema != kSchema8 && schema != kSchema9 && schema != kSchema10 && schema != kSchema11 && schema != kSchema12 && schema != kSchema13 && schema != kSchema14 && schema != kSchema15 && schema != kSchema16 && schema != kSchema17 && schema != kSchema18 && schema != kSchema19) || root.value("units").toString() != "mm" || !root.value("parts").isArray()) {
+    if ((schema != kSchema1 && schema != kSchema2 && schema != kSchema3 && schema != kSchema4 && schema != kSchema5 && schema != kSchema6 && schema != kSchema7 && schema != kSchema8 && schema != kSchema9 && schema != kSchema10 && schema != kSchema11 && schema != kSchema12 && schema != kSchema13 && schema != kSchema14 && schema != kSchema15 && schema != kSchema16 && schema != kSchema17 && schema != kSchema18 && schema != kSchema19 && schema != kSchema20 && (schema != kSchema21 && schema != kSchema22)) || root.value("units").toString() != "mm" || !root.value("parts").isArray()) {
         setError(error,"Unsupported project schema or units."); return false;
     }
     DrawingReadinessPolicy candidateReadinessPolicy;
-    if(schema==kSchema13||schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19)){
+    if(schema==kSchema13||schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || schema == kSchema22))){
         const QJsonValue rawPolicy=root.value("drawing_readiness_policy");
         if(!rawPolicy.isObject()){setError(error,"Missing drawing project readiness policy.");return false;}
         const QJsonObject policy=rawPolicy.toObject();
@@ -4375,17 +5865,22 @@ bool SceneDocument::load(const QString& path, QString* error) {
             const QString id = item.value("id").toString();
             const QString name = item.value("name").toString();
             const QString payload = item.value("brep").toString();
+            const QJsonValue rawBodyType=item.value("body_type");
+            const QString bodyType=rawBodyType.isUndefined()?QStringLiteral("solid"):rawBodyType.toString();
             if (id.isEmpty() || name.trimmed().isEmpty() || name.size() > 120 || payload.isEmpty() ||
-                ids.contains(id) || names.contains(name.toLower())) {
+                ids.contains(id) || names.contains(name.toLower()) ||
+                (!rawBodyType.isUndefined()&&!rawBodyType.isString()) ||
+                (bodyType!=QStringLiteral("solid")&&bodyType!=QStringLiteral("surface"))) {
                 setError(error,"Invalid or duplicate body metadata."); return false;
             }
             bool visible = true;
             QString color = "#6c9dc2";
             QString materialName;
             double materialDensityKgPerM3=0.0;
+            MaterialEngineeringData materialEngineering;
             QString partNumber, description, revision, assemblyPath;
             QString procurementType = QStringLiteral("Manufactured"), supplier, supplierPartNumber;
-            if (schema == kSchema2 || schema == kSchema3 || schema == kSchema4 || schema == kSchema5 || schema == kSchema6 || schema == kSchema7 || schema == kSchema8 || schema == kSchema9 || schema == kSchema10 || schema == kSchema11 || schema == kSchema12 || schema == kSchema13 || schema == kSchema14 || schema == kSchema15 || (schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19)) {
+            if (schema == kSchema2 || schema == kSchema3 || schema == kSchema4 || schema == kSchema5 || schema == kSchema6 || schema == kSchema7 || schema == kSchema8 || schema == kSchema9 || schema == kSchema10 || schema == kSchema11 || schema == kSchema12 || schema == kSchema13 || schema == kSchema14 || schema == kSchema15 || (schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || schema == kSchema22))) {
                 if (!item.value("visible").isBool() || !item.value("color").isString()) {
                     setError(error,"Invalid v2 appearance fields."); return false;
                 }
@@ -4398,12 +5893,31 @@ bool SceneDocument::load(const QString& path, QString* error) {
                     materialName=item.value("material").toString().trimmed();
                     materialDensityKgPerM3=item.value("density_kg_per_m3").toDouble();
                     const bool unassigned=materialName.isEmpty()&&materialDensityKgPerM3==0.0;
-                    if(!unassigned&&(materialName.isEmpty()||materialName.size()>80||!std::isfinite(materialDensityKgPerM3)||
+                    if(!unassigned&&(materialName.isEmpty()||materialName.size()>80||
+                                     materialName.contains('\n')||materialName.contains('\r')||
+                                     !std::isfinite(materialDensityKgPerM3)||
                                      materialDensityKgPerM3<0.00001||materialDensityKgPerM3>1000000.0)){
                         setError(error,"Invalid body material name or density.");return false;
                     }
                 }
-                if (schema == kSchema3 || schema == kSchema4 || schema == kSchema5 || schema == kSchema6 || schema == kSchema7 || schema == kSchema8 || schema == kSchema9 || schema == kSchema10 || schema == kSchema11 || schema == kSchema12 || schema == kSchema13 || schema == kSchema14 || schema == kSchema15 || (schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19)) {
+                // Additive optional field, absent in earlier scene files.
+                if(item.contains("material_engineering")){
+                    if(!item.value("material_engineering").isObject() || materialName.isEmpty()){
+                        setError(error,"Invalid material engineering record.");return false;
+                    }
+                    const QJsonObject eng=item.value("material_engineering").toObject();
+                    if(!eng.value("provenance").isString() || !eng.value("youngs_modulus_gpa").isDouble()){
+                        setError(error,"Invalid material engineering types.");return false;
+                    }
+                    const QString source=eng.value("provenance").toString();
+                    const double modulus=eng.value("youngs_modulus_gpa").toDouble();
+                    if(source.trimmed()!=source || source.size()>200 || source.contains('\n') ||
+                       source.contains('\r') || !std::isfinite(modulus) || modulus<0.0 || modulus>2000.0){
+                        setError(error,"Invalid material engineering values.");return false;
+                    }
+                    materialEngineering={source,modulus};
+                }
+                if (schema == kSchema3 || schema == kSchema4 || schema == kSchema5 || schema == kSchema6 || schema == kSchema7 || schema == kSchema8 || schema == kSchema9 || schema == kSchema10 || schema == kSchema11 || schema == kSchema12 || schema == kSchema13 || schema == kSchema14 || schema == kSchema15 || (schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || schema == kSchema22))) {
                     if (!item.value("part_number").isString() || !item.value("description").isString() || !item.value("revision").isString()) {
                         setError(error,"Invalid part-information fields."); return false;
                     }
@@ -4415,7 +5929,7 @@ bool SceneDocument::load(const QString& path, QString* error) {
                         partNumber.contains('\r') || description.contains('\r') || revision.contains('\r')) {
                         setError(error,"Invalid part-information values."); return false;
                     }
-                    if (schema == kSchema4 || schema == kSchema5 || schema == kSchema6 || schema == kSchema7 || schema == kSchema8 || schema == kSchema9 || schema == kSchema10 || schema == kSchema11 || schema == kSchema12 || schema == kSchema13 || schema == kSchema14 || schema == kSchema15 || (schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19)) {
+                    if (schema == kSchema4 || schema == kSchema5 || schema == kSchema6 || schema == kSchema7 || schema == kSchema8 || schema == kSchema9 || schema == kSchema10 || schema == kSchema11 || schema == kSchema12 || schema == kSchema13 || schema == kSchema14 || schema == kSchema15 || (schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || schema == kSchema22))) {
                         if (!item.value("assembly_path").isString()) { setError(error,"Invalid assembly path."); return false; }
                         assemblyPath = item.value("assembly_path").toString();
                         QStringList normalizedSegments;
@@ -4431,7 +5945,7 @@ bool SceneDocument::load(const QString& path, QString* error) {
                             setError(error,"Invalid assembly path value."); return false;
                         }
                     }
-                    if (schema == kSchema5 || schema == kSchema6 || schema == kSchema7 || schema == kSchema8 || schema == kSchema9 || schema == kSchema10 || schema == kSchema11 || schema == kSchema12 || schema == kSchema13 || schema == kSchema14 || schema == kSchema15 || (schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19)) {
+                    if (schema == kSchema5 || schema == kSchema6 || schema == kSchema7 || schema == kSchema8 || schema == kSchema9 || schema == kSchema10 || schema == kSchema11 || schema == kSchema12 || schema == kSchema13 || schema == kSchema14 || schema == kSchema15 || (schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || schema == kSchema22))) {
                         if (!item.value("procurement_type").isString() || !item.value("supplier").isString() ||
                             !item.value("supplier_part_number").isString()) {
                             setError(error,"Invalid procurement fields."); return false;
@@ -4446,7 +5960,7 @@ bool SceneDocument::load(const QString& path, QString* error) {
                             setError(error,"Invalid supplier fields."); return false;
                         }
                     }
-                    if (schema == kSchema6 || schema == kSchema7 || schema == kSchema8 || schema == kSchema9 || schema == kSchema10 || schema == kSchema11 || schema == kSchema12 || schema == kSchema13 || schema == kSchema14 || schema == kSchema15 || (schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19)) {
+                    if (schema == kSchema6 || schema == kSchema7 || schema == kSchema8 || schema == kSchema9 || schema == kSchema10 || schema == kSchema11 || schema == kSchema12 || schema == kSchema13 || schema == kSchema14 || schema == kSchema15 || (schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || schema == kSchema22))) {
                         if (!item.value("component_definition_id").isString() || !item.value("component_name").isString() ||
                             !item.value("occurrence_id").isString() || !item.value("placement_x").isDouble() ||
                             !item.value("placement_y").isDouble() || !item.value("placement_z").isDouble()) {
@@ -4456,10 +5970,12 @@ bool SceneDocument::load(const QString& path, QString* error) {
                 }
             }
             const TopoDS_Shape shape = brepFromText(payload);
-            if (!validShape(shape,error)) return false;
+            const bool surfaceBody=bodyType==QStringLiteral("surface");
+            if(surfaceBody?!validSurfaceBodyShape(shape,error):!validShape(shape,error))return false;
             candidate.append({id,name,shape,visible,color});
+            candidate.last().isSurfaceBody=surfaceBody;
             candidate.last().materialName=materialName;
-            if((schema==kSchema8||schema==kSchema9||schema==kSchema10||schema==kSchema11||schema==kSchema12||schema==kSchema13||schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19))&&item.contains("geometry_token")){
+            if((schema==kSchema8||schema==kSchema9||schema==kSchema10||schema==kSchema11||schema==kSchema12||schema==kSchema13||schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || schema == kSchema22)))&&item.contains("geometry_token")){
                 if(!item.value("geometry_token").isString()||item.value("geometry_token").toString().trimmed().isEmpty()||
                    item.value("geometry_token").toString().size()>64||item.value("geometry_token").toString().contains('\n')||
                    item.value("geometry_token").toString().contains('\r')){
@@ -4468,6 +5984,7 @@ bool SceneDocument::load(const QString& path, QString* error) {
                 candidate.last().geometryToken=item.value("geometry_token").toString();
             }
             candidate.last().materialDensityKgPerM3=materialDensityKgPerM3;
+            candidate.last().materialEngineering=materialEngineering;
             candidate.last().partNumber=partNumber;
             candidate.last().description=description;
             candidate.last().revision=revision;
@@ -4475,13 +5992,31 @@ bool SceneDocument::load(const QString& path, QString* error) {
             candidate.last().procurementType=procurementType;
             candidate.last().supplier=supplier;
             candidate.last().supplierPartNumber=supplierPartNumber;
-            if (schema == kSchema6 || schema == kSchema7 || schema == kSchema8 || schema == kSchema9 || schema == kSchema10 || schema == kSchema11 || schema == kSchema12 || schema == kSchema13 || schema == kSchema14 || schema == kSchema15 || (schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19)) {
+            if (schema == kSchema6 || schema == kSchema7 || schema == kSchema8 || schema == kSchema9 || schema == kSchema10 || schema == kSchema11 || schema == kSchema12 || schema == kSchema13 || schema == kSchema14 || schema == kSchema15 || (schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || schema == kSchema22))) {
                 const QJsonObject itemObject=value.toObject();
                 Part& loaded=candidate.last();
                 loaded.componentDefinitionId=itemObject.value("component_definition_id").toString().trimmed();
                 loaded.componentName=itemObject.value("component_name").toString().trimmed();
                 loaded.occurrenceId=itemObject.value("occurrence_id").toString().trimmed();
                 loaded.placementX=itemObject.value("placement_x").toDouble(); loaded.placementY=itemObject.value("placement_y").toDouble(); loaded.placementZ=itemObject.value("placement_z").toDouble();
+                const QJsonValue yawValue=itemObject.value("placement_yaw_degrees");
+                const QJsonValue pitchValue=itemObject.value("placement_pitch_degrees");
+                const QJsonValue rollValue=itemObject.value("placement_roll_degrees");
+                if(!yawValue.isUndefined()){
+                    // Older schemas do not define this optional v19 field.
+                    if((schema!=kSchema19&&(schema!=kSchema20&&(schema!=kSchema21&&schema!=kSchema22)))||!yawValue.isDouble()){
+                        setError(error,"Invalid saved occurrence yaw record.");return false;
+                    }
+                    loaded.placementYawDegrees=yawValue.toDouble();
+                }
+                if(!pitchValue.isUndefined()||!rollValue.isUndefined()){
+                    if(schema!=kSchema22||(!pitchValue.isUndefined()&&!pitchValue.isDouble())||
+                       (!rollValue.isUndefined()&&!rollValue.isDouble())){
+                        setError(error,"Invalid saved occurrence pitch or roll record.");return false;
+                    }
+                    loaded.placementPitchDegrees=pitchValue.toDouble();
+                    loaded.placementRollDegrees=rollValue.toDouble();
+                }
                 const QJsonValue jointValue=itemObject.value("assembly_joint");
                 if(jointValue.isObject()){
                     const QJsonObject joint=jointValue.toObject();
@@ -4539,7 +6074,11 @@ bool SceneDocument::load(const QString& path, QString* error) {
                 const bool noComponent=loaded.componentDefinitionId.isEmpty()&&loaded.componentName.isEmpty()&&loaded.occurrenceId.isEmpty();
                 const bool hasComponent=!loaded.componentDefinitionId.isEmpty()&&!loaded.componentName.isEmpty()&&!loaded.occurrenceId.isEmpty();
                 if ((!noComponent&&!hasComponent) || loaded.componentDefinitionId.size()>64 || loaded.componentName.size()>120 || loaded.occurrenceId.size()>64 ||
-                    (noComponent&&(loaded.placementX!=0.0||loaded.placementY!=0.0||loaded.placementZ!=0.0)) ||
+                    (noComponent&&(loaded.placementX!=0.0||loaded.placementY!=0.0||loaded.placementZ!=0.0||
+                                   !yawValue.isUndefined()||!pitchValue.isUndefined()||!rollValue.isUndefined())) ||
+                    !std::isfinite(loaded.placementYawDegrees)||std::abs(loaded.placementYawDegrees)>36000.0 ||
+                    !std::isfinite(loaded.placementPitchDegrees)||std::abs(loaded.placementPitchDegrees)>36000.0 ||
+                    !std::isfinite(loaded.placementRollDegrees)||std::abs(loaded.placementRollDegrees)>36000.0 ||
                     loaded.componentDefinitionId.contains('\n')||loaded.componentDefinitionId.contains('\r') ||
                     loaded.componentName.contains('\n')||loaded.componentName.contains('\r') ||
                     loaded.occurrenceId.contains('\n')||loaded.occurrenceId.contains('\r') ||
@@ -4556,7 +6095,7 @@ bool SceneDocument::load(const QString& path, QString* error) {
                     componentNames.insert(loaded.componentDefinitionId,loaded.componentName);
                 }
             }
-            if(schema==kSchema7||schema==kSchema8||schema==kSchema9||schema==kSchema10||schema==kSchema11||schema==kSchema12||schema==kSchema13||schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19)){
+            if(schema==kSchema7||schema==kSchema8||schema==kSchema9||schema==kSchema10||schema==kSchema11||schema==kSchema12||schema==kSchema13||schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || schema == kSchema22))){
                 const QJsonValue raw=value.toObject().value("drawing_settings");
                 if(raw.isObject()){
                     const QJsonObject drawing=raw.toObject();
@@ -4570,15 +6109,17 @@ bool SceneDocument::load(const QString& path, QString* error) {
                     for(const QJsonValue& note:notes){if(!note.isString()){setError(error,"Invalid persistent drawing note.");return false;}settings.generalNotes.append(note.toString());}
                     settings.drawingNumber=drawing.value("drawing_number").toString();settings.drawnBy=drawing.value("drawn_by").toString();settings.checkedBy=drawing.value("checked_by").toString();
                     settings.issueDate=drawing.value("issue_date").toString();settings.revision=drawing.value("revision").toString();
-                    if(schema==kSchema9||schema==kSchema10||schema==kSchema11||schema==kSchema12||schema==kSchema13||schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19)){
+                    if(schema==kSchema9||schema==kSchema10||schema==kSchema11||schema==kSchema12||schema==kSchema13||schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || schema == kSchema22))){
                         const QJsonObject rawIds=drawing.value("view_ids").toObject();const QJsonObject rawCenters=drawing.value("view_centers").toObject();
                         if(!drawing.value("sheet_id").isString()||!drawing.value("source_geometry_token").isString()||
+                           (!drawing.value("source_data_token").isUndefined()&&!drawing.value("source_data_token").isString())||
                            !drawing.value("view_ids").isObject()||rawIds.size()!=4||!drawing.value("view_centers").isObject()||rawCenters.size()>4){
                             setError(error,"Invalid persistent drawing sheet identity or view layout.");return false;
                         }
                         const QJsonArray annotations=drawing.value("note_annotations").toArray();
                         if(!drawing.value("note_annotations").isArray()||annotations.size()>5){setError(error,"Invalid persistent drawing note annotations.");return false;}
                         settings.sheetId=drawing.value("sheet_id").toString();settings.sourceGeometryToken=drawing.value("source_geometry_token").toString();
+                        settings.sourceDataToken=drawing.value("source_data_token").toString();
                         const QJsonValue rawSourceBodies=drawing.value("source_body_ids");
                         if(rawSourceBodies.isArray()){
                             const QJsonArray sourceBodies=rawSourceBodies.toArray();
@@ -4604,7 +6145,7 @@ bool SceneDocument::load(const QString& path, QString* error) {
                             note.xMm=annotation.value("x_mm").toDouble();note.yMm=annotation.value("y_mm").toDouble();
                             settings.noteAnnotations.append(note);
                         }
-                        if(schema==kSchema10||schema==kSchema11||schema==kSchema12||schema==kSchema13||schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19)){
+                        if(schema==kSchema10||schema==kSchema11||schema==kSchema12||schema==kSchema13||schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || schema == kSchema22))){
                             const QJsonArray rawDimensions=drawing.value("dimension_annotations").toArray();
                             if(!drawing.value("dimension_annotations").isArray()||rawDimensions.size()!=3){setError(error,"Invalid persistent drawing dimension annotations.");return false;}
                             for(const QJsonValue& dimensionValue:rawDimensions){
@@ -4619,7 +6160,25 @@ bool SceneDocument::load(const QString& path, QString* error) {
                             for(const QString& axis:{QStringLiteral("X"),QStringLiteral("Y"),QStringLiteral("Z")})
                                 settings.dimensionAnnotations.append({QUuid::createUuid().toString(QUuid::WithoutBraces),axis,9.0});
                         }
-                        if(schema==kSchema11||schema==kSchema12||schema==kSchema13||schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19)){
+                        if(schema==kSchema22){
+                            const QJsonValue rawEdgeDimensions=drawing.value("edge_dimension_annotations");
+                            if(!rawEdgeDimensions.isUndefined()&&!rawEdgeDimensions.isArray()){setError(error,"Invalid selected-edge drawing dimensions.");return false;}
+                            for(const QJsonValue& dimensionValue:rawEdgeDimensions.toArray()){
+                                if(!dimensionValue.isObject()){setError(error,"Invalid selected-edge drawing dimension.");return false;}
+                                const QJsonObject dimension=dimensionValue.toObject();
+                                if(!dimension.value("id").isString()||!dimension.value("source_body_id").isString()||
+                                   !dimension.value("source_geometry_token").isString()||!dimension.value("edge_index").isDouble()||
+                                   !dimension.value("view").isString()||!dimension.value("offset_mm").isDouble()){
+                                    setError(error,"Invalid selected-edge drawing dimension fields.");return false;
+                                }
+                                const double edgeIndex=dimension.value("edge_index").toDouble();
+                                if(edgeIndex<1||edgeIndex>std::numeric_limits<int>::max()||std::floor(edgeIndex)!=edgeIndex){setError(error,"Invalid selected-edge drawing edge index.");return false;}
+                                settings.edgeDimensionAnnotations.append({dimension.value("id").toString(),dimension.value("source_body_id").toString(),
+                                    dimension.value("source_geometry_token").toString(),static_cast<int>(edgeIndex),dimension.value("view").toString(),
+                                    dimension.value("offset_mm").toDouble()});
+                            }
+                        }
+                        if(schema==kSchema11||schema==kSchema12||schema==kSchema13||schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || schema == kSchema22))){
                             const QJsonValue rawPartsList=drawing.value("linked_parts_list");
                             if(!rawPartsList.isObject()){setError(error,"Invalid linked drawing parts-list settings.");return false;}
                             const QJsonObject table=rawPartsList.toObject();
@@ -4628,7 +6187,7 @@ bool SceneDocument::load(const QString& path, QString* error) {
                             }
                             settings.partsListAnnotation={table.value("id").toString(),table.value("visible").toBool(),table.value("x_mm").toDouble(),table.value("y_mm").toDouble()};
                         }
-                        if(schema==kSchema12||schema==kSchema13||schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19)){
+                        if(schema==kSchema12||schema==kSchema13||schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || schema == kSchema22))){
                             const QJsonValue rawBalloons=drawing.value("balloon_annotations");
                             if(!rawBalloons.isArray()||rawBalloons.toArray().size()>50){setError(error,"Invalid persistent drawing balloon list.");return false;}
                             for(const QJsonValue& balloonValue:rawBalloons.toArray()){
@@ -4642,7 +6201,7 @@ bool SceneDocument::load(const QString& path, QString* error) {
                                     balloon.value("x_mm").toDouble(),balloon.value("y_mm").toDouble()});
                             }
                         }
-                        if(schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19)){
+                        if(schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || schema == kSchema22))){
                             const QJsonValue rawDetails=drawing.value("detail_views");
                             if(!rawDetails.isArray()||rawDetails.toArray().size()>4){setError(error,"Invalid persistent drawing detail-view list.");return false;}
                             for(const QJsonValue& detailValue:rawDetails.toArray()){
@@ -4661,7 +6220,7 @@ bool SceneDocument::load(const QString& path, QString* error) {
                                 settings.detailAnnotations.append(parsed);
                             }
                         }
-                        if(schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19)){
+                        if(schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || schema == kSchema22))){
                             const QJsonValue rawSections=drawing.value("section_views");
                             if(!rawSections.isArray()||rawSections.toArray().size()>4){setError(error,"Invalid persistent drawing section-view list.");return false;}
                             for(const QJsonValue& sectionValue:rawSections.toArray()){
@@ -4689,17 +6248,69 @@ bool SceneDocument::load(const QString& path, QString* error) {
                     if(!validDrawingSettings(settings,error))return false;candidate.last().drawingSettings=settings;candidate.last().hasDrawingSettings=true;
                 }else if(!raw.isNull()){setError(error,"Invalid persistent drawing settings record.");return false;}
             }
-            if(schema==kSchema8||schema==kSchema9||schema==kSchema10||schema==kSchema11||schema==kSchema12||schema==kSchema13||schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19)){
+            if(schema==kSchema8||schema==kSchema9||schema==kSchema10||schema==kSchema11||schema==kSchema12||schema==kSchema13||schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || schema == kSchema22))){
                 const QJsonValue raw=item.value("parametric_definition");
                 if(raw.isObject()){
                     const QJsonObject definition=raw.toObject();
+                    if(definition.value("type").toString()==QStringLiteral("constrained-polygon-extrusion-v1")){
+                        const QJsonArray boundary=definition.value("boundary").toArray();
+                        if((schema!=kSchema21&&schema!=kSchema22)||definition.size()!=5||!definition.value("sketch").isObject()||
+                           !definition.value("boundary").isArray()||boundary.size()<3||boundary.size()>64||
+                           !definition.value("depth_mm").isDouble()||!finitePositive(definition.value("depth_mm").toDouble())||
+                           !definition.value("geometry_token").isString()||
+                           definition.value("geometry_token").toString().isEmpty()||
+                           definition.value("geometry_token").toString().size()>64){
+                            setError(error,"Invalid saved constrained polygon definition.");return false;
+                        }
+                        SketchModel parsedSketch;
+                        if(!sketchModelFromJson(definition.value("sketch").toObject(),&parsedSketch,error))return false;
+                        QStringList boundaryIds;
+                        for(const QJsonValue& entry:boundary){
+                            if(!entry.isString()||entry.toString().isEmpty()||entry.toString().size()>64){
+                                setError(error,"Invalid constrained polygon boundary ID.");return false;
+                            }
+                            boundaryIds.append(entry.toString());
+                        }
+                        SceneDocument rebuilt;
+                        const double depth=definition.value("depth_mm").toDouble();
+                        if(!rebuilt.addConstrainedPolygonExtrusion(parsedSketch,boundaryIds,depth,error))return false;
+                        const QString token=definition.value("geometry_token").toString();
+                        if(candidate.last().geometryToken==token){
+                            GProp_GProps storedMass,rebuiltMass;
+                            BRepGProp::VolumeProperties(candidate.last().shape,storedMass);
+                            BRepGProp::VolumeProperties(rebuilt.parts().first().shape,rebuiltMass);
+                            Bnd_Box storedBox,rebuiltBox;
+                            BRepBndLib::AddOptimal(candidate.last().shape,storedBox,false,false);
+                            BRepBndLib::AddOptimal(rebuilt.parts().first().shape,rebuiltBox,false,false);
+                            double a[6],b[6];storedBox.Get(a[0],a[1],a[2],a[3],a[4],a[5]);
+                            rebuiltBox.Get(b[0],b[1],b[2],b[3],b[4],b[5]);
+                            const double tolerance=std::max(1e-5,rebuiltMass.Mass()*1e-5);
+                            if(std::abs(storedMass.Mass()-rebuiltMass.Mass())>tolerance){
+                                setError(error,"Saved constrained sketch does not match its solid volume.");return false;
+                            }
+                            for(int axis=0;axis<6;++axis)if(std::abs(a[axis]-b[axis])>1e-4){
+                                setError(error,"Saved constrained sketch does not match its solid bounds.");return false;
+                            }
+                        }
+                        candidate.last().hasConstrainedPolygonDefinition=true;
+                        candidate.last().constrainedPolygonSketch=std::move(parsedSketch);
+                        candidate.last().constrainedPolygonBoundary=std::move(boundaryIds);
+                        candidate.last().constrainedPolygonDepthMm=depth;
+                        candidate.last().constrainedPolygonGeometryToken=token;
+                    }else{
                     const QJsonObject parameters=definition.value("parameters").toObject();
                     const QJsonArray constraints=definition.value("sketch_constraints").toArray();
                     const QJsonArray history=definition.value("feature_history").toArray();
                     const QString type=definition.value("type").toString();
-                    const bool hasHolePattern=type==QStringLiteral("rectangle-extrusion-through-hole-pattern-v1")||type==QStringLiteral("rectangle-extrusion-offset-through-hole-pattern-v1");
+                    const bool blindPattern=type==QStringLiteral("rectangle-extrusion-blind-hole-pattern-v1")||
+                        type==QStringLiteral("rectangle-extrusion-offset-blind-hole-pattern-v1");
+                    const bool throughPattern=type==QStringLiteral("rectangle-extrusion-through-hole-pattern-v1")||
+                        type==QStringLiteral("rectangle-extrusion-offset-through-hole-pattern-v1");
+                    const bool hasHolePattern=throughPattern||blindPattern;
+                    const bool hasChamfer=parameters.contains(QStringLiteral("chamfer_distance"));
+                    const bool hasFillet=parameters.contains(QStringLiteral("fillet_radius"));
                     QString patternAxis=QStringLiteral("X");
-                    if(hasHolePattern&&schema==kSchema19){
+                    if(hasHolePattern&&(schema==kSchema19||schema==kSchema20||(schema==kSchema21||schema==kSchema22))){
                         if(!definition.value("pattern_axis").isString()||
                            (definition.value("pattern_axis").toString()!=QStringLiteral("X")&&definition.value("pattern_axis").toString()!=QStringLiteral("Y"))){
                             setError(error,"Invalid parametric hole-pattern axis.");return false;
@@ -4708,19 +6319,28 @@ bool SceneDocument::load(const QString& path, QString* error) {
                     }else if(definition.contains("pattern_axis")){
                         setError(error,"Unexpected parametric hole-pattern axis field.");return false;
                     }
-                    const bool hasThroughHole=hasHolePattern||type==QStringLiteral("rectangle-extrusion-through-hole-v2")||type==QStringLiteral("rectangle-extrusion-offset-through-hole-v1");
-                    const bool offsetProfile=type==QStringLiteral("rectangle-extrusion-offset-v1")||type==QStringLiteral("rectangle-extrusion-offset-through-hole-v1")||type==QStringLiteral("rectangle-extrusion-offset-through-hole-pattern-v1");
+                    const bool hasBlindHole=blindPattern||type==QStringLiteral("rectangle-extrusion-blind-hole-v1")||type==QStringLiteral("rectangle-extrusion-offset-blind-hole-v1");
+                    const bool hasThroughHole=throughPattern||type==QStringLiteral("rectangle-extrusion-through-hole-v2")||type==QStringLiteral("rectangle-extrusion-offset-through-hole-v1");
+                    const bool hasHole=hasThroughHole||hasBlindHole;
+                    const bool offsetProfile=type==QStringLiteral("rectangle-extrusion-offset-v1")||type==QStringLiteral("rectangle-extrusion-offset-through-hole-v1")||type==QStringLiteral("rectangle-extrusion-offset-through-hole-pattern-v1")||type==QStringLiteral("rectangle-extrusion-offset-blind-hole-v1")||type==QStringLiteral("rectangle-extrusion-offset-blind-hole-pattern-v1");
                     const bool supportedType=type==QStringLiteral("rectangle-extrusion-v1")||type==QStringLiteral("rectangle-extrusion-through-hole-v2")||
-                        type==QStringLiteral("rectangle-extrusion-through-hole-pattern-v1")||offsetProfile;
-                    const int expectedParameterCount=(hasHolePattern?8:(hasThroughHole?6:3))+(offsetProfile?2:0);
-                    const int expectedConstraintCount=(hasHolePattern?10:(hasThroughHole?8:5))+(offsetProfile?1:0);
+                        type==QStringLiteral("rectangle-extrusion-through-hole-pattern-v1")||
+                        type==QStringLiteral("rectangle-extrusion-offset-v1")||
+                        type==QStringLiteral("rectangle-extrusion-offset-through-hole-v1")||
+                        type==QStringLiteral("rectangle-extrusion-offset-through-hole-pattern-v1")||
+                        ((schema==kSchema21||schema==kSchema22)&&(type==QStringLiteral("rectangle-extrusion-blind-hole-v1")||
+                         type==QStringLiteral("rectangle-extrusion-offset-blind-hole-v1")))||
+                        (schema==kSchema22&&blindPattern);
+                    const int expectedParameterCount=(hasHolePattern?(hasBlindHole?9:8):(hasBlindHole?7:(hasThroughHole?6:3)))+(offsetProfile?2:0)+(hasChamfer?1:0)+(hasFillet?1:0);
+                    const int expectedConstraintCount=(hasHolePattern?(hasBlindHole?11:10):(hasBlindHole?9:(hasThroughHole?8:5)))+(offsetProfile?1:0)+(hasChamfer?1:0)+(hasFillet?1:0);
                     if(!supportedType||!definition.value("parameters").isObject()||parameters.size()!=expectedParameterCount||
                        !parameters.value("width").isDouble()||!parameters.value("height").isDouble()||!parameters.value("depth").isDouble()||
-                       (hasThroughHole&&(!parameters.value("hole_diameter").isDouble()||!parameters.value("hole_x").isDouble()||!parameters.value("hole_y").isDouble()))||
+                       (hasHole&&(!parameters.value("hole_diameter").isDouble()||!parameters.value("hole_x").isDouble()||!parameters.value("hole_y").isDouble()))||
+                       (hasBlindHole&&!parameters.value("hole_depth").isDouble())||
                        (hasHolePattern&&(!parameters.value("hole_pattern_count").isDouble()||!parameters.value("hole_pattern_spacing").isDouble()))||
                        (offsetProfile&&(!parameters.value("origin_x").isDouble()||!parameters.value("origin_y").isDouble()))||
                        !definition.value("sketch_constraints").isArray()||constraints.size()!=expectedConstraintCount||
-                       !definition.value("feature_history").isArray()||history.size()!=(hasHolePattern?5:(hasThroughHole?4:2))||
+                       !definition.value("feature_history").isArray()||history.size()!=(hasHolePattern?5:(hasHole?4:2))+(hasChamfer?1:0)+(hasFillet?1:0)||
                        !definition.value("geometry_token").isString()||definition.value("geometry_token").toString().trimmed().isEmpty()||
                        definition.value("geometry_token").toString().size()>64){
                         setError(error,"Invalid parametric sketch or feature-history record.");return false;
@@ -4728,8 +6348,11 @@ bool SceneDocument::load(const QString& path, QString* error) {
                     QMap<QString,double> parsedParameters;
                     QStringList parameterNames{QStringLiteral("width"),QStringLiteral("height"),QStringLiteral("depth")};
                     if(offsetProfile)parameterNames.append({QStringLiteral("origin_x"),QStringLiteral("origin_y")});
-                    if(hasThroughHole)parameterNames.append({QStringLiteral("hole_diameter"),QStringLiteral("hole_x"),QStringLiteral("hole_y")});
+                    if(hasHole)parameterNames.append({QStringLiteral("hole_diameter"),QStringLiteral("hole_x"),QStringLiteral("hole_y")});
+                    if(hasBlindHole)parameterNames.append(QStringLiteral("hole_depth"));
                     if(hasHolePattern)parameterNames.append({QStringLiteral("hole_pattern_count"),QStringLiteral("hole_pattern_spacing")});
+                    if(hasChamfer)parameterNames.append(QStringLiteral("chamfer_distance"));
+                    if(hasFillet)parameterNames.append(QStringLiteral("fillet_radius"));
                     for(const QString& key:parameterNames){
                         const double parameterValue=parameters.value(key).toDouble();
                         if(key==QStringLiteral("hole_pattern_count")?
@@ -4738,6 +6361,60 @@ bool SceneDocument::load(const QString& path, QString* error) {
                             setError(error,"Invalid named sketch parameter value.");return false;
                         }
                         parsedParameters.insert(key,parameterValue);
+                    }
+                    // Schema-v19 introduced dimension links; schema-v20 adds their optional affine offset.
+                    // Old files have no links; malformed or cyclic rules fail atomically.
+                    QMap<QString,ParameterLink> parsedLinks;
+                    if(definition.contains("parameter_links")){
+                        if(schema!=kSchema19&&(schema!=kSchema20&&(schema!=kSchema21&&schema!=kSchema22))){setError(error,"Unexpected parameter dependency graph in older scene schema.");return false;}
+                        if(!definition.value("parameter_links").isObject()){
+                            setError(error,"Invalid saved parameter dependency graph.");return false;
+                        }
+                        const QJsonObject jsonLinks=definition.value("parameter_links").toObject();
+                        if(jsonLinks.size()>4){setError(error,"Too many saved parameter dependencies.");return false;}
+                        for(auto it=jsonLinks.begin();it!=jsonLinks.end();++it){
+                            if(!it.value().isObject()){setError(error,"Invalid saved parameter dependency rule.");return false;}
+                            const QJsonObject rule=it.value().toObject();
+                            if((rule.size()!=2&&(rule.size()!=3||!rule.contains("offset")))||
+                               !rule.value("source").isString()||!rule.value("scale").isDouble()||
+                               (rule.contains("offset")&&(schema!=kSchema20&&(schema!=kSchema21&&schema!=kSchema22)))||
+                               (rule.contains("offset")&&!rule.value("offset").isDouble())){
+                                setError(error,"Invalid saved parameter dependency rule.");return false;
+                            }
+                            parsedLinks.insert(it.key(),{rule.value("source").toString(),rule.value("scale").toDouble(),
+                                rule.value("offset").isUndefined()?0.0:rule.value("offset").toDouble()});
+                        }
+                        QMap<QString,double> evaluated=parsedParameters;
+                        if(!resolveParameterLinks(parsedLinks,evaluated,error))return false;
+                        for(auto it=parsedLinks.cbegin();it!=parsedLinks.cend();++it){
+                            const double actual=parsedParameters.value(it.key());
+                            if(std::abs(evaluated.value(it.key())-actual)>1e-10*std::max(1.0,std::abs(actual))){
+                                setError(error,"Saved dependent named parameters disagree with their sources.");return false;
+                            }
+                        }
+                    }
+                    // Enforce the same supported sketch extents on load as on creation
+                    // and parameter edits. Stale histories are still validated: they
+                    // remain inspectable, even though they cannot be rebuilt.
+                    const double sketchOriginX=parsedParameters.value(QStringLiteral("origin_x"));
+                    const double sketchOriginY=parsedParameters.value(QStringLiteral("origin_y"));
+                    if(!finiteOffset(sketchOriginX+parsedParameters.value(QStringLiteral("width")))||
+                       !finiteOffset(sketchOriginY+parsedParameters.value(QStringLiteral("height")))){
+                        setError(error,"Saved parametric sketch rectangle exceeds the supported coordinate range.");return false;
+                    }
+                    if(hasChamfer&&parsedParameters.value(QStringLiteral("chamfer_distance"))>=0.5*std::min({
+                        parsedParameters.value(QStringLiteral("width")),parsedParameters.value(QStringLiteral("height")),
+                        parsedParameters.value(QStringLiteral("depth"))})){
+                        setError(error,"Saved parametric chamfer exceeds the supported distance for its base extrusion.");return false;
+                    }
+                    if(hasFillet&&parsedParameters.value(QStringLiteral("fillet_radius"))>=0.5*std::min({
+                        parsedParameters.value(QStringLiteral("width")),parsedParameters.value(QStringLiteral("height")),
+                        parsedParameters.value(QStringLiteral("depth"))})){
+                        setError(error,"Saved parametric fillet exceeds the supported radius for its base extrusion.");return false;
+                    }
+                    if(hasBlindHole&&parsedParameters.value(QStringLiteral("hole_depth"))>=
+                       parsedParameters.value(QStringLiteral("depth"))-std::max(0.01,parsedParameters.value(QStringLiteral("depth"))*1e-5)){
+                        setError(error,"Saved parametric blind-hole depth must leave at least 0.01 mm of floor thickness.");return false;
                     }
                     QStringList parsedConstraints,parsedHistory;
                     for(const QJsonValue& entry:constraints){if(!entry.isString()||entry.toString().size()>160){setError(error,"Invalid parametric sketch constraint.");return false;}parsedConstraints.append(entry.toString());}
@@ -4748,19 +6425,53 @@ bool SceneDocument::load(const QString& path, QString* error) {
                     QStringList expectedHistory=offsetProfile?
                         QStringList{"Sketch: XY rectangle with editable origin (fully constrained)","Extrude: Base solid (depth parameter)"}:
                         QStringList{"Sketch: XY rectangle (fully constrained)","Extrude: Base solid (depth parameter)"};
-                    if(hasThroughHole){
+                    if(hasHole){
                         expectedConstraints.append({"Coincident: circle center = named hole X/Y parameters","Dimension: circle diameter = hole_diameter parameter","Containment: circle remains inside the rectangular profile"});
-                        expectedHistory.append({"Sketch: XY circle (fully constrained by center and diameter)","Cut: Parametric through-hole"});
+                        if(hasBlindHole){
+                            expectedConstraints.insert(expectedConstraints.size()-1,"Dimension: blind cut depth = hole_depth parameter");
+                            expectedHistory.append({"Sketch: XY circle (fully constrained by center and diameter)","Cut: Parametric blind hole"});
+                        }else expectedHistory.append({"Sketch: XY circle (fully constrained by center and diameter)","Cut: Parametric through-hole"});
                     }
                     if(hasHolePattern){
                         expectedConstraints.append(QStringLiteral("Pattern: hole centers spaced by hole_pattern_spacing along ")+patternAxis);
                         expectedConstraints.append("Dimension: hole_pattern_count is an integer from 2 to 100");
-                        expectedHistory.append(QStringLiteral("Pattern: Linear through-hole array along ")+patternAxis);
+                        expectedHistory.append(hasBlindHole?QStringLiteral("Pattern: Linear blind-hole array along ")+patternAxis:
+                                                             QStringLiteral("Pattern: Linear through-hole array along ")+patternAxis);
+                    }
+                    if(hasChamfer){
+                        expectedConstraints.append("Dimension: all-edge chamfer = chamfer_distance parameter");
+                        expectedHistory.append("Chamfer: All edges");
+                    }
+                    if(hasFillet){
+                        expectedConstraints.append("Dimension: all-edge fillet = fillet_radius parameter");
+                        expectedHistory.append("Fillet: All edges");
                     }
                     if(parsedConstraints!=expectedConstraints||parsedHistory!=expectedHistory){
                         setError(error,"Unsupported parametric feature-history operations.");return false;
                     }
-                    if(hasThroughHole){
+                    QStringList parsedSuppressedFeatures;
+                    if(definition.contains("suppressed_features")){
+                        if((schema!=kSchema19&&(schema!=kSchema20&&(schema!=kSchema21&&schema!=kSchema22)))||!definition.value("suppressed_features").isArray()){
+                            setError(error,"Invalid saved parametric feature suppression list.");return false;
+                        }
+                        const QJsonArray suppressed=definition.value("suppressed_features").toArray();
+                        QSet<QString> uniqueSuppressed;
+                        for(const QJsonValue& entry:suppressed){
+                            if(!entry.isString()){setError(error,"Invalid saved parametric feature suppression key.");return false;}
+                            const QString featureId=entry.toString();
+                            const bool known=(featureId==QStringLiteral("through_hole")&&hasThroughHole)||
+                                (featureId==QStringLiteral("blind_hole")&&hasBlindHole)||
+                                (featureId==QStringLiteral("linear_hole_pattern")&&hasHolePattern)||
+                                (featureId==QStringLiteral("edge_chamfer")&&hasChamfer)||
+                                (featureId==QStringLiteral("edge_fillet")&&hasFillet);
+                            if(!known||uniqueSuppressed.contains(featureId)){
+                                setError(error,"Saved parametric feature suppression refers to an unavailable or duplicate operation.");return false;
+                            }
+                            uniqueSuppressed.insert(featureId);parsedSuppressedFeatures.append(featureId);
+                        }
+                        parsedSuppressedFeatures.sort();
+                    }
+                    if(hasHole){
                         const double r=parsedParameters.value("hole_diameter")/2.0,x=parsedParameters.value("hole_x"),y=parsedParameters.value("hole_y");
                         const double originX=parsedParameters.value("origin_x"),originY=parsedParameters.value("origin_y");
                         const int patternCount=hasHolePattern?static_cast<int>(parsedParameters.value("hole_pattern_count")):1;
@@ -4773,26 +6484,154 @@ bool SceneDocument::load(const QString& path, QString* error) {
                         }
                     }
                     candidate.last().hasParametricDefinition=true;candidate.last().namedParameters=std::move(parsedParameters);
+                    candidate.last().parameterLinks=std::move(parsedLinks);
                     candidate.last().sketchConstraints=std::move(parsedConstraints);candidate.last().featureHistory=std::move(parsedHistory);
+                    candidate.last().suppressedParametricFeatures=std::move(parsedSuppressedFeatures);
                     candidate.last().parametricGeometryToken=definition.value("geometry_token").toString();
                     candidate.last().holePatternAxis=patternAxis;
                     if(candidate.last().geometryToken==candidate.last().parametricGeometryToken){
-                        Bnd_Box box;BRepBndLib::Add(candidate.last().shape,box);
+                        Bnd_Box box;BRepBndLib::AddOptimal(candidate.last().shape,box,false,false);
                         double minX=0,minY=0,minZ=0,maxX=0,maxY=0,maxZ=0;box.Get(minX,minY,minZ,maxX,maxY,maxZ);
                         GProp_GProps properties;BRepGProp::VolumeProperties(candidate.last().shape,properties);
-                        if(std::abs(minX-candidate.last().namedParameters.value("origin_x"))>1e-6||
-                           std::abs(minY-candidate.last().namedParameters.value("origin_y"))>1e-6||std::abs(minZ)>1e-6||
-                           std::abs((maxX-minX)-candidate.last().namedParameters.value("width"))>1e-6||
-                           std::abs((maxY-minY)-candidate.last().namedParameters.value("height"))>1e-6||
-                           std::abs((maxZ-minZ)-candidate.last().namedParameters.value("depth"))>1e-6||
-                           std::abs(properties.Mass()-(candidate.last().namedParameters.value("width")*
-                               candidate.last().namedParameters.value("height")- (hasThroughHole?std::numbers::pi*std::pow(candidate.last().namedParameters.value("hole_diameter")/2.0,2)*
-                               (hasHolePattern?candidate.last().namedParameters.value("hole_pattern_count"):1.0):0.0)) *
-                               candidate.last().namedParameters.value("depth"))>1e-5){
-                            setError(error,"Parametric feature history does not match its saved solid geometry.");return false;
+                        const QString holeSuppressionId=hasBlindHole?QStringLiteral("blind_hole"):QStringLiteral("through_hole");
+                        const bool holeActive=hasHole&&!candidate.last().suppressedParametricFeatures.contains(holeSuppressionId);
+                        const bool patternActive=holeActive&&hasHolePattern&&
+                            !candidate.last().suppressedParametricFeatures.contains(QStringLiteral("linear_hole_pattern"));
+                        const double activeHoleCount=holeActive?(patternActive?
+                            candidate.last().namedParameters.value("hole_pattern_count"):1.0):0.0;
+                        double expectedVolume=0.0;
+                        if(hasChamfer||hasFillet){
+                            TopoDS_Shape rebuilt;
+                            if(!rebuildParametricSolid(candidate.last(),candidate.last().namedParameters,
+                                candidate.last().suppressedParametricFeatures,&rebuilt,error))return false;
+                            GProp_GProps rebuiltProperties;BRepGProp::VolumeProperties(rebuilt,rebuiltProperties);
+                            expectedVolume=rebuiltProperties.Mass();
+                        }else{
+                            const double cutDepth=hasBlindHole?candidate.last().namedParameters.value("hole_depth"):
+                                candidate.last().namedParameters.value("depth");
+                            expectedVolume=candidate.last().namedParameters.value("width")*
+                                candidate.last().namedParameters.value("height")*candidate.last().namedParameters.value("depth")-
+                                activeHoleCount*std::numbers::pi*std::pow(candidate.last().namedParameters.value("hole_diameter")/2.0,2)*cutDepth;
+                        }
+                        const double volumeTolerance=std::max(1e-18,std::abs(expectedVolume)*1e-9);
+                        // OCCT's exact bounds for blended edges may extend a few
+                        // hundredths beyond the nominal prism because of the
+                        // tolerances carried by the generated surfaces. Keep the
+                        // check scale-aware while still rejecting materially
+                        // different saved geometry.
+                        const double boundsTolerance=std::max(1e-6,
+                            std::max({candidate.last().namedParameters.value("width"),
+                                      candidate.last().namedParameters.value("height"),
+                                      candidate.last().namedParameters.value("depth")})*5e-4);
+                        if(std::abs(minX-candidate.last().namedParameters.value("origin_x"))>boundsTolerance||
+                           std::abs(minY-candidate.last().namedParameters.value("origin_y"))>boundsTolerance||std::abs(minZ)>boundsTolerance||
+                           std::abs((maxX-minX)-candidate.last().namedParameters.value("width"))>boundsTolerance||
+                           std::abs((maxY-minY)-candidate.last().namedParameters.value("height"))>boundsTolerance||
+                           std::abs((maxZ-minZ)-candidate.last().namedParameters.value("depth"))>boundsTolerance||
+                           !std::isfinite(expectedVolume)||!std::isfinite(properties.Mass())||properties.Mass()<=0.0||
+                           std::abs(properties.Mass()-expectedVolume)>volumeTolerance){
+                            setError(error,QStringLiteral("Parametric feature history does not match its saved solid geometry (saved volume %1 mm³, rebuilt volume %2 mm³, saved extents %3 × %4 × %5 mm, expected %6 × %7 × %8 mm).")
+                                .arg(properties.Mass(),0,'g',12).arg(expectedVolume,0,'g',12)
+                                .arg(maxX-minX,0,'g',10).arg(maxY-minY,0,'g',10).arg(maxZ-minZ,0,'g',10)
+                                .arg(candidate.last().namedParameters.value("width"),0,'g',10)
+                                .arg(candidate.last().namedParameters.value("height"),0,'g',10)
+                                .arg(candidate.last().namedParameters.value("depth"),0,'g',10));return false;
+                        }
+                        // A matching bounding box and volume cannot establish that
+                        // each saved through-hole is actually at its named center.
+                        // Check the bore interiors before treating this history as editable.
+                        if(holeActive){
+                            BRepClass3d_SolidClassifier classifier(candidate.last().shape);
+                            const double holeX=candidate.last().namedParameters.value("hole_x");
+                            const double holeY=candidate.last().namedParameters.value("hole_y");
+                            const double spacing=candidate.last().namedParameters.value("hole_pattern_spacing");
+                            const int count=patternActive?static_cast<int>(candidate.last().namedParameters.value("hole_pattern_count")):1;
+                            const double featureDepth=hasBlindHole?candidate.last().namedParameters.value("hole_depth"):
+                                candidate.last().namedParameters.value("depth");
+                            const double baseDepth=candidate.last().namedParameters.value("depth");
+                            const double cutStartZ=hasBlindHole?baseDepth-featureDepth:0.0;
+                            const double depthProbes[]={cutStartZ+featureDepth*0.1,cutStartZ+featureDepth*0.5,cutStartZ+featureDepth*0.9};
+                            // The interior probe checks location; a second, off-axis
+                            // near-wall probe also checks the claimed bore radius.
+                            // Keep both away from tangent edges between pattern bores.
+                            const double boreRadius=candidate.last().namedParameters.value("hole_diameter")/2.0;
+                            const bool patternAlongY=patternAxis==QStringLiteral("Y");
+                            for(int holeIndex=0;holeIndex<count;++holeIndex){
+                                const double centerX=holeX+(patternAxis==QStringLiteral("X")?spacing*holeIndex:0.0);
+                                const double centerY=holeY+(patternAlongY?spacing*holeIndex:0.0);
+                                // Check bore position and radius over its full defined cut depth.
+                                for(double sampleZ:depthProbes){
+                                    const gp_Pnt probes[]={
+                                        gp_Pnt(centerX+0.2*boreRadius,centerY+0.2*boreRadius,sampleZ),
+                                        gp_Pnt(centerX+(patternAlongY?0.9:0.1)*boreRadius,
+                                               centerY+(patternAlongY?0.1:0.9)*boreRadius,sampleZ)
+                                    };
+                                    for(const gp_Pnt& probe:probes){
+                                        classifier.Perform(probe,1e-7);
+                                        if(classifier.State()!=TopAbs_OUT){
+                                            setError(error,"Saved through-hole centers, bore radii, or cut depths do not match the solid geometry.");return false;
+                                        }
+                                    }
+                                }
+                                if(hasBlindHole){
+                                    classifier.Perform(gp_Pnt(centerX,centerY,baseDepth-featureDepth-std::max(1e-5,baseDepth*1e-6)),1e-7);
+                                    if(classifier.State()!=TopAbs_IN){
+                                        setError(error,"Saved blind-hole floor does not match its named depth.");return false;
+                                    }
+                                }
+                            }
                         }
                     }
+                    }
                 }else if(!raw.isNull()){setError(error,"Invalid parametric definition record.");return false;}
+            }
+            const QJsonValue rawFolded=item.value("folded_sheet_definition");
+            if(rawFolded.isObject()){
+                if(schema!=kSchema19&&(schema!=kSchema20&&(schema!=kSchema21&&schema!=kSchema22))){setError(error,"Unexpected folded sheet-metal definition in an older scene schema.");return false;}
+                const QJsonObject definition=rawFolded.toObject();
+                const QJsonValue rawFlanges=definition.value("straight_flanges_mm"),rawBends=definition.value("bends");
+                if(definition.size()!=6||definition.value("type").toString()!=QStringLiteral("faceted-folded-sheet-v1")||
+                   !definition.value("geometry_token").isString()||definition.value("geometry_token").toString().trimmed().isEmpty()||
+                   definition.value("geometry_token").toString().size()>64||!definition.value("sheet_width_mm").isDouble()||
+                   !definition.value("thickness_mm").isDouble()||!rawFlanges.isArray()||!rawBends.isArray()||
+                   rawBends.toArray().isEmpty()||rawBends.toArray().size()>50||rawFlanges.toArray().size()!=rawBends.toArray().size()+1){
+                    setError(error,"Invalid saved folded sheet-metal definition.");return false;
+                }
+                QVector<double> flanges;for(const QJsonValue& entry:rawFlanges.toArray()){
+                    if(!entry.isDouble()||!finitePositive(entry.toDouble())){setError(error,"Invalid saved folded sheet flange length.");return false;}
+                    flanges.append(entry.toDouble());
+                }
+                QVector<FoldedSheetBend> bends;for(const QJsonValue& entry:rawBends.toArray()){
+                    if(!entry.isObject()||entry.toObject().size()!=2||!entry.toObject().value("angle_degrees").isDouble()||
+                       !entry.toObject().value("inside_radius_mm").isDouble()){
+                        setError(error,"Invalid saved folded sheet bend.");return false;
+                    }
+                    bends.append({entry.toObject().value("angle_degrees").toDouble(),entry.toObject().value("inside_radius_mm").toDouble()});
+                }
+                const double width=definition.value("sheet_width_mm").toDouble(),thickness=definition.value("thickness_mm").toDouble();
+                TopoDS_Shape expected=makeFoldedSheetSolid(flanges,width,thickness,bends,error);
+                if(expected.IsNull()||!validShape(expected,error))return false;
+                Part& loaded=candidate.last();
+                const QString definitionToken=definition.value("geometry_token").toString();
+                if(loaded.geometryToken==definitionToken){
+                    BRepAlgoAPI_Cut firstDifference(loaded.shape,expected);firstDifference.Build();
+                    BRepAlgoAPI_Cut secondDifference(expected,loaded.shape);secondDifference.Build();
+                    if(!firstDifference.IsDone()||!secondDifference.IsDone()){
+                        setError(error,"Could not validate folded sheet-metal geometry against its editable definition.");return false;
+                    }
+                    GProp_GProps firstProps,secondProps,expectedProps;BRepGProp::VolumeProperties(firstDifference.Shape(),firstProps);
+                    BRepGProp::VolumeProperties(secondDifference.Shape(),secondProps);BRepGProp::VolumeProperties(expected,expectedProps);
+                    const double tolerance=std::max(1e-9,std::abs(expectedProps.Mass())*1e-9);
+                    if(!std::isfinite(firstProps.Mass())||!std::isfinite(secondProps.Mass())||
+                       firstProps.Mass()>tolerance||secondProps.Mass()>tolerance){
+                        setError(error,"Folded sheet-metal definition does not match its saved solid geometry.");return false;
+                    }
+                }
+                loaded.hasFoldedSheetMetalDefinition=true;loaded.foldedSheetGeometryToken=definitionToken;
+                loaded.foldedSheetFlangesMm=std::move(flanges);loaded.foldedSheetWidthMm=width;
+                loaded.foldedSheetThicknessMm=thickness;loaded.foldedSheetBends=std::move(bends);
+            }else if(!rawFolded.isNull()&&!rawFolded.isUndefined()){
+                setError(error,"Invalid saved folded sheet-metal definition record.");return false;
             }
             ids.insert(id); names.insert(name.toLower());
         }
@@ -4800,6 +6639,9 @@ bool SceneDocument::load(const QString& path, QString* error) {
       catch (const std::exception& e) { setError(error,QString::fromUtf8(e.what())); return false; }
     for(const Part& child:candidate){
         if(child.assemblyJointType.isEmpty())continue;
+        if(child.componentDefinitionId.isEmpty()){
+            setError(error,"Saved assembly joint child is not a component occurrence.");return false;
+        }
         const auto parentIt=std::find_if(candidate.cbegin(),candidate.cend(),[&](const Part& part){return part.id==child.assemblyJointParentBodyId;});
         if(parentIt==candidate.cend()||parentIt->id==child.id||parentIt->componentDefinitionId.isEmpty()){
             setError(error,"Saved assembly joint refers to a missing or invalid parent occurrence.");return false;
@@ -4813,6 +6655,28 @@ bool SceneDocument::load(const QString& path, QString* error) {
             cursor=&*next;
         }
     }
+    // Older scene files did not store a BOM/material revision for linked
+    // drawings. Establish a baseline after every source's metadata is loaded.
+    for(Part& sheet:candidate)if(sheet.hasDrawingSettings&&sheet.drawingSettings.sourceDataToken.isEmpty()){
+        QStringList sourceIds=sheet.drawingSettings.sourceBodyIds;if(sourceIds.isEmpty())sourceIds.append(sheet.id);
+        QVector<const Part*> sources;sources.reserve(sourceIds.size());
+        for(const QString& sourceId:sourceIds){
+            const auto source=std::find_if(candidate.cbegin(),candidate.cend(),[&](const Part& part){return part.id==sourceId;});
+            if(source!=candidate.cend())sources.append(&*source);
+        }
+        sheet.drawingSettings.sourceDataToken=drawingSourceDataFingerprint(sources);
+    }
+    for(const Part& sheet:candidate)if(sheet.hasDrawingSettings&&!validDrawingSettings(sheet.drawingSettings,error))return false;
+    // Validate cross-sheet identities after parsing all bodies, before the
+    // transactional commit. A corrupted scene must not replace the open model.
+    QSet<QString> drawingSheetIds;
+    for(const Part& part:candidate){
+        if(!part.hasDrawingSettings)continue;
+        if(drawingSheetIds.contains(part.drawingSettings.sheetId)){
+            setError(error,"Saved project contains duplicate persistent drawing sheet identities.");return false;
+        }
+        drawingSheetIds.insert(part.drawingSettings.sheetId);
+    }
     // Transactional load: no part of the original document is touched until all validation succeeds.
     parts_ = std::move(candidate);
     drawingReadinessPolicy_=candidateReadinessPolicy;
@@ -4821,12 +6685,14 @@ bool SceneDocument::load(const QString& path, QString* error) {
     return true;
 }
 
-bool SceneDocument::importSTL(const QString& path,double weldToleranceMm,QString* error) {
+bool SceneDocument::importSTL(const QString& path,double weldToleranceMm,QString* error,
+                              MeshImportSummary* repairSummary,bool fillPlanarHoles,bool importAsSurfaceBody) {
     if(path.trimmed().isEmpty()){setError(error,"Provide an STL file path.");return false;}
     const QFileInfo info(path);
     if(!info.exists()||!info.isFile()||info.size()<=0){setError(error,"STL file does not exist or is empty.");return false;}
     if(info.size()>kMaxStlImportBytes){setError(error,"STL file exceeds the 512 MiB import limit.");return false;}
     if(!std::isfinite(weldToleranceMm)||weldToleranceMm<1e-6||weldToleranceMm>1.0){setError(error,"STL weld tolerance must be between 0.000001 and 1 mm.");return false;}
+    if(fillPlanarHoles&&importAsSurfaceBody){setError(error,"Choose either planar-hole filling for a solid or open surface-body import.");return false;}
     if(parts_.size()>=kMaxObjects){setError(error,"Scene object limit reached.");return false;}
     try{
         TopoDS_Shape raw;
@@ -4834,9 +6700,83 @@ bool SceneDocument::importSTL(const QString& path,double weldToleranceMm,QString
         if(!reader.Read(raw,QFile::encodeName(path).constData())||raw.IsNull()){
             setError(error,"Could not read STL facets from the selected file.");return false;
         }
-        BRepBuilderAPI_Sewing sewing(weldToleranceMm,true,true,true,false);sewing.Add(raw);sewing.Perform();
+        BRepMesh_IncrementalMesh mesher(raw,std::max(1e-4,weldToleranceMm*0.1),false,0.5,true);
+        if(!mesher.IsDone()){setError(error,"Could not tessellate STL facets for mesh repair.");return false;}
+        std::vector<mesh::Point3> sourceVertices;
+        std::vector<mesh::Triangle> sourceTriangles;
+        constexpr std::size_t maxRepairVertices=5000000;
+        for(TopExp_Explorer faceExplorer(raw,TopAbs_FACE);faceExplorer.More();faceExplorer.Next()){
+            const TopoDS_Face face=TopoDS::Face(faceExplorer.Current());
+            TopLoc_Location location;
+            const Handle(Poly_Triangulation) triangulation=BRep_Tool::Triangulation(face,location);
+            if(triangulation.IsNull())continue;
+            const gp_Trsf placement=location.Transformation();
+            for(int index=1;index<=triangulation->NbTriangles();++index){
+                if(sourceVertices.size()>maxRepairVertices-3){
+                    setError(error,"STL mesh exceeds the 5,000,000-vertex repair limit.");return false;
+                }
+                int a=0,b=0,c=0;triangulation->Triangle(index).Get(a,b,c);
+                if(face.Orientation()==TopAbs_REVERSED)std::swap(b,c);
+                const int base=static_cast<int>(sourceVertices.size());
+                for(const int node:{a,b,c}){
+                    gp_Pnt point=triangulation->Node(node);point.Transform(placement);
+                    sourceVertices.push_back({point.X(),point.Y(),point.Z()});
+                }
+                sourceTriangles.push_back({static_cast<std::uint32_t>(base),
+                                           static_cast<std::uint32_t>(base+1),
+                                           static_cast<std::uint32_t>(base+2)});
+            }
+        }
+        if(sourceTriangles.empty()){setError(error,"STL file contains no usable triangulated facets.");return false;}
+        mesh::RepairResult repaired;std::string repairError;
+        if(!mesh::repairTriangleMesh(sourceVertices,sourceTriangles,weldToleranceMm,&repaired,&repairError)){
+            setError(error,QStringLiteral("STL mesh repair failed: %1").arg(QString::fromStdString(repairError)));return false;
+        }
+        if(fillPlanarHoles&&!mesh::fillPlanarBoundaryHoles(&repaired,weldToleranceMm,64,&repairError)){
+            setError(error,QStringLiteral("STL planar-hole repair failed: %1").arg(QString::fromStdString(repairError)));return false;
+        }
+        if(repaired.stats.nonManifoldEdges!=0||(!importAsSurfaceBody&&repaired.stats.boundaryEdges!=0)){
+            setError(error,QStringLiteral("STL mesh is not a closed two-manifold after cleanup (%1 boundary edges, %2 non-manifold edges).")
+                         .arg(static_cast<qulonglong>(repaired.stats.boundaryEdges))
+                         .arg(static_cast<qulonglong>(repaired.stats.nonManifoldEdges)));return false;
+        }
+        BRep_Builder builder;TopoDS_Compound repairedMesh;builder.MakeCompound(repairedMesh);
+        for(const mesh::Triangle& triangle:repaired.triangles){
+            const auto& a=repaired.vertices[triangle.a];const auto& b=repaired.vertices[triangle.b];const auto& c=repaired.vertices[triangle.c];
+            const gp_Pnt pa(a.x,a.y,a.z),pb(b.x,b.y,b.z),pc(c.x,c.y,c.z);
+            BRepBuilderAPI_MakePolygon polygon;polygon.Add(pa);polygon.Add(pb);polygon.Add(pc);polygon.Close();
+            if(!polygon.IsDone()){setError(error,"Could not construct a repaired STL triangle.");return false;}
+            BRepBuilderAPI_MakeFace face(polygon.Wire());
+            if(!face.IsDone()){setError(error,"Could not construct a repaired STL triangle face.");return false;}
+            builder.Add(repairedMesh,face.Face());
+        }
+        BRepBuilderAPI_Sewing sewing(weldToleranceMm,true,true,true,false);sewing.Add(repairedMesh);sewing.Perform();
         const TopoDS_Shape stitched=sewing.SewedShape();if(stitched.IsNull()){setError(error,"STL facets could not be sewn into a closed surface.");return false;}
-        TopoDS_Compound solids;BRep_Builder builder;builder.MakeCompound(solids);int solidCount=0;
+        const MeshImportSummary summary=summarizeMeshRepair(repaired.stats);
+        if(importAsSurfaceBody){
+            QVector<TopoDS_Shell> shells;
+            for(TopExp_Explorer explorer(stitched,TopAbs_SHELL);explorer.More();explorer.Next())shells.append(TopoDS::Shell(explorer.Current()));
+            if(shells.isEmpty()&&stitched.ShapeType()==TopAbs_FACE){
+                TopoDS_Shell shell;builder.MakeShell(shell);builder.Add(shell,stitched);shells.append(shell);
+            }
+            if(shells.isEmpty()){setError(error,"Repaired STL facets did not produce a surface shell.");return false;}
+            if(parts_.size()+shells.size()>kMaxObjects){setError(error,"STL surface import would exceed the scene body limit.");return false;}
+            QVector<Part> surfaceParts;surfaceParts.reserve(shells.size());
+            const QString base=info.completeBaseName().trimmed().isEmpty()?QStringLiteral("Imported STL"):info.completeBaseName();
+            for(qsizetype i=0;i<shells.size();++i){
+                QString validationError;
+                if(!validSurfaceBodyShape(shells[i],&validationError)){
+                    setError(error,QStringLiteral("STL surface component %1 is invalid: %2").arg(i+1).arg(validationError));return false;
+                }
+                const QString name=shells.size()==1?base:QStringLiteral("%1 Surface %2").arg(base).arg(i+1);
+                Part part{generatedId(),uniqueName(name),shells[i],true,"#6c9dc2"};part.isSurfaceBody=true;
+                surfaceParts.append(std::move(part));
+            }
+            checkpoint();for(Part& part:surfaceParts)parts_.append(std::move(part));
+            if(repairSummary){*repairSummary=summary;repairSummary->importedAsSurfaceBody=true;}
+            return true;
+        }
+        TopoDS_Compound solids;builder.MakeCompound(solids);int solidCount=0;
         for(TopExp_Explorer explorer(stitched,TopAbs_SOLID);explorer.More();explorer.Next()){
             const TopoDS_Shape solid=explorer.Current();if(!validShape(solid,error))return false;builder.Add(solids,solid);++solidCount;
         }
@@ -4847,34 +6787,43 @@ bool SceneDocument::importSTL(const QString& path,double weldToleranceMm,QString
                 BRepBuilderAPI_MakeSolid makeSolid(shell);
                 if(!makeSolid.IsDone()){setError(error,"Closed STL shell could not be converted to a faceted solid.");return false;}
                 TopoDS_Solid solid=makeSolid.Solid();
-                if(!BRepLib::OrientClosedSolid(solid)||!validShape(solid,error))return false;
+                if(!BRepLib::OrientClosedSolid(solid)){setError(error,"Closed STL shell could not be consistently oriented.");return false;}
+                if(!validShape(solid,error))return false;
                 builder.Add(solids,solid);++solidCount;
             }
         }
         if(solidCount==0||!validShape(solids,error)){if(error&&error->isEmpty())setError(error,"STL file contains no closed solid mesh.");return false;}
         Part part{generatedId(),uniqueName(info.completeBaseName().trimmed().isEmpty()?QStringLiteral("Imported STL"):info.completeBaseName()),solids,true,"#6c9dc2"};
-        checkpoint();parts_.append(std::move(part));return true;
+        checkpoint();parts_.append(std::move(part));if(repairSummary)*repairSummary=summary;return true;
     }catch(const Standard_Failure& e){setError(error,QStringLiteral("STL import kernel error: %1").arg(e.what()));}
     catch(const std::exception& e){setError(error,QString::fromUtf8(e.what()));}
     return false;
 }
 
-bool SceneDocument::importOBJ(const QString& path,double weldToleranceMm,QString* error) {
+bool SceneDocument::importOBJ(const QString& path,double weldToleranceMm,QString* error,
+                              MeshImportSummary* repairSummary,bool fillPlanarHoles,bool importAsSurfaceBody) {
     if(path.trimmed().isEmpty()){setError(error,"Provide an OBJ file path.");return false;}
     const QFileInfo info(path);
     if(!info.exists()||!info.isFile()||info.size()<=0){setError(error,"OBJ file does not exist or is empty.");return false;}
     if(info.size()>kMaxStlImportBytes){setError(error,"OBJ file exceeds the 512 MiB import limit.");return false;}
     if(!std::isfinite(weldToleranceMm)||weldToleranceMm<1e-6||weldToleranceMm>1.0){setError(error,"OBJ weld tolerance must be between 0.000001 and 1 mm.");return false;}
+    if(fillPlanarHoles&&importAsSurfaceBody){setError(error,"Choose either planar-hole filling for a solid or open surface-body import.");return false;}
     if(parts_.size()>=kMaxObjects){setError(error,"Scene object limit reached.");return false;}
     QFile file(path);if(!file.open(QIODevice::ReadOnly|QIODevice::Text)){setError(error,file.errorString());return false;}
     try{
         QVector<gp_Pnt> vertices;vertices.reserve(1024);
-        TopoDS_Compound triangles;BRep_Builder builder;builder.MakeCompound(triangles);
+        std::vector<mesh::Triangle> sourceTriangles;
+        BRep_Builder builder;
         QTextStream input(&file);input.setLocale(QLocale::c());
         const QRegularExpression whitespace(QStringLiteral("\\s+"));
         qsizetype triangleCount=0;int lineNumber=0;
         while(!input.atEnd()){
-            const QString line=input.readLine().trimmed();++lineNumber;
+            QString line=input.readLine();++lineNumber;
+            // OBJ comments may follow data on the same line (for example, a face
+            // followed by an exporter annotation). Strip them before tokenizing.
+            const qsizetype commentStart=line.indexOf('#');
+            if(commentStart>=0)line.truncate(commentStart);
+            line=line.trimmed();
             if(line.isEmpty()||line.startsWith('#'))continue;
             const QStringList fields=line.split(whitespace,Qt::SkipEmptyParts);
             if(fields.first()==QStringLiteral("v")){
@@ -4894,19 +6843,67 @@ bool SceneDocument::importOBJ(const QString& path,double weldToleranceMm,QString
                 }
                 for(int corner=1;corner+1<indices.size();++corner){
                     if(++triangleCount>5000000){setError(error,"OBJ mesh exceeds the 5,000,000 triangle limit.");return false;}
-                    const gp_Pnt& a=vertices[indices[0]],&b=vertices[indices[corner]],&c=vertices[indices[corner+1]];
-                    if(gp_Vec(a,b).Crossed(gp_Vec(a,c)).SquareMagnitude()<=1e-18){setError(error,QStringLiteral("OBJ face at line %1 contains a degenerate triangle.").arg(lineNumber));return false;}
-                    BRepBuilderAPI_MakePolygon polygon;polygon.Add(a);polygon.Add(b);polygon.Add(c);polygon.Close();
-                    if(!polygon.IsDone()){setError(error,QStringLiteral("Could not construct OBJ triangle at line %1.").arg(lineNumber));return false;}
-                    BRepBuilderAPI_MakeFace face(polygon.Wire());
-                    if(!face.IsDone()){setError(error,QStringLiteral("Could not construct OBJ triangle face at line %1.").arg(lineNumber));return false;}
-                    builder.Add(triangles,face.Face());
+                    sourceTriangles.push_back({static_cast<std::uint32_t>(indices[0]),
+                                               static_cast<std::uint32_t>(indices[corner]),
+                                               static_cast<std::uint32_t>(indices[corner+1])});
                 }
             }
         }
-        if(vertices.size()<3||triangleCount<4){setError(error,"OBJ file contains too few vertices or faces to form a closed solid.");return false;}
+        if(vertices.size()<3||triangleCount<(importAsSurfaceBody?1:4)){
+            setError(error,importAsSurfaceBody?"OBJ file contains too few vertices or facets to form a surface body."
+                                              :"OBJ file contains too few vertices or faces to form a closed solid.");return false;
+        }
+        std::vector<mesh::Point3> sourcePoints;sourcePoints.reserve(static_cast<std::size_t>(vertices.size()));
+        for(const gp_Pnt& point:vertices)sourcePoints.push_back({point.X(),point.Y(),point.Z()});
+        mesh::RepairResult repaired;std::string repairError;
+        if(!mesh::repairTriangleMesh(sourcePoints,sourceTriangles,weldToleranceMm,&repaired,&repairError)){
+            setError(error,QStringLiteral("OBJ mesh repair failed: %1").arg(QString::fromStdString(repairError)));return false;
+        }
+        if(fillPlanarHoles&&!mesh::fillPlanarBoundaryHoles(&repaired,weldToleranceMm,64,&repairError)){
+            setError(error,QStringLiteral("OBJ planar-hole repair failed: %1").arg(QString::fromStdString(repairError)));return false;
+        }
+        if(repaired.triangles.empty()||(!importAsSurfaceBody&&repaired.triangles.size()<4)||
+           repaired.stats.nonManifoldEdges!=0||(!importAsSurfaceBody&&repaired.stats.boundaryEdges!=0)){
+            setError(error,QStringLiteral("OBJ mesh is not a closed two-manifold after cleanup (%1 boundary edges, %2 non-manifold edges).")
+                         .arg(static_cast<qulonglong>(repaired.stats.boundaryEdges))
+                         .arg(static_cast<qulonglong>(repaired.stats.nonManifoldEdges)));return false;
+        }
+        TopoDS_Compound triangles;builder.MakeCompound(triangles);
+        for(const mesh::Triangle& triangle:repaired.triangles){
+            const auto& a=repaired.vertices[triangle.a];const auto& b=repaired.vertices[triangle.b];const auto& c=repaired.vertices[triangle.c];
+            const gp_Pnt pa(a.x,a.y,a.z),pb(b.x,b.y,b.z),pc(c.x,c.y,c.z);
+            BRepBuilderAPI_MakePolygon polygon;polygon.Add(pa);polygon.Add(pb);polygon.Add(pc);polygon.Close();
+            if(!polygon.IsDone()){setError(error,"Could not construct a repaired OBJ triangle.");return false;}
+            BRepBuilderAPI_MakeFace face(polygon.Wire());
+            if(!face.IsDone()){setError(error,"Could not construct a repaired OBJ triangle face.");return false;}
+            builder.Add(triangles,face.Face());
+        }
         BRepBuilderAPI_Sewing sewing(weldToleranceMm,true,true,true,false);sewing.Add(triangles);sewing.Perform();
         const TopoDS_Shape stitched=sewing.SewedShape();if(stitched.IsNull()){setError(error,"OBJ facets could not be sewn into a closed surface.");return false;}
+        const MeshImportSummary summary=summarizeMeshRepair(repaired.stats);
+        if(importAsSurfaceBody){
+            QVector<TopoDS_Shell> shells;
+            for(TopExp_Explorer explorer(stitched,TopAbs_SHELL);explorer.More();explorer.Next())shells.append(TopoDS::Shell(explorer.Current()));
+            if(shells.isEmpty()&&stitched.ShapeType()==TopAbs_FACE){
+                TopoDS_Shell shell;builder.MakeShell(shell);builder.Add(shell,stitched);shells.append(shell);
+            }
+            if(shells.isEmpty()){setError(error,"Repaired OBJ facets did not produce a surface shell.");return false;}
+            if(parts_.size()+shells.size()>kMaxObjects){setError(error,"OBJ surface import would exceed the scene body limit.");return false;}
+            QVector<Part> surfaceParts;surfaceParts.reserve(shells.size());
+            const QString base=info.completeBaseName().trimmed().isEmpty()?QStringLiteral("Imported OBJ"):info.completeBaseName();
+            for(qsizetype i=0;i<shells.size();++i){
+                QString validationError;
+                if(!validSurfaceBodyShape(shells[i],&validationError)){
+                    setError(error,QStringLiteral("OBJ surface component %1 is invalid: %2").arg(i+1).arg(validationError));return false;
+                }
+                const QString name=shells.size()==1?base:QStringLiteral("%1 Surface %2").arg(base).arg(i+1);
+                Part part{generatedId(),uniqueName(name),shells[i],true,"#6c9dc2"};part.isSurfaceBody=true;
+                surfaceParts.append(std::move(part));
+            }
+            checkpoint();for(Part& part:surfaceParts)parts_.append(std::move(part));
+            if(repairSummary){*repairSummary=summary;repairSummary->importedAsSurfaceBody=true;}
+            return true;
+        }
         TopoDS_Compound solids;builder.MakeCompound(solids);int solidCount=0;
         for(TopExp_Explorer explorer(stitched,TopAbs_SOLID);explorer.More();explorer.Next()){
             const TopoDS_Shape solid=explorer.Current();if(!validShape(solid,error))return false;builder.Add(solids,solid);++solidCount;
@@ -4922,7 +6919,7 @@ bool SceneDocument::importOBJ(const QString& path,double weldToleranceMm,QString
         }
         if(solidCount==0||!validShape(solids,error)){if(error&&error->isEmpty())setError(error,"OBJ file contains no closed solid mesh.");return false;}
         Part part{generatedId(),uniqueName(info.completeBaseName().trimmed().isEmpty()?QStringLiteral("Imported OBJ"):info.completeBaseName()),solids,true,"#6c9dc2"};
-        checkpoint();parts_.append(std::move(part));return true;
+        checkpoint();parts_.append(std::move(part));if(repairSummary)*repairSummary=summary;return true;
     }catch(const Standard_Failure& e){setError(error,QStringLiteral("OBJ mesh kernel error: %1").arg(e.what()));}
     catch(const std::exception& e){setError(error,QString::fromUtf8(e.what()));}
     return false;

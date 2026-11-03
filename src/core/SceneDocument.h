@@ -1,5 +1,8 @@
 #pragma once
 
+#include "SheetMetal.h"
+#include "SketchSolver.h"
+
 #include <QString>
 #include <QStringList>
 #include <QMap>
@@ -17,12 +20,24 @@ struct DrawingNoteAnnotation {
     QString text;
     double xMm = 12.0;
     double yMm = 180.0;
+    bool operator==(const DrawingNoteAnnotation& other) const = default;
 };
 
 struct DrawingDimensionAnnotation {
     QString id;
     QString axis;
     double offsetMm = 9.0;
+    bool operator==(const DrawingDimensionAnnotation& other) const = default;
+};
+
+struct DrawingEdgeDimensionAnnotation {
+    QString id;
+    QString sourceBodyId;
+    QString sourceGeometryToken;
+    int edgeIndex = 0;
+    QString view = QStringLiteral("TOP");
+    double offsetMm = 9.0;
+    bool operator==(const DrawingEdgeDimensionAnnotation& other) const = default;
 };
 
 struct DrawingPartsListAnnotation {
@@ -30,6 +45,7 @@ struct DrawingPartsListAnnotation {
     bool visible = false;
     double xMm = 12.0;
     double yMm = 12.0;
+    bool operator==(const DrawingPartsListAnnotation& other) const = default;
 };
 
 struct DrawingBalloonAnnotation {
@@ -37,6 +53,7 @@ struct DrawingBalloonAnnotation {
     QString sourceBodyId;
     double xMm = 250.0;
     double yMm = 170.0;
+    bool operator==(const DrawingBalloonAnnotation& other) const = default;
 };
 
 struct DrawingDetailAnnotation {
@@ -48,6 +65,7 @@ struct DrawingDetailAnnotation {
     double xMm = 240.0;
     double yMm = 85.0;
     double radiusMm = 20.0;
+    bool operator==(const DrawingDetailAnnotation& other) const = default;
 };
 
 struct DrawingSectionAnnotation {
@@ -56,17 +74,22 @@ struct DrawingSectionAnnotation {
     double depthFraction = 0.5;
     double xMm = 240.0;
     double yMm = 145.0;
+    bool operator==(const DrawingSectionAnnotation& other) const = default;
 };
 
 struct DrawingSheetSettings {
     // Persistent sheet/view identities and editable projected-view centers (paper mm).
     QString sheetId;
     QString sourceGeometryToken;
+    // Separate from geometry: linked BOM rows can become stale when only part
+    // metadata or assigned material changes.
+    QString sourceDataToken;
     QStringList sourceBodyIds;
     QMap<QString,QString> viewIds;
     QMap<QString,QPointF> viewCenters;
     QVector<DrawingNoteAnnotation> noteAnnotations;
     QVector<DrawingDimensionAnnotation> dimensionAnnotations;
+    QVector<DrawingEdgeDimensionAnnotation> edgeDimensionAnnotations;
     DrawingPartsListAnnotation partsListAnnotation;
     QVector<DrawingBalloonAnnotation> balloonAnnotations;
     QVector<DrawingDetailAnnotation> detailAnnotations;
@@ -81,11 +104,31 @@ struct DrawingSheetSettings {
     QString checkedBy;
     QString issueDate;
     QString revision;
+    bool operator==(const DrawingSheetSettings& other) const = default;
 };
 
 struct JointMotionKeyframe {
     double timeSeconds = 0.0;
     double value = 0.0; // degrees for revolute joints, millimetres for prismatic joints
+};
+
+// Optional values are not engineering-certified; zero modulus means unknown.
+struct MaterialEngineeringData {
+    QString provenance;
+    double youngsModulusGPa = 0.0;
+};
+
+struct MaterialLibraryEntry {
+    QString name;
+    double densityKgPerM3 = 0.0;
+    MaterialEngineeringData engineering;
+};
+
+// A directed, dimension-only dependency: target = source * scale + offset.
+struct ParameterLink {
+    QString source;
+    double scale = 1.0;
+    double offset = 0.0;
 };
 
 struct Part {
@@ -99,6 +142,7 @@ struct Part {
     QString geometryToken = QUuid::createUuid().toString(QUuid::WithoutBraces);
     QString materialName;
     double materialDensityKgPerM3 = 0.0;
+    MaterialEngineeringData materialEngineering;
     QString partNumber;
     QString description;
     QString revision;
@@ -108,11 +152,21 @@ struct Part {
     QString supplierPartNumber;
     // Persistent assembly identity. Bodies with the same definition ID are reusable component occurrences.
     QString componentDefinitionId;
+    bool hasFoldedSheetMetalDefinition = false;
+    QString foldedSheetGeometryToken;
+    QVector<double> foldedSheetFlangesMm;
+    double foldedSheetWidthMm = 0.0;
+    double foldedSheetThicknessMm = 0.0;
+    QVector<FoldedSheetBend> foldedSheetBends;
     QString componentName;
     QString occurrenceId;
     double placementX = 0.0;
     double placementY = 0.0;
     double placementZ = 0.0;
+    // Optional v19 placement extension for free occurrences only; about world Z.
+    double placementYawDegrees = 0.0;
+    double placementPitchDegrees = 0.0;
+    double placementRollDegrees = 0.0;
     QString assemblyJointType;
     QString assemblyJointParentBodyId;
     double jointOriginX = 0.0, jointOriginY = 0.0, jointOriginZ = 0.0;
@@ -128,9 +182,20 @@ struct Part {
     bool hasParametricDefinition = false;
     QString parametricGeometryToken;
     QMap<QString,double> namedParameters;
+    QMap<QString,ParameterLink> parameterLinks;
     QStringList sketchConstraints;
     QStringList featureHistory;
+    // Stable operation keys for the optional features hidden from the rebuilt result.
+    QStringList suppressedParametricFeatures;
     QString holePatternAxis = QStringLiteral("X");
+    bool hasConstrainedPolygonDefinition = false;
+    SketchModel constrainedPolygonSketch;
+    QStringList constrainedPolygonBoundary;
+    double constrainedPolygonDepthMm = 0.0;
+    QString constrainedPolygonGeometryToken;
+    // True for a persisted surface-only face/shell body. Solid modeling
+    // features continue to require a solid and reject these bodies.
+    bool isSurfaceBody = false;
 };
 
 enum class DrawingSourceState { NoSavedSheet, Current, Stale, MissingBodies };
@@ -140,6 +205,8 @@ struct DrawingSheetSourceStatus {
     QStringList missingSourceBodyIds;
     QString storedGeometryToken;
     QString currentGeometryToken;
+    QString storedDataToken;
+    QString currentDataToken;
 };
 
 struct BillOfMaterialsRow {
@@ -160,6 +227,7 @@ struct BillOfMaterialsRow {
     QString componentDefinitionId;
     QString componentName;
     QStringList bodyIds;
+    MaterialEngineeringData materialEngineering;
 };
 
 struct PartsListRow {
@@ -183,6 +251,7 @@ struct PartsListRow {
     double placementX = 0.0;
     double placementY = 0.0;
     double placementZ = 0.0;
+    MaterialEngineeringData materialEngineering;
 };
 
 enum class StandardsProfile { BomData, IsoDrawingReadiness, AsmeDrawingReadiness };
@@ -218,11 +287,37 @@ struct MinimumDistanceResult {
     double secondZ = 0.0;
 };
 
+// Summary of the cleanup applied to an imported triangle mesh. It is written
+// only after the solid import succeeds, so callers retain prior values on error.
+struct MeshImportSummary {
+    quint64 inputVertices = 0;
+    quint64 outputVertices = 0;
+    quint64 inputTriangles = 0;
+    quint64 outputTriangles = 0;
+    quint64 weldedVertices = 0;
+    quint64 removedDegenerateTriangles = 0;
+    quint64 removedDuplicateTriangles = 0;
+    quint64 reorientedTriangles = 0;
+    quint64 filledHoles = 0;
+    quint64 filledHoleTriangles = 0;
+    quint64 boundaryEdges = 0;
+    quint64 nonManifoldEdges = 0;
+    bool importedAsSurfaceBody = false;
+    bool operator==(const MeshImportSummary& other) const = default;
+};
+
 struct InterferenceResult {
     double volume = 0.0;
     double centroidX = 0.0;
     double centroidY = 0.0;
     double centroidZ = 0.0;
+};
+
+struct MotionInterferenceSample {
+    double timeSeconds = 0.0;
+    double overlapVolumeMm3 = 0.0;
+    bool interfering = false;
+    bool operator==(const MotionInterferenceSample& other) const = default;
 };
 
 struct BodyDiagnostics {
@@ -629,6 +724,23 @@ public:
     bool setDrawingReadinessPolicy(const DrawingReadinessPolicy& policy,QString* error = nullptr);
 
     bool addPrimitive(Primitive kind, const QVector<double>& dimensions, QString* error = nullptr);
+    bool addSurfaceBody(const QString& name,const TopoDS_Shape& shape,QString* error = nullptr);
+    bool thickenSurfaceBody(const QString& surfaceBodyId,double thicknessMm,QString* error = nullptr);
+    bool stitchSurfaceBodies(const QStringList& surfaceBodyIds,double toleranceMm,QString* error = nullptr);
+    bool sewSurfaceBodies(const QStringList& surfaceBodyIds,double toleranceMm,QString* error = nullptr);
+    bool trimSurfaceBody(const QString& surfaceBodyId,const QString& cutterSolidId,
+                         bool keepInsideCutter,QString* error = nullptr);
+    bool splitSurfaceBodyBySolid(const QString& surfaceBodyId,const QString& cutterSolidId,
+                                 QString* error = nullptr);
+    bool addFoldedSheetMetal(const QVector<double>& straightFlangeLengthsMm,double sheetWidthMm,
+                             double thicknessMm,const QVector<FoldedSheetBend>& bends,
+                             QString* error = nullptr);
+    bool foldedSheetMetalDefinition(const QString& partId,QVector<double>* straightFlangeLengthsMm,
+                                    double* sheetWidthMm,double* thicknessMm,
+                                    QVector<FoldedSheetBend>* bends,bool* current = nullptr) const;
+    bool editFoldedSheetMetal(const QString& partId,const QVector<double>& straightFlangeLengthsMm,
+                              double sheetWidthMm,double thicknessMm,const QVector<FoldedSheetBend>& bends,
+                              QString* error = nullptr);
     bool addEngineeringPart(EngineeringPart kind, const QVector<double>& dimensions, QString* error = nullptr);
     bool addAdvancedPart(AdvancedPart kind, const QVector<double>& dimensions, QString* error = nullptr);
     bool addSpecializedPart(SpecializedPart kind, const QVector<double>& dimensions, QString* error = nullptr);
@@ -675,7 +787,17 @@ public:
     bool duplicate(const QString& id, double dx, double dy, double dz, QString* error = nullptr);
     bool makeComponent(const QString& id,const QString& componentName,QString* error = nullptr);
     bool insertComponentOccurrence(const QString& sourceBodyId,double x,double y,double z,QString* error = nullptr);
+    // Absolute world-Z yaw about the occurrence's XYZ pivot; no joints/descendants.
+    bool setFreeOccurrenceYaw(const QString& bodyId,double degrees,QString* error = nullptr);
+    bool setFreeOccurrenceOrientation(const QString& bodyId,double rollDegrees,double pitchDegrees,
+                                      double yawDegrees,QString* error = nullptr);
     bool synchronizeComponentOccurrences(const QString& sourceBodyId,QString* error = nullptr);
+    bool linearPatternComponentOccurrences(const QString& sourceBodyId,int instanceCount,
+                                          double spacingX,double spacingY,double spacingZ,
+                                          QString* error = nullptr);
+    bool circularPatternComponentOccurrences(const QString& sourceBodyId,int instanceCount,
+                                             double centerX,double centerY,double centerZ,
+                                             double angleStepDegrees,QString* error = nullptr);
     bool addRigidJoint(const QString& parentBodyId,const QString& childBodyId,QString* error = nullptr);
     bool addRevoluteJoint(const QString& parentBodyId,const QString& childBodyId,
                           double originX,double originY,double originZ,double axisX,double axisY,double axisZ,
@@ -691,18 +813,44 @@ public:
     bool setJointMotionKeyframes(const QString& childBodyId,const QVector<JointMotionKeyframe>& keyframes,
                                  QString* error = nullptr);
     bool evaluateAssemblyMotionStudy(double timeSeconds,QString* error = nullptr);
+    bool scanAssemblyMotionInterference(const QString& firstId,const QString& secondId,
+                                        double startSeconds,double endSeconds,int sampleCount,
+                                        QVector<MotionInterferenceSample>* samples,QString* error = nullptr) const;
+    // Resolve defaults and validate saved view/annotation links without an undo checkpoint.
+    bool prepareDrawingSheetSettings(const QString& partId,const DrawingSheetSettings& settings,
+                                     DrawingSheetSettings* prepared,QString* error = nullptr) const;
     bool setDrawingSheetSettings(const QString& partId,const DrawingSheetSettings& settings,QString* error = nullptr);
     DrawingSheetSourceStatus drawingSheetSourceStatus(const QString& partId) const;
+    QString drawingSourceDataToken(const QStringList& sourceBodyIds,QString* error = nullptr) const;
     bool refreshDrawingSheetSource(const QString& partId,QString* error = nullptr);
     bool addParametricRectangularExtrusion(double width,double height,double depth,QString* error = nullptr);
+    bool addConstrainedPolygonExtrusion(const SketchModel& sketch,const QStringList& boundaryPointIds,
+                                        double depth,QString* error = nullptr);
+    bool updateConstrainedPolygonExtrusion(const QString& partId,const SketchModel& sketch,
+                                           const QStringList& boundaryPointIds,double depth,QString* error = nullptr);
     bool addParametricRectangularExtrusionAt(double originX,double originY,double width,double height,double depth,QString* error = nullptr);
     bool addParametricThroughHole(const QString& partId,double diameter,double centerX,double centerY,QString* error = nullptr);
+    bool addParametricBlindHole(const QString& partId,double diameter,double centerX,double centerY,
+                                double holeDepthMm,QString* error = nullptr);
     bool addParametricLinearHolePattern(const QString& partId,int holeCount,double spacingMm,QString* error = nullptr);
     bool addParametricLinearHolePattern(const QString& partId,int holeCount,double spacingMm,
                                         const QString& axis,QString* error = nullptr);
+    bool addParametricAllEdgeChamfer(const QString& partId,double distanceMm,QString* error = nullptr);
+    bool addParametricAllEdgeFillet(const QString& partId,double radiusMm,QString* error = nullptr);
+    bool setParameterLink(const QString& partId,const QString& target,const QString& source,
+                          double scale,QString* error = nullptr);
+    bool setParameterLink(const QString& partId,const QString& target,const QString& source,
+                          double scale,double offset,QString* error = nullptr);
+    bool removeParameterLink(const QString& partId,const QString& target,QString* error = nullptr);
+    QMap<QString,ParameterLink> parameterLinks(const QString& partId) const;
     bool setNamedParameter(const QString& partId,const QString& parameterName,double value,QString* error = nullptr);
     bool setNamedParameters(const QString& partId,const QMap<QString,double>& values,QString* error = nullptr);
     QMap<QString,double> namedParameters(const QString& partId) const;
+    bool setParametricFeatureSuppressed(const QString& partId,const QString& featureId,bool suppressed,
+                                        QString* error = nullptr);
+    bool setParametricFeaturesSuppressed(const QString& partId,const QStringList& featureIds,
+                                         QString* error = nullptr);
+    QStringList suppressedParametricFeatures(const QString& partId) const;
     QStringList sketchConstraints(const QString& partId) const;
     QStringList featureHistory(const QString& partId) const;
     bool parametricDefinitionCurrent(const QString& partId) const;
@@ -866,6 +1014,10 @@ public:
                      QString* error = nullptr);
     bool setMaterial(const QStringList& ids,const QString& materialName,double densityKgPerM3,
                      QString* error = nullptr);
+    bool setMaterialEngineering(const QStringList& ids, const QString& provenance,
+                                double youngsModulusGPa, QString* error = nullptr);
+    // Derived, document-local list of assigned distinct material records; no global DB.
+    QVector<MaterialLibraryEntry> documentMaterialLibrary() const;
     bool erase(const QString& id, QString* error = nullptr);
     bool eraseMany(const QStringList& ids, QString* error = nullptr);
     void clear();
@@ -878,8 +1030,12 @@ public:
     bool load(const QString& path, QString* error = nullptr);
     bool importSTEP(const QString& path, QString* error = nullptr);
     bool importIGES(const QString& path,QString* error = nullptr);
-    bool importOBJ(const QString& path,double weldToleranceMm = 0.01,QString* error = nullptr);
-    bool importSTL(const QString& path,double weldToleranceMm = 0.01,QString* error = nullptr);
+    bool importOBJ(const QString& path,double weldToleranceMm = 0.01,QString* error = nullptr,
+                   MeshImportSummary* repairSummary = nullptr,bool fillPlanarHoles = false,
+                   bool importAsSurfaceBody = false);
+    bool importSTL(const QString& path,double weldToleranceMm = 0.01,QString* error = nullptr,
+                   MeshImportSummary* repairSummary = nullptr,bool fillPlanarHoles = false,
+                   bool importAsSurfaceBody = false);
     bool exportSTEP(const QString& path, QString* error = nullptr) const;
     bool exportIGES(const QString& path,QString* error = nullptr) const;
     bool exportSTL(const QString& path, QString* error = nullptr) const;
@@ -899,6 +1055,7 @@ public:
     StandardsCheckReport checkStandards(StandardsProfile profile) const;
 
 private:
+    QVector<BillOfMaterialsRow> buildBillOfMaterials(const QStringList& bodyIds, QString* error) const;
     struct Snapshot { QVector<Part> parts; DrawingReadinessPolicy drawingReadinessPolicy; quint64 revision; };
     QVector<Part> parts_;
     DrawingReadinessPolicy drawingReadinessPolicy_;
@@ -909,6 +1066,9 @@ private:
     quint64 savedRevision_ = 0;
     quint64 nextRevision_ = 1;
     void checkpoint();
+    bool setNamedParametersWithLinks(const QString& partId,const QMap<QString,double>& values,
+                                     const QMap<QString,ParameterLink>& links,bool allowEmpty,
+                                     QString* error);
     QString uniqueName(const QString& base) const;
     static bool validShape(const TopoDS_Shape& shape, QString* error);
     bool addSweepProfile(bool circular,bool elliptical,double width,double height,double pathLength,double lateralOffset,

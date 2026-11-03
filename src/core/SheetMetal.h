@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QPointF>
 #include <QString>
 #include <QVector>
 
@@ -26,6 +27,20 @@ struct SheetMetalBend {
     double kFactor = 0.33;
 };
 
+// Signed angle controls the fold direction; flange lengths are straight
+// lengths along the neutral surface. The folded model is faceted at bends.
+struct FoldedSheetBend {
+    double angleDegrees = 90.0;
+    double insideRadiusMm = 1.5;
+};
+
+// Returns a closed XY cross-section outline for extrusion through sheetWidth.
+// Bend arcs are sampled to keep the resulting solid portable across kernels.
+bool buildFoldedSheetOutline(const QVector<double>& straightFlangeLengthsMm,
+                             double sheetWidthMm,double thicknessMm,
+                             const QVector<FoldedSheetBend>& bends,
+                             QVector<QPointF>* outline,QString* error = nullptr);
+
 struct MultiBendFlatPattern {
     double flatLengthMm = 0.0;
     double widthMm = 0.0;
@@ -38,6 +53,25 @@ struct SheetMetalRelief {
     double widthMm = 0.0; // zero disables end reliefs
     double depthMm = 0.0;
 };
+
+// Optional shop-specific rule checks, disabled individually at zero.
+// These are user-supplied planning limits, not certification requirements.
+struct SheetMetalShopLimits {
+    double minimumInsideRadiusToThickness = 0.0;
+    double minimumStraightFlangeMm = 0.0; // after adjacent bend setbacks
+};
+
+// Checks a valid multi-bend development against user-supplied shop limits.
+// Does not generate a folded solid or impose material/tooling standards.
+bool validateMultiBendShopLimits(const QVector<double>& outsideFlangeLengthsMm,
+                                 double sheetWidthMm,double thicknessMm,
+                                 const QVector<SheetMetalBend>& bends,
+                                 const SheetMetalShopLimits& limits,
+                                 QString* error = nullptr);
+
+// Parses comma-separated numeric inputs without discarding empty fields.
+// Invalid input leaves the caller's existing vector unchanged.
+bool parseSheetMetalNumberList(const QString& text,QVector<double>* values,QString* error = nullptr);
 
 // Calculates a single-bend flat length from outside flange dimensions. This is
 // a shop-planning aid; it does not model bend relief, springback, or tooling.
@@ -75,5 +109,58 @@ bool exportMultiBendFlatPatternDxf(const QVector<double>& outsideFlangeLengthsMm
                                   double thicknessMm,const QVector<SheetMetalBend>& bends,
                                   const SheetMetalRelief& relief,const QString& path,
                                   MultiBendFlatPattern* result = nullptr,QString* error = nullptr);
+
+// Develops saved folded-body centerline flange lengths directly. Signed fold
+// directions are preserved in the model but use absolute bend angles for the
+// flat; one uniform user-selected K-factor is applied to all bends.
+bool calculateFoldedSheetFlatPattern(const QVector<double>& straightNeutralFlangeLengthsMm,
+                                     double sheetWidthMm,double thicknessMm,
+                                     const QVector<FoldedSheetBend>& bends,double kFactor,
+                                     MultiBendFlatPattern* result,QString* error = nullptr);
+bool calculateFoldedSheetFlatPattern(const QVector<double>& straightNeutralFlangeLengthsMm,
+                                     double sheetWidthMm,double thicknessMm,
+                                     const QVector<FoldedSheetBend>& bends,const QVector<double>& kFactors,
+                                     MultiBendFlatPattern* result,QString* error = nullptr);
+bool buildFoldedSheetFlatPatternDxf(const QVector<double>& straightNeutralFlangeLengthsMm,
+                                   double sheetWidthMm,double thicknessMm,
+                                   const QVector<FoldedSheetBend>& bends,double kFactor,
+                                   QByteArray* dxf,MultiBendFlatPattern* result = nullptr,
+                                   QString* error = nullptr);
+bool buildFoldedSheetFlatPatternDxf(const QVector<double>& straightNeutralFlangeLengthsMm,
+                                   double sheetWidthMm,double thicknessMm,
+                                   const QVector<FoldedSheetBend>& bends,const QVector<double>& kFactors,
+                                   QByteArray* dxf,MultiBendFlatPattern* result = nullptr,
+                                   QString* error = nullptr);
+bool buildFoldedSheetFlatPatternDxf(const QVector<double>& straightNeutralFlangeLengthsMm,
+                                   double sheetWidthMm,double thicknessMm,
+                                   const QVector<FoldedSheetBend>& bends,const QVector<double>& kFactors,
+                                   const SheetMetalRelief& relief,QByteArray* dxf,
+                                   MultiBendFlatPattern* result = nullptr,QString* error = nullptr);
+bool exportFoldedSheetFlatPatternDxf(const QVector<double>& straightNeutralFlangeLengthsMm,
+                                    double sheetWidthMm,double thicknessMm,
+                                    const QVector<FoldedSheetBend>& bends,double kFactor,
+                                    const QString& path,MultiBendFlatPattern* result = nullptr,
+                                    QString* error = nullptr);
+
+// Bend schedule for a folded body. Stations match the developed DXF and signed
+// angles retain the modeled fold direction.
+bool buildFoldedSheetBendTableCsv(const QVector<double>& straightNeutralFlangeLengthsMm,
+                                  double sheetWidthMm,double thicknessMm,
+                                  const QVector<FoldedSheetBend>& bends,const QVector<double>& kFactors,
+                                  QByteArray* csv,QString* error = nullptr);
+bool exportFoldedSheetBendTableCsv(const QVector<double>& straightNeutralFlangeLengthsMm,
+                                   double sheetWidthMm,double thicknessMm,
+                                   const QVector<FoldedSheetBend>& bends,const QVector<double>& kFactors,
+                                   const QString& path,QString* error = nullptr);
+bool exportFoldedSheetFlatPatternDxf(const QVector<double>& straightNeutralFlangeLengthsMm,
+                                    double sheetWidthMm,double thicknessMm,
+                                    const QVector<FoldedSheetBend>& bends,const QVector<double>& kFactors,
+                                    const QString& path,MultiBendFlatPattern* result = nullptr,
+                                    QString* error = nullptr);
+bool exportFoldedSheetFlatPatternDxf(const QVector<double>& straightNeutralFlangeLengthsMm,
+                                    double sheetWidthMm,double thicknessMm,
+                                    const QVector<FoldedSheetBend>& bends,const QVector<double>& kFactors,
+                                    const SheetMetalRelief& relief,const QString& path,
+                                    MultiBendFlatPattern* result = nullptr,QString* error = nullptr);
 
 } // namespace cad

@@ -44,7 +44,9 @@ bool buildOrthographicDrawingSvg(const Part& part, QByteArray* svg, QString* err
                                  const QStringList& sourceBodyIds = {},
                                  const QVector<DrawingBalloonAnnotation>& balloonAnnotations = {},
                                  const QVector<DrawingDetailAnnotation>& detailAnnotations = {},
-                                 const QVector<DrawingSectionAnnotation>& sectionAnnotations = {});
+                                 const QVector<DrawingSectionAnnotation>& sectionAnnotations = {},
+                                 const QVector<DrawingEdgeDimensionAnnotation>& edgeDimensionAnnotations = {},
+                                 const QVector<Part>& sourceBodies = {});
 bool exportOrthographicDrawingSvg(const Part& part, const QString& path, QString* error = nullptr,
                                   OrthographicProjection projection = OrthographicProjection::ThirdAngle,
                                   DrawingSheetSize sheetSize = DrawingSheetSize::A4Landscape,
@@ -62,9 +64,15 @@ bool exportOrthographicDrawingSvg(const Part& part, const QString& path, QString
                                   const QStringList& sourceBodyIds = {},
                                   const QVector<DrawingBalloonAnnotation>& balloonAnnotations = {},
                                   const QVector<DrawingDetailAnnotation>& detailAnnotations = {},
-                                  const QVector<DrawingSectionAnnotation>& sectionAnnotations = {});
+                                  const QVector<DrawingSectionAnnotation>& sectionAnnotations = {},
+                                  const QVector<DrawingEdgeDimensionAnnotation>& edgeDimensionAnnotations = {},
+                                  const QVector<Part>& sourceBodies = {});
 bool exportOrthographicDrawingPdf(const QByteArray& svg,const QString& path,DrawingSheetSize sheetSize,
                                   QString* error = nullptr);
+// Exports the generated sheet as editable DXF line, circle, and text entities.
+// DXF is a detached snapshot; saved model links remain in the native scene.
+bool buildOrthographicDrawingDxf(const QByteArray& svg,QByteArray* dxf,QString* error = nullptr);
+bool exportOrthographicDrawingDxf(const QByteArray& svg,const QString& path,QString* error = nullptr);
 
 // Screens an exported SVG for basic drawing-content readiness. It does not certify compliance.
 StandardsCheckReport checkDrawingSvg(const QByteArray& svg, StandardsProfile profile,

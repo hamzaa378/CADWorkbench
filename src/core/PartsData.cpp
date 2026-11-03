@@ -9,6 +9,7 @@
 #include <QTextStream>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace cad {
 namespace {
@@ -17,10 +18,38 @@ QString csvField(QString value) {
     return QStringLiteral("\"") + value + QStringLiteral("\"");
 }
 QString csvNumber(double value) { return QString::number(value, 'g', 15); }
+// BOM identity must distinguish every representable density, even if CSV rounds it.
+QString identityNumber(double value) {
+    return QString::number(value, 'g', std::numeric_limits<double>::max_digits10);
+}
+// Length-prefix each field so embedded separators cannot alias different BOM records.
+QString bomGroupKey(const QStringList& fields) {
+    QString key;
+    for (const QString& field : fields) {
+        key += QString::number(field.size()) + QLatin1Char(':') + field;
+    }
+    return key;
+}
 QString geometryKey(const BodyDiagnostics& g) {
+    // Rigidly rotated occurrences can differ by a few floating-point ulps in
+    // OCCT mass properties. Compare geometry at a tight relative precision so
+    // those placements still group, while meaningful size/topology changes do not.
+    const QString volume=QString::number(g.volume,'g',10);
+    const QString area=QString::number(g.surfaceArea,'g',10);
     return QStringLiteral("%1|%2|%3|%4|%5|%6|%7")
-        .arg(csvNumber(g.volume), csvNumber(g.surfaceArea))
+        .arg(volume, area)
         .arg(g.solids).arg(g.shells).arg(g.faces).arg(g.edges).arg(g.vertices);
+}
+// BOM metadata is user-provided and may contain '|', ':' or digits. Encode
+// field lengths instead of joining values with an ambiguous delimiter.
+QString bomGroupKey(const QString& kind,const QStringList& fields) {
+    QString key=kind+QLatin1Char(':');
+    for(const QString& field:fields) {
+        key+=QString::number(field.size());
+        key+=QLatin1Char(':');
+        key+=field;
+    }
+    return key;
 }
 bool writeCsvFile(const QString& path, const QByteArray& bytes, QString* error) {
     if (path.trimmed().isEmpty()) { if (error) *error = "Provide a CSV output path."; return false; }
@@ -145,6 +174,7 @@ QVector<PartsListRow> SceneDocument::partsList(QString* error) const {
                          part->procurementType, part->supplier, part->supplierPartNumber};
         row.componentDefinitionId=part->componentDefinitionId;row.componentName=part->componentName;row.occurrenceId=part->occurrenceId;
         row.placementX=part->placementX;row.placementY=part->placementY;row.placementZ=part->placementZ;
+        row.materialEngineering = part->materialEngineering;
         rows.append(std::move(row));
     }
     return rows;
@@ -154,11 +184,16 @@ QVector<BillOfMaterialsRow> SceneDocument::billOfMaterials(QString* error) const
     if(parts_.isEmpty())return {};
     QStringList allBodyIds;allBodyIds.reserve(parts_.size());
     for(const Part& part:parts_)allBodyIds.append(part.id);
-    return billOfMaterials(allBodyIds,error);
+    // A whole-document BOM is not constrained by the drawing source selection cap.
+    return buildBillOfMaterials(allBodyIds,error);
 }
 
 QVector<BillOfMaterialsRow> SceneDocument::billOfMaterials(const QStringList& bodyIds,QString* error) const {
     if(bodyIds.isEmpty()||bodyIds.size()>50){if(error)*error="Choose between one and fifty bodies for a source-scoped BOM.";return {};}
+    return buildBillOfMaterials(bodyIds,error);
+}
+
+QVector<BillOfMaterialsRow> SceneDocument::buildBillOfMaterials(const QStringList& bodyIds,QString* error) const {
     QSet<QString> requestedIds;
     for(const QString& id:bodyIds){
         if(id.trimmed().isEmpty()||requestedIds.contains(id)||!find(id)){
@@ -194,18 +229,30 @@ QVector<BillOfMaterialsRow> SceneDocument::billOfMaterials(const QStringList& bo
             }
             massKg = mass.massKg;
         }
-        const QString group = !source->componentDefinitionId.isEmpty()
-            ? QStringLiteral("COMP:%1|%2|%3|%4|%5|%6|%7|%8|%9|%10|%11")
-                .arg(source->componentDefinitionId, source->assemblyPath.toCaseFolded(), source->partNumber.toCaseFolded(), source->description.toCaseFolded(),
-                     source->revision.toCaseFolded(), source->materialName.toCaseFolded(), csvNumber(source->materialDensityKgPerM3), geometryKey(g),
-                     source->procurementType.toCaseFolded(), source->supplier.toCaseFolded(), source->supplierPartNumber.toCaseFolded())
-            : source->partNumber.isEmpty()
-            ? QStringLiteral("BODY:%1").arg(source->id)
-            : QStringLiteral("PN:%1|%2|%3|%4|%5|%6|%7|%8|%9|%10")
-                .arg(source->assemblyPath.toCaseFolded(), source->partNumber.toCaseFolded(), source->description.toCaseFolded(),
-                     source->revision.toCaseFolded(), source->materialName.toCaseFolded(),
-                     csvNumber(source->materialDensityKgPerM3), geometryKey(g), source->procurementType.toCaseFolded(),
-                     source->supplier.toCaseFolded(), source->supplierPartNumber.toCaseFolded());
+        // Preserve the spelling of fields stored verbatim. The BOM checker treats
+        // case-different descriptions, materials, suppliers, and SKUs as distinct.
+        const QStringList identityFields = {
+            source->assemblyPath.toCaseFolded(), source->partNumber.toCaseFolded(),
+            source->description, source->revision.toCaseFolded(),
+            source->materialName, identityNumber(source->materialDensityKgPerM3),
+            source->materialEngineering.provenance,
+            identityNumber(source->materialEngineering.youngsModulusGPa),
+            geometryKey(g), source->procurementType.toCaseFolded(),
+            source->supplier, source->supplierPartNumber
+        };
+        QString group;
+        if (!source->componentDefinitionId.isEmpty()) {
+            QStringList fields = identityFields;
+            fields.prepend(source->componentDefinitionId);
+            fields.prepend(QStringLiteral("COMP"));
+            group = bomGroupKey(fields);
+        } else if (source->partNumber.isEmpty()) {
+            group = bomGroupKey({QStringLiteral("BODY"), source->id});
+        } else {
+            QStringList fields = identityFields;
+            fields.prepend(QStringLiteral("PN"));
+            group = bomGroupKey(fields);
+        }
         auto it = rowForKey.constFind(group);
         if (it == rowForKey.cend()) {
             BillOfMaterialsRow row;
@@ -214,6 +261,7 @@ QVector<BillOfMaterialsRow> SceneDocument::billOfMaterials(const QStringList& bo
             row.description = source->description;
             row.revision = source->revision;
             row.materialName = source->materialName;
+            row.materialEngineering = source->materialEngineering;
             row.quantity = 1;
             row.unitVolumeMm3 = g.volume;
             row.totalVolumeMm3 = g.volume;
@@ -247,7 +295,7 @@ bool SceneDocument::exportBillOfMaterialsCsv(const QString& path, QString* error
     QByteArray bytes;
     QTextStream out(&bytes, QIODevice::WriteOnly);
     out.setLocale(QLocale::c());
-    out << "Item,Part number,Description,Revision,Material,Quantity,Unit volume (mm^3),Total volume (mm^3),Unit mass (kg),Total mass (kg),Assembly path,Procurement type,Supplier,Supplier part number,Component definition ID,Component name\r\n";
+    out << "Item,Part number,Description,Revision,Material,Quantity,Unit volume (mm^3),Total volume (mm^3),Unit mass (kg),Total mass (kg),Assembly path,Procurement type,Supplier,Supplier part number,Component definition ID,Component name,Material provenance,Young's modulus (GPa)\r\n";
     for (const auto& row : rows) {
         out << row.itemNumber << ',' << csvField(row.partNumber) << ',' << csvField(row.description) << ','
             << csvField(row.revision) << ',' << csvField(row.materialName) << ',' << row.quantity << ','
@@ -255,7 +303,9 @@ bool SceneDocument::exportBillOfMaterialsCsv(const QString& path, QString* error
             << (row.unitMassKg > 0.0 ? csvNumber(row.unitMassKg) : QString()) << ','
             << (row.totalMassKg > 0.0 ? csvNumber(row.totalMassKg) : QString()) << ',' << csvField(row.assemblyPath) << ','
             << csvField(row.procurementType) << ',' << csvField(row.supplier) << ',' << csvField(row.supplierPartNumber) << ','
-            << csvField(row.componentDefinitionId) << ',' << csvField(row.componentName) << "\r\n";
+            << csvField(row.componentDefinitionId) << ',' << csvField(row.componentName) << ','
+            << csvField(row.materialEngineering.provenance) << ','
+            << (row.materialEngineering.youngsModulusGPa>0.0 ? csvNumber(row.materialEngineering.youngsModulusGPa) : QString()) << "\r\n";
     }
     out.flush();
     if (out.status() != QTextStream::Ok) { if (error) *error = "Could not format the BOM CSV."; return false; }
@@ -269,7 +319,7 @@ bool SceneDocument::exportPartsListCsv(const QString& path, QString* error) cons
     QByteArray bytes;
     QTextStream out(&bytes, QIODevice::WriteOnly);
     out.setLocale(QLocale::c());
-    out << "Item,Body ID,Body name,Part number,Description,Revision,Material,Quantity,Volume (mm^3),Mass (kg),Assembly path,Procurement type,Supplier,Supplier part number,Component definition ID,Component name,Occurrence ID,Translation offset X (mm),Translation offset Y (mm),Translation offset Z (mm)\r\n";
+    out << "Item,Body ID,Body name,Part number,Description,Revision,Material,Quantity,Volume (mm^3),Mass (kg),Assembly path,Procurement type,Supplier,Supplier part number,Component definition ID,Component name,Occurrence ID,Translation offset X (mm),Translation offset Y (mm),Translation offset Z (mm),Material provenance,Young's modulus (GPa)\r\n";
     for (const auto& row : rows) {
         out << row.itemNumber << ',' << csvField(row.bodyId) << ',' << csvField(row.bodyName) << ','
             << csvField(row.partNumber) << ',' << csvField(row.description) << ',' << csvField(row.revision) << ','
@@ -277,7 +327,9 @@ bool SceneDocument::exportPartsListCsv(const QString& path, QString* error) cons
             << (row.massKg > 0.0 ? csvNumber(row.massKg) : QString()) << ',' << csvField(row.assemblyPath) << ','
             << csvField(row.procurementType) << ',' << csvField(row.supplier) << ',' << csvField(row.supplierPartNumber) << ','
             << csvField(row.componentDefinitionId) << ',' << csvField(row.componentName) << ',' << csvField(row.occurrenceId) << ','
-            << csvNumber(row.placementX) << ',' << csvNumber(row.placementY) << ',' << csvNumber(row.placementZ) << "\r\n";
+            << csvNumber(row.placementX) << ',' << csvNumber(row.placementY) << ',' << csvNumber(row.placementZ) << ','
+            << csvField(row.materialEngineering.provenance) << ','
+            << (row.materialEngineering.youngsModulusGPa>0.0 ? csvNumber(row.materialEngineering.youngsModulusGPa) : QString()) << "\r\n";
     }
     out.flush();
     if (out.status() != QTextStream::Ok) { if (error) *error = "Could not format the parts-list CSV."; return false; }
@@ -312,6 +364,8 @@ StandardsCheckReport SceneDocument::checkStandards(StandardsProfile profile) con
                 const Part* first = find(partNumbers.value(key));
                 const bool sameMetadata = first && first->description == part.description && first->revision == part.revision &&
                     first->materialName == part.materialName && first->materialDensityKgPerM3 == part.materialDensityKgPerM3 &&
+                    first->materialEngineering.provenance == part.materialEngineering.provenance &&
+                    first->materialEngineering.youngsModulusGPa == part.materialEngineering.youngsModulusGPa &&
                     first->procurementType == part.procurementType && first->supplier == part.supplier &&
                     first->supplierPartNumber == part.supplierPartNumber;
                 BodyDiagnostics firstGeometry;
@@ -359,9 +413,13 @@ StandardsCheckReport SceneDocument::checkStandards(StandardsProfile profile) con
                 requireConvention("projection_symbol",sheet.projection=="First-angle"||sheet.projection=="Third-angle");
                 requireConvention("auxiliary_view",sheet.auxiliaryView=="Isometric"||sheet.auxiliaryView=="Section A-A");
                 requireConvention("general_notes",!sheet.noteAnnotations.isEmpty()||!sheet.generalNotes.isEmpty());
+                requireConvention("section_view",!sheet.sectionAnnotations.isEmpty());
+                requireConvention("detail_view",!sheet.detailAnnotations.isEmpty());
+                requireConvention("linked_parts_list",sheet.partsListAnnotation.visible&&!sheet.sourceBodyIds.isEmpty());
+                requireConvention("bom_balloons",!sheet.balloonAnnotations.isEmpty());
                 const DrawingSheetSourceStatus sourceStatus=drawingSheetSourceStatus(part.id);
                 if(sourceStatus.state==DrawingSourceState::Stale)
-                    add(FindingSeverity::Warning,"DRAWING_SOURCE_STALE",part.id,"The saved drawing source geometry revision is stale; refresh the link and export a new sheet.");
+                    add(FindingSeverity::Warning,"DRAWING_SOURCE_STALE",part.id,"The saved drawing source geometry or BOM/material revision is stale; refresh the link and export a new sheet.");
                 else if(sourceStatus.state==DrawingSourceState::MissingBodies)
                     add(FindingSeverity::Warning,"DRAWING_SOURCE_MISSING",part.id,"One or more saved drawing source bodies are missing.");
             }

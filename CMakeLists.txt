@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(CADWorkbench VERSION 1.48.0 LANGUAGES CXX)
+project(CADWorkbench VERSION 1.55.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -7,7 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_AUTOMOC ON)
 
 if (NOT WIN32)
-    message(FATAL_ERROR "v1.7 UI targets Windows (Win32 HWND). Run on Windows 10/11 with MSVC.")
+    message(FATAL_ERROR "CADWorkbench targets Windows (Win32 HWND). Build on Windows 10/11 with MSVC.")
 endif()
 
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets Concurrent Svg PrintSupport)
@@ -18,8 +18,17 @@ add_library(cadcore STATIC
     src/core/SceneDocument.cpp
     src/core/PartsData.cpp
     src/core/DrawingSheet.cpp
+    src/core/DrawingDxf.cpp
     src/core/SheetMetal.h
     src/core/SheetMetal.cpp
+    src/core/SurfaceModeling.h
+    src/core/SurfaceModeling.cpp
+    src/core/DocumentRevisionHistory.h
+    src/core/DocumentRevisionHistory.cpp
+    src/core/MeshRepair.h
+    src/core/MeshRepair.cpp
+    src/core/SketchSolver.h
+    src/core/SketchSolver.cpp
     src/core/FormFeatures.cpp
     src/core/EngineeringComponents.cpp
     src/core/AdvancedComponents.cpp
@@ -58,6 +67,18 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(sketch_solver_tests tests/sketch_solver_tests.cpp)
+    target_link_libraries(sketch_solver_tests PRIVATE cadcore Qt6::Core)
+    add_test(NAME cadcore_sketch_solver COMMAND sketch_solver_tests)
+    add_executable(surface_modeling_tests tests/surface_modeling_tests.cpp)
+    target_link_libraries(surface_modeling_tests PRIVATE cadcore Qt6::Core)
+    add_test(NAME cadcore_surface_modeling COMMAND surface_modeling_tests)
+    add_executable(document_revision_history_tests tests/document_revision_history_tests.cpp)
+    target_link_libraries(document_revision_history_tests PRIVATE cadcore Qt6::Core)
+    add_test(NAME cadcore_document_revision_history COMMAND document_revision_history_tests)
+    add_executable(mesh_repair_tests tests/mesh_repair_tests.cpp)
+    target_link_libraries(mesh_repair_tests PRIVATE cadcore Qt6::Core)
+    add_test(NAME cadcore_mesh_repair COMMAND mesh_repair_tests)
     add_executable(cadcore_tests tests/cadcore_tests.cpp)
     target_link_libraries(cadcore_tests PRIVATE cadcore Qt6::Core)
     add_test(NAME cadcore_modeling_tools COMMAND cadcore_tests --modeling-tools)
@@ -72,6 +93,7 @@ if(BUILD_TESTING)
     add_test(NAME cadcore_body_diagnostics COMMAND cadcore_tests --body-diagnostics)
     add_test(NAME cadcore_density_mass_properties COMMAND cadcore_tests --density-mass-properties)
     add_test(NAME cadcore_body_materials COMMAND cadcore_tests --body-materials)
+    add_test(NAME cadcore_material_engineering COMMAND cadcore_tests --material-engineering)
     add_test(NAME cadcore_planar_section COMMAND cadcore_tests --planar-section)
     add_test(NAME cadcore_surface_summary COMMAND cadcore_tests --surface-summary)
     add_test(NAME cadcore_face_area COMMAND cadcore_tests --face-area)
@@ -108,16 +130,69 @@ if(BUILD_TESTING)
     add_test(NAME cadcore_body_schedule_csv COMMAND cadcore_tests --body-schedule-csv)
     add_test(NAME cadcore_bom_parts_standards COMMAND cadcore_tests --bom-parts-standards)
     add_test(NAME cadcore_persistent_assemblies COMMAND cadcore_tests --persistent-assemblies)
+    add_test(NAME cadcore_component_occurrence_patterns COMMAND cadcore_tests --component-occurrence-patterns)
+    add_test(NAME cadcore_occurrence_bom_metadata COMMAND cadcore_tests --occurrence-bom-metadata)
+    add_test(NAME cadcore_assembly_bom_group_keys COMMAND cadcore_tests --assembly-bom-group-keys)
+    add_test(NAME cadcore_assembly_bom_full_scene COMMAND cadcore_tests --assembly-bom-full-scene)
+    add_test(NAME cadcore_assembly_free_occurrence_yaw COMMAND cadcore_tests --assembly-free-occurrence-yaw)
+    add_test(NAME cadcore_assembly_joint_coordinate_guards COMMAND cadcore_tests --assembly-joint-coordinate-guards)
+    add_test(NAME cadcore_assembly_joint_persistence_guards COMMAND cadcore_tests --assembly-joint-persistence-guards)
+    add_test(NAME cadcore_assembly_sync_revolute_guard COMMAND cadcore_tests --assembly-sync-revolute-guard)
+    add_test(NAME cadcore_assembly_occurrence_pose_copy COMMAND cadcore_tests --assembly-occurrence-pose-copy)
     add_test(NAME cadcore_step_assembly_import COMMAND cadcore_tests --step-assembly-import)
     add_test(NAME cadcore_stl_mesh_import COMMAND cadcore_tests --stl-mesh-import)
     add_test(NAME cadcore_iges_exchange COMMAND cadcore_tests --iges-exchange)
     add_test(NAME cadcore_obj_mesh_import COMMAND cadcore_tests --obj-mesh-import)
     add_test(NAME cadcore_parametric_foundation COMMAND cadcore_tests --parametric-foundation)
+    add_test(NAME cadcore_parametric_links COMMAND cadcore_tests --parametric-links)
+    add_test(NAME cadcore_parametric_blind_hole COMMAND cadcore_tests --parametric-blind-hole)
+    add_test(NAME cadcore_parametric_feature_suppression COMMAND cadcore_tests --parametric-feature-suppression)
+    add_test(NAME cadcore_surface_body_persistence COMMAND cadcore_tests --surface-body-persistence)
     add_test(NAME cadcore_assembly_joints COMMAND cadcore_tests --assembly-joints)
     add_test(NAME cadcore_sheet_metal_flat_pattern COMMAND cadcore_tests --sheet-metal-flat-pattern)
+    add_test(NAME cadcore_folded_sheet_metal COMMAND cadcore_tests --folded-sheet-metal)
     add_test(NAME cadcore_orthographic_drawing COMMAND cadcore_tests --orthographic-drawing)
 endif()
 
 # Manual Windows install: deploy Qt with windeployqt + OCCT DLLs from vcpkg.
 # Do not upload DLL binaries of third-party libraries as source code.
+
+# Keep local Windows builds launchable and run GUI-backed core tests headlessly.
+if(WIN32)
+    set(_cadworkbench_qt_platform_plugins "")
+    if(DEFINED VCPKG_INSTALLED_DIR AND DEFINED VCPKG_TARGET_TRIPLET)
+        set(_cadworkbench_qt_platform_plugins
+            "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/Qt6/plugins/platforms")
+    endif()
+    if(NOT EXISTS "${_cadworkbench_qt_platform_plugins}/qwindows.dll")
+        get_target_property(_cadworkbench_qt_core_dll Qt6::Core IMPORTED_LOCATION_RELEASE)
+        if(NOT _cadworkbench_qt_core_dll)
+            get_target_property(_cadworkbench_qt_core_dll Qt6::Core IMPORTED_LOCATION)
+        endif()
+        if(_cadworkbench_qt_core_dll)
+            get_filename_component(_cadworkbench_qt_bin_dir "${_cadworkbench_qt_core_dll}" DIRECTORY)
+            get_filename_component(_cadworkbench_qt_triplet_dir "${_cadworkbench_qt_bin_dir}" DIRECTORY)
+            set(_cadworkbench_qt_platform_plugins "${_cadworkbench_qt_triplet_dir}/Qt6/plugins/platforms")
+        endif()
+    endif()
+    if(EXISTS "${_cadworkbench_qt_platform_plugins}/qwindows.dll")
+        add_custom_command(TARGET CADWorkbench POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:CADWorkbench>/platforms"
+            COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${_cadworkbench_qt_platform_plugins}"
+                "$<TARGET_FILE_DIR:CADWorkbench>/platforms")
+        if(BUILD_TESTING)
+            add_custom_command(TARGET cadcore_tests POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:cadcore_tests>/platforms"
+                COMMAND ${CMAKE_COMMAND} -E copy_directory
+                    "${_cadworkbench_qt_platform_plugins}"
+                    "$<TARGET_FILE_DIR:cadcore_tests>/platforms")
+            get_property(_cadworkbench_tests DIRECTORY PROPERTY TESTS)
+            set_tests_properties(${_cadworkbench_tests} PROPERTIES
+                ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QPA_PLATFORM_PLUGIN_PATH=${_cadworkbench_qt_platform_plugins}")
+        endif()
+    else()
+        message(WARNING "Qt Windows platform plugins were not found; CADWorkbench.exe may fail to launch and Qt tests may show a platform-plugin dialog.")
+    endif()
+endif()
 

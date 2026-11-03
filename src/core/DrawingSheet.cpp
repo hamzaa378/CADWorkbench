@@ -6,6 +6,8 @@
 #include <BRepBndLib.hxx>
 #include <BRep_Builder.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepGProp.hxx>
+#include <GProp_GProps.hxx>
 #include <Bnd_Box.hxx>
 #include <HLRAlgo_Projector.hxx>
 #include <HLRBRep_Algo.hxx>
@@ -48,9 +50,11 @@ namespace {
 struct Point2 { double x = 0.0, y = 0.0; };
 struct Stroke { QVector<Point2> points; bool hidden = false; bool hatch = false; bool centerline = false; };
 struct DiameterCallout { QString id; QString featureReference; Point2 center; double radius = 0.0; };
+struct EdgeLengthCallout { DrawingEdgeDimensionAnnotation annotation; Point2 center; double lengthMm = 0.0; };
 struct ViewGeometry {
     QVector<Stroke> strokes;
     QVector<DiameterCallout> diameters;
+    QVector<EdgeLengthCallout> edgeLengths;
     double minX = 0.0, minY = 0.0, maxX = 0.0, maxY = 0.0;
     bool hasBounds = false;
 };
@@ -263,6 +267,22 @@ void renderView(QTextStream& out, const ViewGeometry& view, const QString& label
             << "\" font-family=\"Arial,sans-serif\" font-size=\"3\" fill=\"#111827\">Ø"
             << QString::number(callout.radius * 2.0, 'f', 3) << " mm</text></g>\n";
     }
+    for(const EdgeLengthCallout& callout:view.edgeLengths){
+        const double anchorX=cx+(callout.center.x-mx)*scale;
+        const double anchorY=cy-(callout.center.y-my)*scale;
+        const double textX=anchorX+callout.annotation.offsetMm;
+        const double textY=anchorY-callout.annotation.offsetMm;
+        out << "<g data-drawing-annotation=\"selected-edge-dimension\" data-annotation-id=\"" << xml(callout.annotation.id)
+            << "\" data-source-body-id=\"" << xml(callout.annotation.sourceBodyId)
+            << "\" data-source-geometry-token=\"" << xml(callout.annotation.sourceGeometryToken)
+            << "\" data-edge-index=\"" << callout.annotation.edgeIndex
+            << "\" data-value-mm=\"" << QString::number(callout.lengthMm,'f',3)
+            << "\"><path fill=\"none\" stroke=\"#1f2937\" stroke-width=\"0.18\" d=\"M"
+            << anchorX << ' ' << anchorY << 'L' << textX << ' ' << textY
+            << "\"/><text x=\"" << textX+1.0 << "\" y=\"" << textY
+            << "\" font-family=\"Arial,sans-serif\" font-size=\"3\" fill=\"#111827\">"
+            << QString::number(callout.lengthMm,'f',3) << " mm</text></g>\n";
+    }
     out << "<text x=\"" << QString::number(cx, 'f', 2) << "\" y=\""
         << QString::number(cy + std::max(4.0, height(view) * scale * 0.5 + 23.0), 'f', 2)
         << "\" text-anchor=\"middle\" font-family=\"Arial,sans-serif\" font-size=\"3.5\">"
@@ -401,9 +421,29 @@ bool buildOrthographicDrawingSvg(const Part& part, QByteArray* svg, QString* err
                                  const QVector<BillOfMaterialsRow>& bomRows,const QStringList& sourceBodyIds,
                                  const QVector<DrawingBalloonAnnotation>& balloonAnnotations,
                                  const QVector<DrawingDetailAnnotation>& detailAnnotations,
-                                 const QVector<DrawingSectionAnnotation>& sectionAnnotations) {
+                                 const QVector<DrawingSectionAnnotation>& sectionAnnotations,
+                                 const QVector<DrawingEdgeDimensionAnnotation>& edgeDimensionAnnotations,
+                                 const QVector<Part>& sourceBodies) {
     if (!svg) { fail(error, "Provide an output buffer for the drawing SVG."); return false; }
     if (part.shape.IsNull()) { fail(error, "The selected body has no geometry to project."); return false; }
+    QStringList drawingSourceIds=sourceBodyIds;
+    if(drawingSourceIds.isEmpty())drawingSourceIds.append(part.id);
+    if(drawingSourceIds.size()>50){fail(error,"A drawing source can contain at most 50 body IDs.");return false;}
+    QSet<QString> uniqueDrawingSourceIds;
+    for(const QString& sourceId:drawingSourceIds){
+        if(sourceId.trimmed().isEmpty()||sourceId.contains(QLatin1Char(','))||
+           std::any_of(sourceId.cbegin(),sourceId.cend(),[](QChar c){return c.category()==QChar::Other_Control;})||
+           uniqueDrawingSourceIds.contains(sourceId)){
+            fail(error,"Drawing source body IDs must be nonempty, unique, printable, and cannot contain commas.");return false;
+        }
+        uniqueDrawingSourceIds.insert(sourceId);
+    }
+    if(part.id.trimmed().isEmpty()||!uniqueDrawingSourceIds.contains(part.id)){
+        fail(error,"The drawing source body ID list must include the projected body's ID.");return false;
+    }
+    // A drawing source is an unordered set. Canonical ordering keeps the exported
+    // source-set metadata stable when callers select the same bodies in a different order.
+    drawingSourceIds.sort(Qt::CaseSensitive);
     if (!std::isfinite(sectionDepthFraction) || sectionDepthFraction <= 0.0 || sectionDepthFraction >= 1.0) {
         fail(error, "Section depth must be a finite fraction strictly between 0 and 1."); return false;
     }
@@ -433,13 +473,24 @@ bool buildOrthographicDrawingSvg(const Part& part, QByteArray* svg, QString* err
         }
         dimensions.insert(dimension.axis,dimension);
     }
+    if(edgeDimensionAnnotations.size()>20){fail(error,"A drawing sheet can contain at most 20 selected-edge dimensions.");return false;}
+    QSet<QString> edgeDimensionIds;
+    for(const DrawingEdgeDimensionAnnotation& dimension:edgeDimensionAnnotations){
+        if(dimension.id.trimmed().isEmpty()||edgeDimensionIds.contains(dimension.id)||
+           !drawingSourceIds.contains(dimension.sourceBodyId)||dimension.sourceGeometryToken.trimmed().isEmpty()||
+           dimension.edgeIndex<1||!QSet<QString>{"TOP","FRONT","RIGHT"}.contains(dimension.view)||
+           !std::isfinite(dimension.offsetMm)||dimension.offsetMm<5||dimension.offsetMm>60){
+            fail(error,"Invalid selected-edge drawing dimension reference, view, or offset.");return false;
+        }
+        edgeDimensionIds.insert(dimension.id);
+    }
     if(partsListAnnotation.visible&&
        (partsListAnnotation.id.trimmed().isEmpty()||!std::isfinite(partsListAnnotation.xMm)||!std::isfinite(partsListAnnotation.yMm)||
         partsListAnnotation.xMm<10||partsListAnnotation.yMm<10||bomRows.isEmpty()||bomRows.size()>18)){
         fail(error,"A linked drawing parts list needs a stable ID, on-sheet position, and 1-18 BOM rows.");return false;
     }
     if(balloonAnnotations.size()>50){fail(error,"A drawing sheet can contain at most 50 BOM balloons.");return false;}
-    QStringList balloonSourceIds=sourceBodyIds;if(balloonSourceIds.isEmpty())balloonSourceIds.append(part.id);
+    const QStringList& balloonSourceIds=drawingSourceIds;
     QSet<QString> balloonIds;
     for(const DrawingBalloonAnnotation& balloon:balloonAnnotations){
         bool foundInBom=false;for(const BillOfMaterialsRow& row:bomRows)if(row.bodyIds.contains(balloon.sourceBodyId)){foundInBom=true;break;}
@@ -505,9 +556,34 @@ bool buildOrthographicDrawingSvg(const Part& part, QByteArray* svg, QString* err
         }
     }
     try {
-        const ViewGeometry front = project(part, gp_Dir(0, -1, 0), gp_Dir(1, 0, 0));
-        const ViewGeometry top = project(part, gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
-        const ViewGeometry right = project(part, gp_Dir(1, 0, 0), gp_Dir(0, -1, 0));
+        ViewGeometry front = project(part, gp_Dir(0, -1, 0), gp_Dir(1, 0, 0));
+        ViewGeometry top = project(part, gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+        ViewGeometry right = project(part, gp_Dir(1, 0, 0), gp_Dir(0, -1, 0));
+        for(const DrawingEdgeDimensionAnnotation& annotation:edgeDimensionAnnotations){
+            const Part* source=nullptr;
+            for(const Part& candidate:sourceBodies)if(candidate.id==annotation.sourceBodyId){source=&candidate;break;}
+            if(!source&&annotation.sourceBodyId==part.id)source=&part;
+            if(!source||source->geometryToken!=annotation.sourceGeometryToken){
+                fail(error,"A selected-edge dimension refers to changed or missing source geometry. Re-select that edge or remove the dimension.");return false;
+            }
+            TopExp_Explorer explorer(source->shape,TopAbs_EDGE);
+            for(int index=1;index<annotation.edgeIndex&&explorer.More();++index)explorer.Next();
+            if(!explorer.More()){fail(error,"A selected-edge dimension refers to an edge that no longer exists.");return false;}
+            const TopoDS_Edge edge=TopoDS::Edge(explorer.Current());
+            BRepAdaptor_Curve curve(edge);const double first=curve.FirstParameter(),last=curve.LastParameter();
+            if(!std::isfinite(first)||!std::isfinite(last)||last<=first){fail(error,"A selected drawing edge cannot be measured.");return false;}
+            GProp_GProps properties;BRepGProp::LinearProperties(edge,properties);
+            const double length=properties.Mass();
+            if(!std::isfinite(length)||length<=1e-9){fail(error,"A selected drawing edge has invalid length.");return false;}
+            gp_Pnt midpoint;curve.D0((first+last)*0.5,midpoint);
+            const gp_Dir normal=annotation.view=="TOP"?gp_Dir(0,0,1):(annotation.view=="RIGHT"?gp_Dir(1,0,0):gp_Dir(0,-1,0));
+            const gp_Dir xDirection=annotation.view=="RIGHT"?gp_Dir(0,-1,0):gp_Dir(1,0,0);
+            const gp_Dir yDirection=normal.Crossed(xDirection);
+            const Point2 center{midpoint.X()*xDirection.X()+midpoint.Y()*xDirection.Y()+midpoint.Z()*xDirection.Z(),
+                                midpoint.X()*yDirection.X()+midpoint.Y()*yDirection.Y()+midpoint.Z()*yDirection.Z()};
+            ViewGeometry& view=annotation.view=="TOP"?top:(annotation.view=="RIGHT"?right:front);
+            view.edgeLengths.append({annotation,center,length});
+        }
         const ViewGeometry isometric = project(part, gp_Dir(1, -1, 1), gp_Dir(1, 1, 0));
         double sectionY = 0.0;
         const ViewGeometry section = auxiliaryView == DrawingAuxiliaryView::SectionA
@@ -576,11 +652,10 @@ bool buildOrthographicDrawingSvg(const Part& part, QByteArray* svg, QString* err
         QByteArray bytes;
         QTextStream out(&bytes, QIODevice::WriteOnly);
         out.setLocale(QLocale::c());
-        QStringList drawingSourceIds=sourceBodyIds;if(drawingSourceIds.isEmpty())drawingSourceIds.append(part.id);
         out << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
             << "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" << sheetWidth << "mm\" height=\""
             << sheetHeight << "mm\" viewBox=\"0 0 " << sheetWidth << ' ' << sheetHeight
-            << "\" data-cadworkbench-source-body-id=\"" << xml(drawingSourceIds.first())
+            << "\" data-cadworkbench-source-body-id=\"" << xml(part.id)
             << "\" data-cadworkbench-source-body-ids=\"" << xml(drawingSourceIds.join(','))
             << "\" data-cadworkbench-source-geometry-token=\"" << xml(part.geometryToken)
             << "\" data-cadworkbench-link-status=\"export-snapshot\"";
@@ -765,12 +840,14 @@ bool exportOrthographicDrawingSvg(const Part& part, const QString& path, QString
                                   const DrawingPartsListAnnotation& partsListAnnotation,const QVector<BillOfMaterialsRow>& bomRows,
                                   const QStringList& sourceBodyIds,const QVector<DrawingBalloonAnnotation>& balloonAnnotations,
                                   const QVector<DrawingDetailAnnotation>& detailAnnotations,
-                                  const QVector<DrawingSectionAnnotation>& sectionAnnotations) {
+                                  const QVector<DrawingSectionAnnotation>& sectionAnnotations,
+                                  const QVector<DrawingEdgeDimensionAnnotation>& edgeDimensionAnnotations,
+                                  const QVector<Part>& sourceBodies) {
     if (path.trimmed().isEmpty()) { fail(error, "Provide an output path for the drawing SVG."); return false; }
     QByteArray bytes;
     if (!buildOrthographicDrawingSvg(part, &bytes, error, nullptr, nullptr, nullptr,
                                      projection, sheetSize, auxiliaryView, sectionDepthFraction, generalNotes, titleBlock,
-                                     viewCenters,viewIds,sheetId,noteAnnotations,dimensionAnnotations,partsListAnnotation,bomRows,sourceBodyIds,balloonAnnotations,detailAnnotations,sectionAnnotations)) return false;
+                                     viewCenters,viewIds,sheetId,noteAnnotations,dimensionAnnotations,partsListAnnotation,bomRows,sourceBodyIds,balloonAnnotations,detailAnnotations,sectionAnnotations,edgeDimensionAnnotations,sourceBodies)) return false;
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly)) { fail(error, QStringLiteral("Could not create drawing file: %1").arg(file.errorString())); return false; }
     if (file.write(bytes) != bytes.size()) { fail(error, QStringLiteral("Could not write drawing file: %1").arg(file.errorString())); file.cancelWriting(); return false; }

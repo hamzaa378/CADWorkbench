@@ -1,0 +1,162 @@
+# Orthographic SVG drawing export
+
+## Drawing source revisions
+
+**File → Check saved drawing source...** reports whether the saved sheet links to an existing, unchanged source set. It reports `Current`, `Stale`, or `MissingBodies`, and lists missing source IDs. The sheet records separate source revisions for geometry and for BOM/material data, including part number, description, revision, assembly path, procurement and supplier fields, assigned material, density, and available engineering metadata. A metadata-only edit therefore marks a sheet stale even if its shapes are unchanged. **File → Refresh saved drawing source link...** records the current revisions for the saved source set, supports undo/redo, and lets the project readiness check move from stale to current. Refreshing a link does not rewrite an exported file; export a new SVG/PDF to capture the current model. Existing files remain fixed snapshots.
+
+Scene schema v19 stores the source-data revision separately from the geometry token. Earlier v19 files are migrated by establishing their initial metadata revision after all source bodies have loaded; their geometry revision and drawing layout remain unchanged.
+
+Single-body sheets also recognize the legacy per-body geometry token; they report stale after a direct geometry edit. Bodies without a saved sheet report `NoSavedSheet`.
+
+## v1.43 persistent section and detail views
+
+**File → Edit saved drawing detail views...** stores up to four circular detail records on a drawing sheet. Each detail points to a projected **TOP**, **FRONT**, or **RIGHT** view, stores its center and capture radius in projected model millimeters, and stores the enlarged circle's sheet position and paper radius in millimeters. SVG output draws the capture circle in the source view, clips an enlarged copy of the source view's projected strokes inside the detail circle, adds a leader when the circles are separated, and labels details A–D in list order. Detail groups carry stable IDs and source-view metadata for downstream selection.
+
+**File → Edit saved section views...** stores up to four additional section records with an X, Y, or Z plane normal, a cut depth from 1–99% of the corresponding source extent, and an independent paper-space center. Each section has its own cut line on the appropriate TOP or FRONT view, section letters, selectable axis/depth metadata, and a separately placed hatched view. Cuts are axis-aligned; arbitrary plane orientation and offset section paths are not supported.
+
+Scene schema v15 persists both record types; schemas v1–v14 continue to load. Schema-v14 projects keep their detail views and receive an empty section list. The exporter rejects centers outside the selected projected view, invalid/duplicate records, unsupported axes/cut depths, and placements outside the sheet. These editable sheet records feed exported snapshots: they do not refresh an already-exported SVG/PDF after model changes. Feature-linked dimensions and formal standards certification remain out of scope.
+
+Exported cylindrical-diameter callouts now carry selectable feature-dimension metadata: a stable geometry-derived annotation ID, a cylindrical source-feature reference, the `diameter` parameter key, and the measured value. Re-exporting unchanged geometry retains these IDs; changing the cylinder's placement/geometry regenerates its reference and measured callout. This is an automatic cylindrical feature dimension only; users cannot yet attach arbitrary dimensions to selected edges or faces.
+
+## v1.42 A4/A3 landscape PDF export
+
+**File → Export orthographic drawing PDF...** uses the same saved model source, projection, sheet layout, views, notes, dimensions, source-scoped BOM, and balloons as SVG export. It builds the sheet SVG in memory, renders it onto one landscape A4 or A3 PDF page, and writes the PDF atomically. The PDF is a fixed drawing artifact; editing it does not edit the scene, and the sheet still must be exported again after model or annotation changes.
+
+Windows Release drawing regression: **PASS, 109 assertions**, including A4 and A3 PDF generation, PDF header/trailer validation, malformed-SVG rejection, and protection of an existing destination file. Full Windows CTest: **PASS, 50/50**. Live UI testing was not run by request.
+
+## v1.40 persistent BOM balloons and linked multi-body sheets
+
+A drawing export can use one to fifty selected scene bodies as a single composite source. The scene record stores the source body ID list and an aggregate geometry token, and the SVG records the same IDs and revision token. Orthographic projections, the isometric/section view, and envelope dimensions are computed from the compound of those selected solids. The linked parts list is built from a source-scoped BOM, so it reports only the selected bodies and groups matching selected occurrences into quantities.
+
+To export a grouped drawing again, select its master body; its saved source-body list is reused. **File → Edit saved BOM balloons...** adds, positions, or removes up to 50 persistent balloons. Each balloon stores a stable annotation ID and a source body ID, and its circle displays the corresponding item number in the sheet's scoped BOM. The SVG leader and circle carry the source body and BOM item identity for downstream selection. Scene schema v13 persists these records and project checklist defaults; schemas v1-v12 remain loadable and older drawings migrate with an empty balloon list.
+
+The output remains a snapshot: it does not regenerate automatically when a source body changes. Re-exporting builds a fresh snapshot from the current source bodies. Scene records can retain source IDs that later become stale; the export command validates that requested source bodies currently exist. The source checker compares all selected or persisted source IDs and aggregate geometry revision.
+
+Use **File → Check saved drawing source...** to inspect whether a saved sheet's linked source bodies still exist and whether their geometry matches the saved revision. The report distinguishes a current source set, changed geometry, and missing source bodies. If source bodies are missing, choose the intended existing bodies and export again to replace the saved source set. This check is read-only; SVG and PDF outputs remain snapshots and must be exported again to refresh them.
+
+Windows Release orthographic drawing regression: **PASS, 98 assertions**, including a two-body compound, aggregate bounds/volume, source-ID metadata, source-set mismatch/staleness, source-scoped linked-BOM rows, and a balloon linked to its BOM item. Full Windows CTest: **PASS, 50/50**. Live UI testing was not run for v1.40 by request.
+
+## v1.35 linked parts list
+
+Scene schema v11 introduced the optional linked parts-list annotation with a stable ID, visibility, and paper-space placement. Use **File → Place linked drawing parts list...** to set its placement. SVG export refreshes the table from the current source-scoped BOM and writes item number, part number, description, quantity, material, per-unit mass in kilograms, revision, component-definition ID, and export-snapshot link status. The mass value is supplied by the BOM; if no material density is assigned, the existing BOM mass is zero. Up to 18 rows fit. Schemas v1-v10 migrate with a hidden default table; schema v11 gains an empty balloon list when loaded as v1.40. The drawing source may combine up to 50 bodies, but each exported SVG remains a snapshot and does not update when the model or BOM changes.
+
+CADWorkbench v1.27 exports first-angle or third-angle A4/A3 landscape drawing sheets for one selected solid. Each sheet includes front, top, and right orthographic views plus either a hidden-line isometric view or a generated section A-A at a user-selected percentage through the body's Y depth. Cylindrical faces add centerlines in views where their axes project as lines and center marks in end-on views. End-on cylindrical features also receive deduplicated leader callouts with their actual diameters. A schematic first-angle or third-angle projection symbol places its circular end view on the matching side of the truncated-cone view. Users can add up to five short general-note lines; notes are escaped into the SVG as plain text. The section option places a cut-plane line on the top view, labels the model-space Y coordinate, and draws a hatched section contour in the auxiliary-view area. The section depth must be between 1% and 99% so it does not collapse onto the body's boundary. First-angle places the top below and right-side view to the left of front; third-angle places them above and to the right. A3 uses a proportional 1.414 scale-up of the A4 layout and sets the corresponding scale label. The exporter labels overall X, Y, and Z bounding-envelope dimensions with dimension lines. The title block includes part description, part number, revision, and material, with editable drawing number, drawn-by, checked-by, revision, and issue-date fields. Drawing revision defaults to the part revision and is limited to 16 printable characters. Nonempty issue dates must use `YYYY-MM-DD`; the SVG content screen warns when an imported drawing uses another date format.
+
+The export is a flat SVG artifact backed by a persistent per-body sheet setup. The sheet stores a stable ID, source body ID list and aggregate geometry token, stable IDs for the top/front/right/auxiliary views, editable paper-space view centers, positioned note records, stable-ID X/Y/Z overall dimensions with editable offsets, a linked parts list, and BOM balloons. Use **File → Arrange saved drawing views...**, **File → Edit saved drawing notes...**, **File → Edit saved drawing dimensions...**, and **File → Edit saved BOM balloons...** with the drawing's master body selected. Saving view/annotation edits preserves the saved source revision; explicitly refresh the source or export again to acknowledge geometry changes. SVG output carries sheet/view/note/dimension IDs, source IDs, and balloon source/item identities. Scene schema v13 stores balloons and project checklist defaults; v1-v12 migrate with empty checklist defaults. Export supports up to 50 selected bodies and first-angle or third-angle projection. The section is a simple planar cut at the composite bounding-box depth; it does not let the user orient a section plane or handle an offset section path. Dimension values are derived from overall projected bounds, not attached to selectable feature edges; feature dimensions, datums, tolerances, and GD&T feature-control frames are not implemented. The exported SVG remains a snapshot and does not update when the model changes. Drawing number is limited to 32 characters, drawn-by and checked-by to 40 each, and issue date to 20; control characters are rejected and user text is XML-escaped. The projection symbol is schematic and is not validated for standards conformance. The title block is not ISO 7200 certified. ISO tolerance checking and ASME Y14 drawing/GD&T checks remain unimplemented.
+
+## Verification
+
+- Current v1.27 core regression: **PASS**, 64 focused drawing assertions; includes cylindrical-axis centerlines, end-view center marks and true diameter value, custom section depth and model-space callout, boundary rejection, A4/A3, both projection conventions, projection-symbol identity/placement, general-note validation/escaping, title-block metadata and validation, and issue-date validation.
+- Windows x64 Release full CTest: **PASS**, 43/43.
+- Live Windows UI: **PASS**. Created a 10 mm radius × 35 mm cylinder and exported A4 first-angle and third-angle SVGs. Both files contain the matching schematic symbol placement and the `Ø20.000 mm` callout. Evidence: [first-angle SVG](evidence/projection-first-angle-v1.21.svg) and [third-angle SVG](evidence/projection-third-angle-v1.21.svg).
+- SVG validation: **PASS**; both files contain 297 × 210 mm sheets, required views, envelope dimensions, diameter leader annotation, and projection symbols at the expected side of the cone (first-angle cx=282; third-angle cx=261).
+- Exported SVG content screen: core checks pass for XML, sheet dimensions/viewBox, required labels, title-block fields, and profile handling. Live ISO and ASME screens each showed zero structural errors and three expected blank metadata warnings.
+- Rendered layout review: earlier centerline/dimension layout review **PASS** (see [v1.18 rendered PNG](evidence/orthographic-cylinder-centerlines-v1.18.png)); no separate raster rendering was performed for the v1.21 exports. These remain introductory drawings, not manufacturing release documents.
+- Drawing-content readiness screen: **PASS**, added in v1.19. It parses exported SVG structure and reports missing views, page/viewBox mismatch, missing envelope dimensions, projection label, and title-block fields. Both ISO and ASME profile checks were exercised live; neither claims clause-level compliance.
+- General-note UI: **PASS**. Entered two note lines during SVG export; the saved sheet retained both notes as XML text. ISO and ASME readiness screens each returned 0 errors and 2 warnings for the intentionally missing revision and material.
+- v1.24 live Windows UI: **PASS**. Exported `title_block_ui_test.svg` after entering a general note, drawn-by, checked-by, and issue-date values. XML parsing confirmed all submitted fields; the ISO and ASME SVG screens each returned **0 errors and 1 warning** for the test body's unset revision. The details explicitly limit both checks to structural/content readiness, not standards certification.
+- v1.25 live Windows UI: **PASS**. Exported `title_block_ui_test_v125.svg` with drawing number `PUMP-BOX-001`, author `CADWorkbench QA`, checker `QA Review`, revision `A`, and issue date `2026-10-27`. XML parsing confirmed all values. Both ISO and ASME SVG content screens returned **0 errors and 0 warnings**; each remains explicitly labeled as a content screen, not standards certification.
+- v1.25 focused regression: **PASS, 61 assertions**; includes revision override, XML escaping, and overlength rejection. Full Windows x64 Release CTest: **PASS, 43/43**. Source audit: **PASS, 217 checks**.
+- v1.27 focused regression: **PASS, 64 assertions**; exporter rejects malformed dates, and the SVG screen reports `DRAWING_ISSUE_DATE_FORMAT` for imported drawings with a non-ISO date. Full Windows x64 Release CTest: **PASS, 43/43**; source audit: **PASS, 222 checks**.
+- v1.27 live Windows export: **PASS**. The final app exported `title_block_ui_test_v127.svg` with drawing number `PUMP-BOX-001`, author, checker, revision `A`, and issue date `2026-10-27`. XML parsing confirmed those fields; ISO and ASME screens each returned 0 errors and 0 warnings.
+- v1.27 live Windows UI: **PASS**. The checker screened a well-formed SVG containing `27/10/2026`; ISO and ASME each returned 0 structural errors and 1 `DRAWING_ISSUE_DATE_FORMAT` warning. Both detail panels retained the explicit non-certification scope statement.
+
+- Current v1.27 source audit: **PASS**, 222 checks; all 118 public core operations are referenced by regression tests.
+- v1.34 Windows x64 Release build: **PASS**. Persistent drawing setup: **68 assertions**; orthographic export: **78 assertions**; full CTest: **49/49**; source audit: **250 checks, 126/126 public operations referenced**. Scene schema v9 migration to default persistent overall dimensions is covered. Live UI verification of the current drawing editors was not run.
+# Model source and editing scope
+
+Each saved sheet records a stable sheet ID, source body ID list, aggregate geometry token, separate BOM/material data token, stable IDs for top/front/right/auxiliary views, and editable paper-space view centers. Use **File → Arrange saved drawing views...** to move the projected views, **File → Edit saved drawing notes...** to edit up to five positioned notes, and **File → Edit saved drawing dimensions...** to place the three overall dimension lines. Saving view/annotation edits preserves the saved source revision; explicitly refresh the source or export again to acknowledge geometry or BOM/material changes. SVG output includes the sheet/view/note/dimension identities, source IDs, and geometry token. The exported SVG remains a snapshot; it is not rewritten when the model changes. **Inspect → Check exported drawing SVG...** reports source identity/revision metadata; the comparison checks the selected or persisted multi-body source set and aggregate geometry revision, but does not establish a general live associative link across an assembly.
+
+The checker accepts configurable required title-block fields (`drawing_number`, `description`, `part_number`, `revision`, `drawn_by`, `checked_by`, `issue_date`, `material`) and annotation conventions (`envelope_dimensions`, `projection_symbol`, `auxiliary_view`, `general_notes`, `section_view`, `detail_view`, `linked_parts_list`, `bom_balloons`). The UI can save selected requirements as project defaults. Saved-sheet readiness identifies each missing requirement and still reports stale or missing model sources. These checks validate project-defined presence requirements; they do not judge annotation placement, design intent, or formal standards conformance. The source comparison accepts one to fifty selected bodies; for a saved grouped sheet, selecting its master body reuses the persisted source-body list. It compares exact source IDs and aggregate geometry and BOM/material revisions, and warns when either source revision is stale.
+
+Feature-linked dimension references remain unimplemented. Saved detail and section views are supported, but they are bounded projected/cut views rather than arbitrary feature-linked definitions. The linked parts list and BOM balloons are persistent selectable drawing records, but their SVG/PDF output refreshes only when a new snapshot is exported. Overall dimensions remain derived from the body's bounding envelope. PDF exports render the sheet snapshot rather than maintaining a live link.
+
+
+
+## Next drawing stages
+
+v1.32 introduced persistent sheet/view records and editable view centers. v1.33 added positioned general-note records, and v1.34 added persistent, selectable overall X/Y/Z dimensions with editable line offsets. Later updates added the source-scoped linked parts list and persistent BOM balloons. Remaining drawing stages are feature-linked dimension references, independently defined section/detail view definitions, and PDF export after the sheet and annotation model are stable.
+
+
+
+## Persistent drawing XML safety
+
+Saved drawing text and persistent identifiers (including views, dimensions, notes,
+section/detail views, linked parts lists, and BOM balloons) reject XML 1.0
+forbidden control characters and unpaired UTF-16 surrogates when edited or loaded.
+Valid surrogate pairs (supplementary Unicode characters) remain supported. This
+protects subsequent SVG serialization from malformed XML. Rejected edits do not modify the saved sheet.
+The validation is not an ISO/ASME conformance check. SVG and PDF exports are
+still point-in-time snapshots, not live linked documents.
+
+## Source revisions while editing saved sheets
+
+A newly saved multi-body sheet without an explicit geometry token records the
+current source-set fingerprint (the same sorted body-ID/geometry-token hash used
+by exported assembly drawings). A single source uses that source body's token,
+including when the sheet owner is a different body.
+
+Editing view positions, notes, overall dimensions, linked parts-list placement,
+BOM balloons, detail views, or section views preserves the *stored* source
+revision. It does **not** dismiss stale-geometry warnings. An empty source token
+or source-body list in an update preserves the prior token or source set when
+a sheet is already saved. Balloon edits still validate source geometry. To
+acknowledge changed source geometry, explicitly refresh the drawing source or
+export a new drawing snapshot. Saving/reopening preserves any stale status.
+
+These checks describe model linkage, not ISO/ASME compliance. SVG and PDF
+exports remain point-in-time snapshots rather than live-linked files.
+
+## Stable identities across partial sheet updates
+
+Updating a previously saved drawing with empty sheet, view, linked parts-list,
+or overall-dimension IDs preserves those existing identities. A note-text-only
+update also retains the IDs and paper positions of existing notes by index; new
+notes receive new IDs. This protects downstream drawing references and undo/save
+round trips when callers supply incomplete settings. Explicit nonempty identities
+are not rewritten. Omitting a source-body set or source revision retains the
+existing model link as documented above. Exports remain SVG/PDF snapshots; these
+checks do not certify ISO or ASME conformance.
+
+## No-op drawing edits and undo history
+
+A successful, unchanged `setDrawingSheetSettings()` operation does not add a new
+undo checkpoint or clear redo history. Changes remain undoable as one sheet edit.
+This compares the complete persisted drawing record, including view centers,
+source link, dimensions, notes, detail/section views, and linked BOM annotations.
+This does not change snapshot-only SVG/PDF export behavior or claim standards
+certification.
+
+## Project-wide drawing sheet identity validation
+
+Saved sheet IDs must be unique across a project. Editing a sheet cannot reuse
+another body's saved sheet ID; opening a scene containing duplicate sheet IDs
+reports an error without replacing the current model. This validation concerns
+the identity of independent persisted sheets, not general assembly links.
+Existing SVG/PDF files are still independent point-in-time snapshots, and no
+formal ISO/ASME compliance or certification is implied.
+
+## Unambiguous drawing identities in SVG metadata
+
+Persistent sheet/view/annotation/linked-part IDs exclude tab, carriage return,
+and newline even though XML 1.0 allows some of those as characters: attribute
+parsers normalize this whitespace and would change the identity on reimport.
+Source-body IDs additionally exclude commas because snapshot SVG metadata
+serializes the source set as a comma-separated string. Both scene loading and
+in-memory sheet editing reject these values before modifying saved drawings.
+The exported SVG/PDF remains a snapshot and no standards certification is claimed.
+
+## Export preflight and source-link acknowledgement (v1.48 follow-up)
+
+Preparing a drawing export now normalizes and validates persisted sheet/view,
+notes, overall dimensions, section/detail, parts-list and balloon records without
+changing the model or consuming undo/redo history. SVG/PDF export uses these
+prepared records and saves them to the project **only after** the snapshot has
+successfully been written. A render failure, invalid destination or PDF write
+failure therefore leaves the existing source-revision warning, placed annotation
+identities, and the user's previous undo/redo operations intact. An explicit
+**Refresh drawing source** operation remains available independently of export.
+
+This does not regenerate old exports automatically. SVG and PDF remain standalone
+point-in-time snapshots; it is not formal ISO or ASME certification.
+
