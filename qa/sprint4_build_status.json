@@ -1,0 +1,15 @@
+{
+  "status": "PRELIMINARY_SOURCE_ONLY",
+  "date": "2026-11-16",
+  "coding_passes": 3,
+  "native_msvc_windows_build": "NOT_RUN_ON_THIS_SOURCE",
+  "native_ctest_registration_count": 130,
+  "native_ctest_pass_count_this_source": null,
+  "python_test_count_passed_local": 830,
+  "portable_cpp_executables_gcc_passed": 33,
+  "portable_cpp_executables_clang_passed": 33,
+  "manual_parametric_verified": 0,
+  "manual_assembly_verified": 0,
+  "manual_drawings_sheet_verified": 0,
+  "release_approved": false
+}

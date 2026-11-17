@@ -1,0 +1,5 @@
+# Independent Python geometry reference, not required to build CADWorkbench.
+# CadQuery installs the OCP Python bindings as a transitive dependency.
+cadquery>=2.6,<3
+# Required by the v159/v160/v161 Python source preflight lexers.
+pygments>=2.17,<3

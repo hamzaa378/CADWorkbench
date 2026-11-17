@@ -1,0 +1,21 @@
+CADWorkbench v1.70 — Fix 5: selective-fillet edge identity
+
+Apply on top of CADWorkbench_v170_Consolidated_Native_Fix3_Complete_Source_20261106
+WITH the earlier Fix 4 overlay already installed.
+
+PowerShell from the project root:
+  Expand-Archive -LiteralPath "$env:USERPROFILE\Downloads\CADWorkbench_v170_Fix5_Selective_Fillet_Replacement_Files.zip" -DestinationPath . -Force
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\RUN_PREVIOUS_FAILURES.ps1 -VcpkgRoot C:\vcpkg -OnlyInterleavedHistory
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\RUN_WINDOWS_TESTS.ps1 -VcpkgRoot C:\vcpkg
+
+The change permits kernel-reported deleted source subshapes only when their exact
+TopoDS identity actually remains in the current output. Consumed or ambiguous
+references still fail. The existing 130 native CTest registrations are unchanged.
+
+Verified in this environment:
+  - 331 Python/source and independent geometry checks passed.
+  - Independent OCP example: old fillet result contains exact edge 6 even
+    though IsDeleted(edge 6) returns true; edge 1 is actually absent.
+  - GCC and Clang: 48 portable ancestry checks per compiler with sanitizers.
+  - Source checksum manifest: 306 entries verified.
+Native Windows MSVC/Qt/OpenCascade build and 130 CTests not executed here.

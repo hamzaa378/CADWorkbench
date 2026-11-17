@@ -2,6 +2,7 @@
 
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepGProp.hxx>
@@ -21,6 +22,17 @@ void require(bool condition,const char* message){
     if(!condition)throw std::runtime_error(message);
 }
 
+TopoDS_Wire regularWire(int count,double z){
+    if(count<3)throw std::runtime_error("Invalid regular-wire test fixture.");
+    BRepBuilderAPI_MakePolygon wire;
+    for(int i=0;i<count;++i){
+        const double theta=2.0*std::numbers::pi*i/count;
+        wire.Add(gp_Pnt(5.0*std::cos(theta),5.0*std::sin(theta),z));
+    }
+    wire.Close();
+    if(!wire.IsDone())throw std::runtime_error("Regular-wire test fixture could not close.");
+    return wire.Wire();
+}
 TopoDS_Wire squareWire(double z){
     const gp_Pnt points[]={{0,0,z},{10,0,z},{10,10,z},{0,10,z}};
     BRepBuilderAPI_MakeWire wire;
@@ -111,6 +123,23 @@ int main(){
         GProp_GProps loftedProperties;BRepGProp::SurfaceProperties(loftedShell,loftedProperties);
         require(std::abs(loftedProperties.Mass()-400.0)<1e-5,
                 "Three-section square loft did not produce the expected lateral surface area.");
+        // A real loft must accept unlike section topologies instead of
+        // imposing a rectangle-only or equal-edge-count restriction.
+        TopoDS_Shell mixedLoft;
+        require(cad::makeLoftedSurfaceShell({regularWire(3,0),regularWire(4,8),regularWire(6,16)},
+                                             &mixedLoft,&error),
+                "Mixed triangle/square/hexagon section loft failed.");
+        require(!mixedLoft.IsNull()&&BRepCheck_Analyzer(mixedLoft).IsValid(),
+                "Mixed-profile loft returned invalid geometry.");
+        GProp_GProps mixedArea;BRepGProp::SurfaceProperties(mixedLoft,mixedArea);
+        require(std::isfinite(mixedArea.Mass())&&mixedArea.Mass()>1e-6,
+                "Mixed-profile loft must have positive surface area.");
+        TopoDS_Shell mixedRuled;
+        require(cad::makeRuledSurfaceShell(regularWire(3,0),regularWire(4,8),
+                                           &mixedRuled,&error),
+                "Ruled shell must accept different polygon edge counts.");
+        require(!mixedRuled.IsNull()&&BRepCheck_Analyzer(mixedRuled).IsValid(),
+                "Mixed-profile ruled shell is invalid.");
         TopoDS_Shell preservedLoft=loftedShell;
         require(!cad::makeLoftedSurfaceShell({squareWire(0)},&preservedLoft,&error)&&
                 preservedLoft.IsSame(loftedShell)&&error.contains("at least two"),
@@ -129,10 +158,28 @@ int main(){
         BRepBuilderAPI_MakeWire mismatchedWire;
         mismatchedWire.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(0,0,10),gp_Pnt(5,0,10)).Edge());
         mismatchedWire.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(5,0,10),gp_Pnt(10,0,10)).Edge());
+        // A *closed* square and an *open* line cannot form one coherent ruled
+        // shell. This is different from valid closed triangle/square lofts.
+        require(!mismatchedWire.Wire().Closed()&&squareWire(0).Closed(),
+                "The open/closed regression fixture has the wrong topology.");
         TopoDS_Shell preservedShell=shell;
         require(!cad::makeRuledSurfaceShell(squareWire(0),mismatchedWire.Wire(),&preservedShell,&error)&&
-                preservedShell.IsSame(shell)&&error.contains("same number"),
-                "Mismatched shell boundaries were accepted or changed the existing output.");
+                preservedShell.IsSame(shell)&&error.contains("both be closed or both be open"),
+                "An open/closed ruled shell was accepted or changed the existing output.");
+        TopoDS_Shell preservedMixedLoft=loftedShell;
+        require(!cad::makeLoftedSurfaceShell({squareWire(0),mismatchedWire.Wire()},
+                                               &preservedMixedLoft,&error)&&
+                preservedMixedLoft.IsSame(loftedShell)&&error.contains("all be closed or all be open"),
+                "An open/closed loft was accepted or changed the existing output.");
+        // Unlike edge counts are still supported for matching open boundaries.
+        BRepBuilderAPI_MakeWire secondOpen;
+        secondOpen.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(0,0,15),gp_Pnt(10,0,15)).Edge());
+        TopoDS_Shell openRuledShell;
+        require(cad::makeRuledSurfaceShell(mismatchedWire.Wire(),secondOpen.Wire(),
+                                            &openRuledShell,&error),
+                "Open ruled-shell boundaries with unequal edge counts were rejected.");
+        require(!openRuledShell.IsNull()&&BRepCheck_Analyzer(openRuledShell).IsValid(),
+                "Open ruled-shell geometry with unequal edge counts is invalid.");
         require(!cad::makeRuledSurfaceShell(squareWire(0),squareWire(5),nullptr,&error),
                 "Null ruled-shell output was accepted.");
         std::cout<<"PASS: "<<assertions<<" surface-modeling assertions\n";

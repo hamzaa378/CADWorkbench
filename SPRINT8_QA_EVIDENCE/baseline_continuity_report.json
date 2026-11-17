@@ -1,0 +1,37 @@
+{
+  "base_archive": "CADWorkbench_v170_BackendSprint7_ReferenceIntegrity_COMBINED_PRELIMINARY_20261116.zip",
+  "baseline_entries": 611,
+  "baseline_files_missing": [],
+  "changed_existing_files": [
+    "CONTINUE_HERE_LATEST_PRELIMINARY.md",
+    "SHA256SUMS.txt",
+    "SOURCE_MANIFEST_SHA256.txt",
+    "scripts/RUN_BACKEND_FULL_REGRESSION_WITH_DIAGNOSTICS.ps1",
+    "src/core/ReferenceRouteConsensus.h",
+    "src/core/SceneDocument.cpp",
+    "src/core/SceneDocument.h",
+    "src/core/ShapeFeatureTree.cpp",
+    "tests/document_audit_tests.cpp",
+    "tests/face_lineage_v170_tests.cpp",
+    "tests/reference_route_consensus_portable_tests.cpp"
+  ],
+  "new_files_before_report": [
+    "RUN_SPRINT8_WINDOWS_STAGED_BUILD.ps1",
+    "SPRINT8_CONTINUATION_20261116.md",
+    "SPRINT8_QA_EVIDENCE/audit_final_before_manifest.json",
+    "SPRINT8_QA_EVIDENCE/baseline_continuity_report.json",
+    "SPRINT8_QA_EVIDENCE/clang_35.log",
+    "SPRINT8_QA_EVIDENCE/gcc_35.log",
+    "SPRINT8_QA_EVIDENCE/python_887.log",
+    "tests/test_sprint8_topology_drawing_contract.py"
+  ],
+  "verified_windows_msbuild": false,
+  "verified_windows_130_ctests": false,
+  "manual_engineering_acceptance": "NOT_RUN",
+  "python_tests": "887/887 PASS",
+  "portable_cpp_compiler_results": {
+    "g++": "35/35 PASS",
+    "clang++": "35/35 PASS"
+  },
+  "native_ctest_registrations_retained": 130
+}

@@ -1,5 +1,7 @@
 #include "core/SketchSolver.h"
 #include "core/SceneDocument.h"
+#include "sketch_constraint_editor_cases.h"
+#include <QApplication>
 
 #include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
@@ -10,6 +12,7 @@
 
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 
 namespace {
@@ -35,8 +38,20 @@ void run() {
 
     line.constraints.removeLast();result=SketchSolver::solve(line);
     require(result.success&&result.degreesOfFreedom==1,"Underconstrained line did not report one degree of freedom");
-    line.constraints.append(length);line.constraints.append(fixed("b",5,0));result=SketchSolver::solve(line);
+    line.constraints.append(length);
+    line.constraints.append(length); // consistent but redundant length definition
+    result=SketchSolver::solve(line);
+    require(result.success&&result.degreesOfFreedom==0&&
+            result.redundantConstraintIndices.contains(line.constraints.size()-1),
+            "Duplicate consistent sketch dimension was not diagnosed");
+    line.constraints.removeLast();
+    line.constraints.append(fixed("b",5,0));result=SketchSolver::solve(line);
     require(!result.success&&result.solvedPoints.isEmpty(),"Incompatible constraints returned a solved sketch");
+    require(result.constraintMaximumResiduals.size()==line.constraints.size()&&
+            result.largestResidualConstraintIndex>=0&&
+            result.constraintMaximumResiduals[result.largestResidualConstraintIndex]>result.maximumResidual-1e-10&&
+            result.message.contains("constraint"),
+            "Conflicting sketch constraints did not report a useful residual location");
 
     SketchModel quadrilateral;
     quadrilateral.points={{"a",0,0},{"b",10,1},{"c",10,9},{"d",0,10}};
@@ -52,6 +67,92 @@ void run() {
     result=SketchSolver::solve(quadrilateral);
     require(result.success&&result.degreesOfFreedom==0&&near(result.solvedPoints[2].x(),10)&&near(result.solvedPoints[2].y(),10),
             "Mixed quadrilateral constraints did not produce a fully constrained profile");
+
+    SketchModel dimensioned=quadrilateral;
+    dimensioned.constraints[6]=segmentConstraint(SketchConstraintType::SegmentLength,"ab");
+    dimensioned.constraints[6].value=10;
+    SketchConstraint offset;offset.type=SketchConstraintType::SignedPointLineDistance;
+    offset.pointA="c";offset.segmentA="ab";offset.value=10;
+    dimensioned.constraints[7]=offset;
+    result=SketchSolver::solve(dimensioned);
+    require(result.success&&result.degreesOfFreedom==0&&near(result.solvedPoints[2].y(),10),
+            "Segment length and signed point-to-line dimensions did not fully constrain a profile");
+    SketchModel reopenedDimensions;QString dimensionError;
+    require(sketchModelFromJson(sketchModelToJson(dimensioned),&reopenedDimensions,&dimensionError)&&
+            SketchSolver::solve(reopenedDimensions).success,
+            "Segment length and signed point-to-line dimensions did not survive sketch serialization");
+    SceneDocument dimensionedSolid;
+    require(dimensionedSolid.addConstrainedPolygonExtrusion(dimensioned,{"a","b","c","d"},2,&dimensionError),
+            "A profile using direct length and offset dimensions did not extrude");
+    GProp_GProps dimensionedMass;BRepGProp::VolumeProperties(dimensionedSolid.parts().first().shape,dimensionedMass);
+    require(near(dimensionedMass.Mass(),200),"A length-and-offset sketch extruded to the wrong volume");
+    dimensioned.constraints[6].value=0;
+    require(!SketchSolver::solve(dimensioned).success,"Zero segment-length dimension was accepted");
+    dimensioned.constraints[6].value=10;
+    dimensioned.constraints[7].segmentA="missing";
+    require(!SketchSolver::solve(dimensioned).success,"A point-to-line dimension accepted a missing segment");
+    dimensioned.constraints[7].segmentA="ab";
+    dimensioned.constraints[7].value=std::numeric_limits<double>::infinity();
+    require(!SketchSolver::solve(dimensioned).success,"A non-finite point-to-line dimension was accepted");
+
+    SketchModel reversedOffset;
+    reversedOffset.points={{"left",0,0},{"right",10,0},{"probe",5,-2}};
+    reversedOffset.segments={{"axis","right","left"}};
+    SketchConstraint signedOffset; signedOffset.type=SketchConstraintType::SignedPointLineDistance;
+    signedOffset.pointA="probe";signedOffset.segmentA="axis";signedOffset.value=3;
+    reversedOffset.constraints={fixed("left",0,0),fixed("right",10,0),signedOffset};
+    SketchConstraint probeX;probeX.type=SketchConstraintType::HorizontalDistance;
+    probeX.pointA="left";probeX.pointB="probe";probeX.value=5;
+    reversedOffset.constraints.append(probeX);
+    result=SketchSolver::solve(reversedOffset);
+    require(result.success&&near(result.solvedPoints[2].x(),5)&&near(result.solvedPoints[2].y(),-3),
+            "Signed offset ignored the direction of its reference segment");
+    reversedOffset.points[1].x=0;reversedOffset.constraints[1]=fixed("right",0,0);
+    require(!SketchSolver::solve(reversedOffset).success,"A collapsed reference segment was accepted for a signed offset");
+
+    SketchModel directed;
+    directed.points={{"origin",0,0},{"tip",6,6}};
+    directed.segments={{"ray","origin","tip"}};
+    SketchConstraint rayLength=segmentConstraint(SketchConstraintType::SegmentLength,"ray");rayLength.value=10;
+    SketchConstraint rayAngle=segmentConstraint(SketchConstraintType::SegmentAngleFromX,"ray");
+    rayAngle.value=std::acos(-1.0)/4.0;
+    directed.constraints={fixed("origin",0,0),rayLength,rayAngle};
+    result=SketchSolver::solve(directed);
+    require(result.success&&result.degreesOfFreedom==0&&
+            near(result.solvedPoints[1].x(),10/std::sqrt(2.0))&&
+            near(result.solvedPoints[1].y(),10/std::sqrt(2.0)),
+            "Segment angle from the sketch X axis did not drive a line");
+    SketchModel reopenedDirected;
+    require(sketchModelFromJson(sketchModelToJson(directed),&reopenedDirected,&dimensionError)&&
+            SketchSolver::solve(reopenedDirected).success,
+            "Directed segment angle did not survive sketch serialization");
+    directed.constraints.last().value=10;
+    require(!SketchSolver::solve(directed).success,"Out-of-range segment angle was accepted");
+
+    SketchModel circleClearance;
+    circleClearance.points={{"center",0,0},{"probe",1,6}};
+    circleClearance.circles={{"circle","center",2}};
+    SketchConstraint radiusConstraint;radiusConstraint.type=SketchConstraintType::Radius;
+    radiusConstraint.circleA="circle";radiusConstraint.value=2;
+    SketchConstraint centeredX;centeredX.type=SketchConstraintType::HorizontalDistance;
+    centeredX.pointA="center";centeredX.pointB="probe";centeredX.value=0;
+    SketchConstraint circleOffset;circleOffset.type=SketchConstraintType::SignedPointCircleDistance;
+    circleOffset.pointA="probe";circleOffset.circleA="circle";circleOffset.value=3;
+    circleClearance.constraints={fixed("center",0,0),radiusConstraint,centeredX,circleOffset};
+    result=SketchSolver::solve(circleClearance);
+    require(result.success&&result.degreesOfFreedom==0&&near(result.solvedPoints[1].x(),0)&&
+            near(result.solvedPoints[1].y(),5),
+            "Signed point-to-circle clearance did not place the point outside the circle");
+    SketchModel reopenedCircleClearance;
+    require(sketchModelFromJson(sketchModelToJson(circleClearance),&reopenedCircleClearance,&dimensionError)&&
+            SketchSolver::solve(reopenedCircleClearance).success,
+            "Signed point-to-circle clearance did not survive sketch serialization");
+    circleClearance.constraints.last().value=-1;
+    result=SketchSolver::solve(circleClearance);
+    require(result.success&&near(result.solvedPoints[1].y(),1),
+            "Negative point-to-circle offset did not place the point inside the circle");
+    circleClearance.constraints.last().circleA="missing";
+    require(!SketchSolver::solve(circleClearance).success,"Point-to-circle offset accepted a missing circle");
 
     SketchModel angleSketch;
     angleSketch.points={{"o",0,0},{"x",10,0},{"y",1,8}};
@@ -346,7 +447,11 @@ void run() {
 }
 }
 
-int main() {
-    try { run();std::cout<<"PASS: general 2D sketch solver\n";return 0; }
+int main(int argc,char** argv) {
+    QApplication app(argc,argv);
+    try { run();sketch_editor_test::lineDimensionRoundtrip();
+          sketch_editor_test::circleRadiusRoundtrip();sketch_editor_test::fixedPointAnchorRoundtrip();
+          sketch_editor_test::interactivePairRelationsRoundtrip();
+          std::cout<<"PASS: general 2D sketch solver and Qt constraint editor\n";return 0; }
     catch(const std::exception& e) { std::cerr<<"FAIL: "<<e.what()<<'\n';return 1; }
 }

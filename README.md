@@ -1,48 +1,55 @@
-# CADWorkbench
+# CADWorkbench v1.70 — Engineering Development Source (Sprint 11)
 
-CADWorkbench is a native Windows CAD application written in C++20 with Qt 6 and Open CASCADE Technology. This repository contains the **v1.55.0 source snapshot with the latest working-tree additions**. Start with [CONTINUE_HERE.md](CONTINUE_HERE.md) if you are resuming development in another chat.
+**Status: Windows automated verification passed on 17 November 2026; engineering acceptance is still pending.** This repository is a consolidated **source** checkpoint, not a certified CAD product or a binary release.
 
-## What works in this source snapshot
+## Current verification
 
-- Direct solid modeling: primitives, sketches, oriented extrusions, revolve, sweeps, lofts, holes, patterns, Boolean operations, blends, shelling, draft, and transforms, plus dimensioned engineering templates.
-- Constrained 2D sketches with points, segments, circles, geometric and dimensional constraints, circular cutouts, persistent polygon extrusion definitions, and edits that rebuild the solid. Newer constraints include symmetry, circle tangency, and point on a finite segment.
-- A focused parametric rectangle/extrusion/hole workflow with named parameters, linked dimensions, linear through/blind-hole patterns, all-edge chamfer/fillet, optional-operation suppression, and one-step batch suppression. This is a bounded feature chain.
-- Persistent reusable component occurrences with 3-axis position/orientation, rigid/revolute/prismatic joints, motion tracks, sampled interference scans, and BOM-linked metadata.
-- Saved model-linked drawing sheets with view placements, details, sections, notes, parts lists, balloons, and selected-edge dimensions. Export SVG, PDF, or editable DXF; exported files are snapshots.
-- Editable faceted folded sheet-metal bodies, flat-pattern DXF with individual bend K factors and optional end reliefs, and bend-table CSV.
-- STEP assembly and IGES exchange, STL/OBJ mesh import and repair, surface bodies, material assignments, BOM/parts-list exports, configurable drawing completeness checks, and named local revision snapshots.
+On the user's Windows/Visual Studio environment, Sprint 11 successfully built `build\Release\CADWorkbench.exe` with MSVC, and **all 130/130 native CTests passed**. The full **952/952 Python/source tests passed**, with the independent audit reporting `AUTOMATED_PASS`. The audit exit code `3` is intentional when manual engineering acceptance has not been recorded. **0/60 manual acceptance scenarios are formally verified**; therefore the engineering release gate is **BLOCKED**.
 
-The scope and limitations are detailed in [CONTINUE_HERE.md](CONTINUE_HERE.md). CADWorkbench does not claim Fusion 360 feature parity or formal ISO/ASME certification.
+This repository intentionally does **not** include compiled Windows binaries, vcpkg-installed packages, Python virtual environments or personal machine audit logs. Retain your original Windows-verified Sprint 11 build and full audit log as rollback and verification evidence.
 
-## Build on Windows
+## Scope
 
-Install a Windows C++ MSVC toolchain with Visual Studio CMake tools. Bootstrap [vcpkg](https://github.com/microsoft/vcpkg) and set `VCPKG_ROOT` to its folder. The checked-in [vcpkg.json](vcpkg.json) lists Qt and OCCT dependencies.
+C++20 / Qt 6 / OpenCascade 8, CMake and vcpkg. The project includes parametric geometry and feature history, topology-reference recovery, assembly mating and motion analysis, drawing and sheet-metal workflows, manufacturing handoff, and engineering inspection/reconciliation tools. Backend feature integration has priority; some functions are preliminary and require human validation before fabrication.
+
+## Start here
+
+- **[GitHub upload and first-clone instructions](GITHUB_UPLOAD_GUIDE.md)** — what to upload, how to push it, and how to verify the repository.
+- **[Latest Windows verification and limitations](LATEST_VERIFIED_BASELINE.md)** — separates automated checks from real-world engineering acceptance.
+- **[Sprint 11 continuation / full engineering handover](SPRINT11_CONTINUATION_20261117.md)** — current workflows and tool usage.
+- **[60-case acceptance tracker](docs/V170_ACCEPTANCE_RESULTS.csv)** — presently `NOT_RUN`; use this for acceptance evidence.
+- **[GitHub portable CI](.github/workflows/portable-regressions.yml)** — source, Python/OCP and portable C++; does *not* replace the Windows native gate.
+
+## Windows full build and verification
+
+Prerequisites: Windows, Visual Studio with MSVC C++ toolchain, CMake/CTest, Python 3, and [vcpkg](https://github.com/microsoft/vcpkg) installed at `C:\vcpkg` (or provide your own location). The project uses the checked-in `vcpkg.json` dependencies.
+
+In **PowerShell**, from the repository root:
 
 ```powershell
-$env:VCPKG_ROOT = 'C:\vcpkg'
-.\scripts\build_windows.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\RUN_SPRINT11_WINDOWS_TARGETED_BUILD.ps1 -VcpkgRoot 'C:\vcpkg' -Parallel 4 -FullAudit
 ```
 
-The script configures CMake, builds a Release application and tests, then runs CTest. To build without rerunning tests, use `-SkipTests`. Dependency installation and the first compile can take substantially longer than an incremental build.
+The script runs the source preflight and focused native checks, then the full application build, all 130 native CTests, the Python/kernel suite and evidence classifier. Exit `3` indicates automated verification passed but recorded manual acceptance is outstanding. Inspect the generated reports before deciding release readiness.
 
-## Verification
+## Local portable checks
 
-The current Windows Release build passes and **72/72 CTest cases pass**. The latest coding rounds did **not** include live UI interaction, so menu behavior is compiled but not claimed as interactively verified. See [CONTINUE_HERE.md](CONTINUE_HERE.md) for the verified feature summary and next work.
+```bash
+python tools/preflight_major_build.py --root .
+python tools/audit_full_source.py --root .
+python tools/verify_130_tests.py
+python -m pip install -r requirements-kernel-reference.txt
+python -m unittest discover -s tests -p '*.py' -q
+python tools/run_portable_regressions.py --compiler g++ --jobs 3
+python tools/run_portable_regressions.py --compiler clang++ --jobs 3
+```
 
-## Source layout
+These checks do **not** demonstrate that the Qt GUI, shop drawings or manufactured parts pass user acceptance.
 
-| Path | Contents |
-|---|---|
-| [src/core](src/core) | CAD scene, geometry, sketches, drawings, assemblies, sheet metal, surfaces, meshes, and revisions |
-| [src/ui](src/ui) | Qt desktop window, commands, ribbon, and viewport |
-| [tests](tests) | Native C++ regressions and supplemental source checks |
-| [scripts](scripts) | Windows build, runtime release packaging, and source snapshot packaging |
-| [docs](docs) | QA notes and historical documentation |
+## Change policy
 
-Additional current area notes are in [BOM_PARTS_LIST.md](BOM_PARTS_LIST.md), [ORTHOGRAPHIC_DRAWINGS.md](ORTHOGRAPHIC_DRAWINGS.md), [PARAMETRIC_FOUNDATION.md](PARAMETRIC_FOUNDATION.md), [PERSISTENT_ASSEMBLIES.md](PERSISTENT_ASSEMBLIES.md), [SHEET_METAL.md](SHEET_METAL.md), and [STANDARDS_CHECKS.md](STANDARDS_CHECKS.md). The previous long README is preserved as [historical documentation](docs/README_HISTORY.md); some of its status statements and links predate this snapshot.
+Maintain the last Windows-verified baseline; use approximately **75% effort on completing/integrating existing features, 20% on reliability/performance, and 5% on genuinely missing capabilities**. Independent backend workstreams can progress concurrently, but merge only after combined regression checks. Never hide failing tests or silently change the historical 130 native test registrations. There is no automatic fabrication or standards-certification authorization.
 
-## Publishing the source
+## License
 
-Run `./scripts/package_source_snapshot.ps1` to create a source ZIP with a SHA-256 manifest. Extract the ZIP and upload the **contents** of `CADWorkbench_v1_55_Source` to GitHub. The source archive intentionally excludes Git metadata, local build outputs, vcpkg installations, generated binaries, and caches. The separate `package_release_windows.ps1` script builds a portable application package and installer from an already compiled Windows Release app and installed runtime dependencies.
-
-The project currently has no license file; choose one before distributing it as an open-source release.
+No open-source license has been selected or provided in this source archive. **A public repository alone does not grant third parties a license to modify or redistribute the code.** Add an appropriate `LICENSE` only after confirming ownership and the intended terms.

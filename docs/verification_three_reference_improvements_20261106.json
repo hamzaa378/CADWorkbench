@@ -1,0 +1,23 @@
+{
+  "baseline": "CADWorkbench_v170_Three_Engineering_Improvements_Source_20261106.zip",
+  "updated": "2026-11-06",
+  "status": "development source; Windows MSVC/Qt/OpenCascade build pending",
+  "three_tracks": [
+    "witnessed spline/Bezier edge anchors v3 with curvature",
+    "mixed Boolean/rigid ancestry through translations and rotations",
+    "persistent curved shell-opening witness and compact editor support"
+  ],
+  "verification": {
+    "python_preflight": 142,
+    "independent_OCCT_reference": 28,
+    "g++_portable_checks": 449,
+    "clang++_portable_checks": 449,
+    "native_ctest_registered": 130,
+    "native_windows_ctest_executed": false
+  },
+  "known_limits": [
+    "not universal B-spline topology naming",
+    "no arbitrary nonrigid modifier ancestry",
+    "shell offset geometry must pass native CAD kernel tests"
+  ]
+}

@@ -1,6 +1,8 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
-    [switch]$SkipTests
+    [switch]$SkipTests,
+    [ValidateRange(1, 64)]
+    [int]$BuildJobs = 1
 )
 
 $ErrorActionPreference = 'Stop'
@@ -45,7 +47,11 @@ try {
         '-DCMAKE_BUILD_TYPE=Release'
     if ($LASTEXITCODE -ne 0) { throw "CMake configure failed with exit code $LASTEXITCODE" }
 
-    & $cmakeExe --build $buildDir --config Release --parallel
+    # Multiple MSBuild targets deploy the same Qt/OCCT DLLs to build\Release.
+    # Serial builds avoid concurrent vcpkg z-applocal copies (MSB3075, access denied).
+    # Set -BuildJobs explicitly only after confirming parallel deployment is safe.
+    Write-Host "Building Windows Release with $BuildJobs concurrent job(s)."
+    & $cmakeExe --build $buildDir --config Release --parallel $BuildJobs
     if ($LASTEXITCODE -ne 0) { throw "Windows Release build failed with exit code $LASTEXITCODE" }
 
     if (-not $SkipTests) {

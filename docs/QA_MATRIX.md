@@ -1,3 +1,5 @@
+**Latest v1.62 status:** [verification ledger](V162_VERIFICATION.md). Windows native acceptance is pending; the last user-confirmed 78/78 baseline is v1.60.
+
 # Windows QA matrix
 
 Historical verification notes for earlier v1.55 stages. For the current source ZIP, use the root `CONTINUE_HERE.md`; its Windows Release build and 72/72 CTest result were rerun on 3 November 2026. Detailed feature claims below may predate the latest working-tree additions.
@@ -31,3 +33,13 @@ Historical verification notes for earlier v1.55 stages. For the current source Z
 - **Surfaces and meshes:** scenes persist face/shell surface bodies; the UI exposes loft, selected-edge extrusion/revolution, selected-face offset/extension, solid-guided trim and face split, open-shell sewing, thickening, and stitching into solids. Shell sewing requires connected surfaces and verifies face retention; solid-guided splitting validates area conservation and saves fragments separately. Trim can keep inside or outside regions and create multiple separate surface bodies. Planar face thickening uses direct extrusion; other surfaces use kernel offset thickening. Mesh import supports configurable weld tolerance, optional convex planar hole caps, and preservation of open manifold OBJ/STL as faceted surface bodies. Live UI verification, native triangle editing, arbitrary free-form split/merge, arbitrary boundary repair, and editable surface history remain incomplete.
 
 Build and test locally with the project's Windows build script or the checked-in CMake/vcpkg setup. Do not treat automated core coverage as a claim of full Fusion 360 parity or ISO/ASME certification.
+
+
+## v1.64 manufacturing-workshop release gate
+
+- `cadcore_v164_section_properties`: centroid, section modulus, inertia, density and invalid profile handling.
+- `cadcore_v164_machining_estimates`: process templates, feed, RPM limits, envelope/power warnings, invalid data handling.
+- `cadcore_v164_tolerance_stacks`: plus/minus stacks, worst-case limits, conditional RSS, invalid-input atomicity.
+- `cadcore_v164_cylindrical_inventory`: real OCCT B-rep box/Boolean-cut face inspection, diameter/axis, failure preservation.
+- Manual: launch menu, resize dialog, select body/no body, export TXT/CSV, compare copied cylinder to actual geometry, test invalid rows, confirm no document change.
+- Native acceptance remains 87/87 with Windows Release binary SHA-256 and JUnit evidence; independent Linux numerical tests do not certify GUI or OCCT integration.

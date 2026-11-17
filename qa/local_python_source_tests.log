@@ -1,0 +1,96 @@
+----------------------------------------------------------------------
+Ran 812 tests in 11.413s
+
+OK
+PASS: 14 independent OCP solid checks
+Clear               : min distance=8.00 mm, shared volume=0.00 mm³
+Below clearance     : min distance=3.00 mm, shared volume=0.00 mm³
+Contact             : min distance=0.00 mm, shared volume=0.00 mm³
+Interference        : min distance=0.00 mm, shared volume=800.00 mm³
+4 independent OpenCascade cases passed
+PASS: six independent OCCT volume reference checks for atomic batch fixture
+PASS initial linked union: 6000.000 mm³
+PASS initial downstream union: 6000.000 mm³
+PASS later independent source: 3000.000 mm³
+PASS retargeted earlier result: 1000.000 mm³
+PASS retargeted downstream result: 4000.000 mm³
+PASS translated later source: 2600.000 mm³
+PASS indirect earlier regeneration: 600.000 mm³
+PASS indirect downstream regeneration: 4000.000 mm³
+PASS: 8/8 independent OpenCascade reference volumes
+PASS target volume 1440 mm3
+PASS valid cut geometry w=10, depth=5, offset=8
+PASS cut volume 1240 mm3
+PASS valid cut geometry w=8, depth=5, offset=8
+PASS cut volume 1280 mm3
+PASS valid cut geometry w=8, depth=4, offset=7
+PASS cut volume 1200 mm3
+PASS valid cut geometry w=9, depth=5, offset=8
+PASS cut volume 1260 mm3
+PASS nonintersecting cutter has zero removal
+PASS retarget source width 8 and original target
+PASS retarget source width 9 and original target
+PASS changed old source / independent retarget branch
+PASS changed retargeted sketch branch
+PASS: clean baseline recorded (3 source files).
+CODE PHASE: make backend changes without running the full regression suite yet.
+When ready, run stage followed by the comprehensive Windows audit.
+PASS: staged 4 files: 1 added, 1 modified, 0 deleted.
+NEXT: run all 130 native CTests and the complete Python/source suite using RUN_V170_COMPREHENSIVE_AUDIT.ps1
+PASS: 4 staged source files unchanged
+PASS: clean baseline recorded (3 source files).
+CODE PHASE: make backend changes without running the full regression suite yet.
+When ready, run stage followed by the comprehensive Windows audit.
+PASS: clean baseline recorded (3 source files).
+CODE PHASE: make backend changes without running the full regression suite yet.
+When ready, run stage followed by the comprehensive Windows audit.
+PASS: clean baseline recorded (3 source files).
+CODE PHASE: make backend changes without running the full regression suite yet.
+When ready, run stage followed by the comprehensive Windows audit.
+PASS: staged 3 files: 0 added, 0 modified, 0 deleted.
+NEXT: run all 130 native CTests and the complete Python/source suite using RUN_V170_COMPREHENSIVE_AUDIT.ps1
+PASS: 3 staged source files unchanged
+PASS: clean baseline recorded (3 source files).
+CODE PHASE: make backend changes without running the full regression suite yet.
+When ready, run stage followed by the comprehensive Windows audit.
+PASS: staged 3 files: 0 added, 0 modified, 0 deleted.
+NEXT: run all 130 native CTests and the complete Python/source suite using RUN_V170_COMPREHENSIVE_AUDIT.ps1
+PASS: 3 staged source files unchanged
+PASS: 3 staged source files unchanged
+PASS: 3 staged source files unchanged
+PASS: clean baseline recorded (3 source files).
+CODE PHASE: make backend changes without running the full regression suite yet.
+When ready, run stage followed by the comprehensive Windows audit.
+PASS: clean baseline recorded (3 source files).
+CODE PHASE: make backend changes without running the full regression suite yet.
+When ready, run stage followed by the comprehensive Windows audit.
+PASS: staged 3 files: 0 added, 1 modified, 0 deleted.
+NEXT: run all 130 native CTests and the complete Python/source suite using RUN_V170_COMPREHENSIVE_AUDIT.ps1
+PASS: 3 staged source files unchanged
+PASS: automated 130-native + full-Python post-coding audit verified.
+NOT A FINAL RELEASE: manual engineering acceptance remains pending.
+Session evidence: /tmp/tmp1bhjcfn9/build/dev_sessions/SESSION_REPORT.md
+PASS: clean baseline recorded (3 source files).
+CODE PHASE: make backend changes without running the full regression suite yet.
+When ready, run stage followed by the comprehensive Windows audit.
+PASS: staged 3 files: 0 added, 0 modified, 0 deleted.
+NEXT: run all 130 native CTests and the complete Python/source suite using RUN_V170_COMPREHENSIVE_AUDIT.ps1
+PASS: 3 staged source files unchanged
+PASS: clean baseline recorded (3 source files).
+CODE PHASE: make backend changes without running the full regression suite yet.
+When ready, run stage followed by the comprehensive Windows audit.
+PASS: staged 3 files: 0 added, 0 modified, 0 deleted.
+NEXT: run all 130 native CTests and the complete Python/source suite using RUN_V170_COMPREHENSIVE_AUDIT.ps1
+PASS: staged 3 files: 0 added, 1 modified, 0 deleted.
+NEXT: run all 130 native CTests and the complete Python/source suite using RUN_V170_COMPREHENSIVE_AUDIT.ps1
+PASS: 3 staged source files unchanged
+Native 130/130 passed; failed=0; missing=0; acceptance P/A/D=0/0/0; gate=False
+Output directory: /tmp/tmpxkt1yqtd/out
+Native 130/130 passed; failed=0; missing=0; acceptance P/A/D=0/0/0; gate=False
+Output directory: /tmp/tmpyswdcouo/out
+Native 129/130 passed; failed=1; missing=0; acceptance P/A/D=0/0/0; gate=False
+Output directory: /tmp/tmpr6ui49pl/out
+Native 130/130 passed; failed=0; missing=0; acceptance P/A/D=0/0/0; gate=False
+Output directory: /tmp/tmp2ig15o0j/out
+Native 0/130 passed; failed=0; missing=130; acceptance P/A/D=0/0/0; gate=False
+Output directory: /tmp/tmpqndrat4o/out

@@ -1,4 +1,5 @@
 #include "SheetMetal.h"
+#include "FoldedContourTopology.h"
 
 #include <QSaveFile>
 #include <QTextStream>
@@ -92,6 +93,12 @@ bool buildFoldedSheetOutline(const QVector<double>& flanges,double sheetWidth,do
     for(auto it=right.crbegin();it!=right.crend();++it)result.append(*it);
     for(const QPointF& p:result)if(!std::isfinite(p.x())||!std::isfinite(p.y())||std::abs(p.x())>1000000.0||std::abs(p.y())>1000000.0)
         return fail(error,"The folded profile exceeds the supported coordinate range.");
+    std::vector<detail::ContourPoint> contour;contour.reserve(result.size());
+    for(const QPointF& p:result)contour.push_back({p.x(),p.y()});
+    std::pair<std::size_t,std::size_t> crossedEdges{};
+    if(!detail::simpleClosedContour(contour,&crossedEdges))
+        return fail(error,QStringLiteral("Folded sheet profile overlaps, self-intersects, or collapses (contour edges %1 and %2). Adjust flange lengths, bend radii, angles, or thickness.")
+            .arg(static_cast<int>(crossedEdges.first+1)).arg(static_cast<int>(crossedEdges.second+1)));
     *outline=std::move(result);return true;
 }
 
@@ -402,6 +409,23 @@ bool calculateFoldedSheetFlatPattern(const QVector<double>& flanges,double sheet
     return calculateFoldedSheetFlatPattern(flanges,sheetWidth,thickness,bends,QVector<double>(bends.size(),kFactor),result,error);
 }
 
+bool validateFoldedSheetShopLimits(const QVector<double>& flanges,double sheetWidth,double thickness,
+                                   const QVector<FoldedSheetBend>& bends,const SheetMetalShopLimits& limits,
+                                   QString* error){
+    if(!std::isfinite(limits.minimumInsideRadiusToThickness)||limits.minimumInsideRadiusToThickness<0.0||
+       !std::isfinite(limits.minimumStraightFlangeMm)||limits.minimumStraightFlangeMm<0.0)
+        return fail(error,"Folded-sheet shop limits must be finite and nonnegative; zero disables a check.");
+    MultiBendFlatPattern pattern;
+    if(!calculateFoldedSheetFlatPattern(flanges,sheetWidth,thickness,bends,0.33,&pattern,error))return false;
+    for(int index=0;limits.minimumInsideRadiusToThickness>0.0&&index<bends.size();++index)
+        if(bends[index].insideRadiusMm/thickness<limits.minimumInsideRadiusToThickness)
+            return fail(error,QStringLiteral("Folded bend %1 violates the minimum inside-radius/thickness ratio.").arg(index+1));
+    for(int index=0;limits.minimumStraightFlangeMm>0.0&&index<flanges.size();++index)
+        if(flanges[index]<limits.minimumStraightFlangeMm)
+            return fail(error,QStringLiteral("Folded flange %1 is shorter than the requested straight length.").arg(index+1));
+    return true;
+}
+
 bool buildFoldedSheetFlatPatternDxf(const QVector<double>& flanges,double sheetWidth,double thickness,
                                    const QVector<FoldedSheetBend>& bends,const QVector<double>& kFactors,
                                    QByteArray* dxf,MultiBendFlatPattern* result,QString* error){
@@ -491,6 +515,88 @@ bool buildFoldedSheetFlatPatternDxf(const QVector<double>& flanges,double sheetW
     return buildFoldedSheetFlatPatternDxf(flanges,sheetWidth,thickness,bends,QVector<double>(bends.size(),kFactor),dxf,result,error);
 }
 
+bool equivalentFoldedSheetDevelopment(const MultiBendFlatPattern& first,
+                                      const MultiBendFlatPattern& second,
+                                      QString* error){
+    if(first.bendLinePositionsMm.size()!=second.bendLinePositionsMm.size()||
+       first.bendAllowancesMm.size()!=second.bendAllowancesMm.size()||
+       first.bendDeductionsMm.size()!=second.bendDeductionsMm.size())
+        return fail(error,"Development outputs have different bend inventories.");
+    const double scale=std::max({1.0,std::abs(first.flatLengthMm),
+        std::abs(second.flatLengthMm),std::abs(first.widthMm),std::abs(second.widthMm)});
+    const double tolerance=std::max(1e-8,scale*1e-10);
+    const auto agrees=[&](double a,double b){
+        return std::isfinite(a)&&std::isfinite(b)&&std::abs(a-b)<=tolerance;
+    };
+    if(first.flatLengthMm<=0||second.flatLengthMm<=0||
+       first.widthMm<=0||second.widthMm<=0||
+       !agrees(first.flatLengthMm,second.flatLengthMm)||
+       !agrees(first.widthMm,second.widthMm))
+        return fail(error,"Developed blank dimensions disagree.");
+    for(int i=0;i<first.bendLinePositionsMm.size();++i){
+        if(!agrees(first.bendLinePositionsMm[i],second.bendLinePositionsMm[i])||
+           !agrees(first.bendAllowancesMm[i],second.bendAllowancesMm[i])||
+           !agrees(first.bendDeductionsMm[i],second.bendDeductionsMm[i]))
+            return fail(error,"Developed bend stations or allowances disagree.");
+    }
+    if(error)error->clear();
+    return true;
+}
+
+bool buildFoldedSheetFlatPatternSvg(const QVector<double>& flanges,double sheetWidth,double thickness,
+                                    const QVector<FoldedSheetBend>& bends,const QVector<double>& kFactors,
+                                    const SheetMetalRelief& relief,QByteArray* svg,
+                                    MultiBendFlatPattern* result,QString* error){
+    if(!svg)return fail(error,"Provide an output buffer for the folded-sheet preview SVG.");
+    // The DXF is the manufacturing-output source of truth. Validate it first
+    // so an SVG preview never shows a blank the DXF exporter would reject.
+    QByteArray verifiedDxf;MultiBendFlatPattern pattern;
+    if(!buildFoldedSheetFlatPatternDxf(flanges,sheetWidth,thickness,bends,kFactors,relief,
+                                       &verifiedDxf,&pattern,error))return false;
+    const auto fmt=[](double x){return QString::number(x,'f',6);};
+    const bool notch=relief.widthMm>0.0;
+    QStringList contour{QStringLiteral("M0,0")};
+    const auto point=[&](double x,double y){contour.append("L"+fmt(x)+","+fmt(y));};
+    if(notch){
+        for(double station:pattern.bendLinePositionsMm){
+            const double left=station-relief.widthMm/2.0,right=station+relief.widthMm/2.0;
+            point(left,0);point(left,relief.depthMm);point(right,relief.depthMm);point(right,0);
+        }
+    }
+    point(pattern.flatLengthMm,0);point(pattern.flatLengthMm,sheetWidth);
+    if(notch){
+        for(int i=pattern.bendLinePositionsMm.size()-1;i>=0;--i){
+            const double station=pattern.bendLinePositionsMm[i];
+            const double left=station-relief.widthMm/2.0,right=station+relief.widthMm/2.0;
+            point(right,sheetWidth);point(right,sheetWidth-relief.depthMm);
+            point(left,sheetWidth-relief.depthMm);point(left,sheetWidth);
+        }
+    }
+    point(0,sheetWidth);contour.append("Z");
+    QByteArray bytes;QTextStream out(&bytes,QIODevice::WriteOnly);out.setLocale(QLocale::c());
+    out<<"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\""<<fmt(pattern.flatLengthMm)
+       <<"mm\" height=\""<<fmt(sheetWidth)<<"mm\" viewBox=\"0 0 "
+       <<fmt(pattern.flatLengthMm)<<" "<<fmt(sheetWidth)
+       <<"\" data-document-type=\"folded-sheet-flat-preview\" data-bend-count=\""
+       <<pattern.bendLinePositionsMm.size()<<"\">\n"
+       <<"<title>Folded sheet metal preview - geometry matches validated DXF</title>\n"
+       <<"<path id=\"blank-outline\" fill=\"#f1f5f9\" stroke=\"#111827\" stroke-width=\"0.25\" d=\""
+       <<contour.join(' ')<<"\"/>\n";
+    for(int i=0;i<pattern.bendLinePositionsMm.size();++i){
+        const double station=pattern.bendLinePositionsMm[i];
+        out<<"<path id=\"bend-"<<(i+1)<<"\" data-angle-degrees=\""
+           <<QString::number(bends[i].angleDegrees,'g',17)
+           <<"\" fill=\"none\" stroke=\"#b45309\" stroke-dasharray=\"2,1\" stroke-width=\"0.2\" d=\"M"
+           <<fmt(station)<<","<<fmt(notch?relief.depthMm:0.0)
+           <<" V"<<fmt(notch?sheetWidth-relief.depthMm:sheetWidth)<<"\"/>\n";
+    }
+    out<<"</svg>\n";out.flush();
+    if(out.status()!=QTextStream::Ok)return fail(error,"Could not format the folded-sheet preview SVG.");
+    *svg=std::move(bytes);
+    if(result)*result=std::move(pattern);
+    if(error)error->clear();return true;
+}
+
 bool exportFoldedSheetFlatPatternDxf(const QVector<double>& flanges,double sheetWidth,double thickness,
                                     const QVector<FoldedSheetBend>& bends,const QVector<double>& kFactors,
                                     const QString& path,MultiBendFlatPattern* result,QString* error){
@@ -502,11 +608,13 @@ bool exportFoldedSheetFlatPatternDxf(const QVector<double>& flanges,double sheet
                                     const SheetMetalRelief& relief,const QString& path,
                                     MultiBendFlatPattern* result,QString* error){
     if(path.trimmed().isEmpty())return fail(error,"Provide a file path for the folded-sheet DXF.");
-    QByteArray bytes;if(!buildFoldedSheetFlatPatternDxf(flanges,sheetWidth,thickness,bends,kFactors,relief,&bytes,nullptr,error))return false;
+    QByteArray bytes;MultiBendFlatPattern pattern;
+    if(!buildFoldedSheetFlatPatternDxf(flanges,sheetWidth,thickness,bends,kFactors,relief,
+                                       &bytes,result?&pattern:nullptr,error))return false;
     QSaveFile file(path);if(!file.open(QIODevice::WriteOnly))return fail(error,QStringLiteral("Could not create folded-sheet DXF: %1").arg(file.errorString()));
     if(file.write(bytes)!=bytes.size()){file.cancelWriting();return fail(error,"Could not write the complete folded-sheet DXF.");}
     if(!file.commit())return fail(error,QStringLiteral("Could not finalize folded-sheet DXF: %1").arg(file.errorString()));
-    if(result&&!calculateFoldedSheetFlatPattern(flanges,sheetWidth,thickness,bends,kFactors,result,error))return false;
+    if(result)*result=std::move(pattern);
     return true;
 }
 

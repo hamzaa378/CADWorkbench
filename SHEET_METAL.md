@@ -1,5 +1,7 @@
 # Sheet-metal flat patterns
 
+> Current source addendum (3 November 2026): **Inspect → Check selected folded sheet against shop limits...** checks a saved, current folded-body definition against a user-entered minimum inside-radius/thickness ratio and minimum straight flange length. The check is read-only and does not certify material, tooling, or standards compliance. Folded flat-pattern DXF also supports per-bend K factors and optional rectangular end reliefs; see `CONTINUE_HERE.md` for the current scope.
+
 Choose **File → Export one-bend sheet-metal flat pattern SVG...** and enter two outside flange lengths, sheet width, bend rotation angle, material thickness, inside bend radius, and K-factor. The exported SVG contains the blank outline, bend line, rule metadata, and developed dimensions. SVG rule attributes (angle, thickness, radius, K-factor) use round-trip numeric precision rather than truncating very small valid values to zero; on-canvas notes use eight significant digits (including scientific notation for tiny values) so valid positive dimensions are not mislabeled as 0.000 mm.
 
 The calculator uses:

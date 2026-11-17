@@ -1,0 +1,67 @@
+PASS face_machining_datum_portable_tests.cpp
+15 stable face machining datum assertions passed
+PASS directional_hole_span_portable_tests.cpp
+16 directional-cutter interval assertions passed
+PASS metric_clearance_and_search_portable_tests.cpp
+149 metric-clearance/search assertions passed
+PASS sheet_metal_bend_sequence_audit_tests.cpp
+38 sheet-bend-sequence assertions passed
+PASS sketch_constraint_diagnostics_portable_tests.cpp
+PASS: 25 sketch rank diagnostics checks
+PASS assembly_network_structure_audit_tests.cpp
+50 assembly structure assertions passed
+PASS stock_sheet_layout_portable_tests.cpp
+
+PASS stock_material_compatibility_portable_tests.cpp
+
+PASS joint_motion_interpolation_portable_tests.cpp
+230 motion interpolation assertions passed
+PASS joint_drive_coupling_portable_tests.cpp
+
+PASS stock_contour_metrics_portable_tests.cpp
+
+PASS simultaneous_proximity_portable_tests.cpp
+
+PASS articulated_frame_euler_portable_tests.cpp
+199 articulated-frame Euler checks passed
+PASS folded_contour_topology_portable_tests.cpp
+PASS folded contour topology portable checks
+PASS stock_contour_nesting_portable_tests.cpp
+
+PASS manufacturing_hole_patterns_portable_tests.cpp
+25 manufacturing hole pattern assertions passed
+PASS bend_coupon_calibration_portable_tests.cpp
+28 measured-bend-coupon assertions passed
+PASS five_feature_engineering_portable_tests.cpp
+PASS: five independently tested engineering developments (51 assertions)
+PASS design_browser_query_portable_tests.cpp
+PASS: 17 design browser query assertions
+PASS linked_body_graph_v170_tests.cpp
+PASS: 101 linked-body DAG/impact checks
+PASS plane_offset_mate_portable_tests.cpp
+PASS: signed plane offsets, solver, network, contradictions, rollback
+PASS backend_mobility_portable_tests.cpp
+assembly mobility: 48 checks passed
+PASS backend_quintic_motion_portable_tests.cpp
+backend quintic motion: 215 checks passed
+PASS assembly_tolerance_budget_portable_tests.cpp
+PASS: tolerance budget, asymmetric limits, risk ranking, rollback validation
+PASS drawing_reference_audit_portable_tests.cpp
+22 drawing revision audit checks passed
+PASS backend_rebuild_waves_portable_tests.cpp
+dependency rebuild waves: 23 checks passed
+PASS drawing_reference_stress_portable_tests.cpp
+10 drawing stress checks passed
+PASS tolerance_rescue_plan_portable_tests.cpp
+28 tolerance rescue checks passed
+PASS sheet_metal_bend_properties_portable_tests.cpp
+1008 deterministic sheet metal assertions passed
+PASS tolerance_rescue_properties_portable_tests.cpp
+4200 deterministic tolerance property assertions passed
+PASS motion_swept_clearance_portable_tests.cpp
+30182 continuous-motion broad-phase checks passed
+PASS geometry_numeric_stability_portable_tests.cpp
+16010 numeric stability checks passed
+PASS shop_tolerance_allocation_portable_tests.cpp
+33613 shop-tolerance allocation assertions passed
+PASS: 33 portable C++ regression executables

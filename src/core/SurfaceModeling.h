@@ -18,14 +18,16 @@ namespace cad {
 bool makeRuledSurface(const TopoDS_Edge& firstBoundary,const TopoDS_Edge& secondBoundary,
                       TopoDS_Face* result,QString* error = nullptr);
 
-// Builds a ruled shell between two wires. OCCT requires corresponding wires
-// to have the same edge count; the result remains a surface shell, not a solid.
+// Builds a ruled shell between two wires. When edge counts differ, uses the
+// OCCT compatible-section ruled loft instead of requiring matched topology.
+// The result is an open surface shell, not a capped solid.
 bool makeRuledSurfaceShell(const TopoDS_Wire& firstBoundary,const TopoDS_Wire& secondBoundary,
                            TopoDS_Shell* result,QString* error = nullptr);
 
 // Creates a smooth, open loft shell through two or more ordered section wires.
-// Sections must be valid and use the same edge count so OCCT can match their
-// boundaries predictably. The result has no end caps and is not a solid.
+// Sections must be valid non-degenerate wires; OCCT compatible-section
+// matching handles differing edge counts when the kernel can form a valid shell.
+// The result has no end caps and is not a solid.
 bool makeLoftedSurfaceShell(const std::vector<TopoDS_Wire>& sectionWires,
                             TopoDS_Shell* result,QString* error = nullptr);
 

@@ -1,5 +1,28 @@
 #include "SceneDocument.h"
+#include "DirectionalHoleSpan.h"
+#include "AdaptiveMotionScan.h"
+#include "JointMotionInterpolation.h"
+#include "StockContourMetrics.h"
+#include "StockMaterialCompatibility.h"
+#include "SimultaneousProximity.h"
+#include "MotionSweptClearance.h"
+#include "AssemblyFitAudit.h"
+#include "LinkedBodyGraph.h"
 #include "MeshRepair.h"
+#include "ShapeFeatureTree.h"
+#include "DrawingSheet.h" // explicit geometry-checked drawing annotation review
+#include "BooleanReferenceLineage.h"
+#include "BooleanLineagePath.h"
+#include "BranchReferenceAgreement.h"
+#include "ReferenceRouteConsensus.h"
+#include "AtomicRebuildGuard.h"
+#include "DrawingSourceFingerprint.h"
+#include "DrawingEdgeAnchors.h"
+#include "ParametricStudy.h"
+#include <map>
+#include <memory>
+#include <cstdio>
+#include <vector>
 
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Section.hxx>
@@ -76,6 +99,8 @@
 #include <Poly_Triangle.hxx>
 #include <Poly_Triangulation.hxx>
 #include <QCryptographicHash>
+#include <QDir>
+#include <QTemporaryDir>
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
@@ -128,6 +153,7 @@ constexpr qsizetype kMaxStepImportBytes = 512 * 1024 * 1024;
 constexpr qsizetype kMaxIgesImportBytes = 512 * 1024 * 1024;
 constexpr int kMaxObjects = 2000;
 constexpr int kHistoryDepth = 40;
+constexpr int kMaxInPlaceSketchStages = 8;
 const QString kSchema1 = QStringLiteral("cadworkbench.scene.v1");
 const QString kSchema2 = QStringLiteral("cadworkbench.scene.v2");
 const QString kSchema3 = QStringLiteral("cadworkbench.scene.v3");
@@ -150,7 +176,153 @@ const QString kSchema19 = QStringLiteral("cadworkbench.scene.v19");
 const QString kSchema20 = QStringLiteral("cadworkbench.scene.v20");
 const QString kSchema21 = QStringLiteral("cadworkbench.scene.v21");
 const QString kSchema22 = QStringLiteral("cadworkbench.scene.v22");
+const QString kSchema23 = QStringLiteral("cadworkbench.scene.v23");
+const QString kSchema24 = QStringLiteral("cadworkbench.scene.v24");
 constexpr qsizetype kMaxStlImportBytes = 512 * 1024 * 1024;
+
+// Single source of truth for the dependency model used by regeneration,
+// impact previews and transactional batch-edit preflight. New derived-body
+// families must be added here, not to independently copied graphs.
+std::vector<linkedgraph::Node> linkedBodyGraphNodes(const QVector<Part>& parts){
+    std::vector<linkedgraph::Node> nodes;
+    nodes.reserve(static_cast<std::size_t>(parts.size()));
+    for(const Part& part:parts){
+        linkedgraph::Node node;
+        node.id=part.id.toStdString();
+        node.derived=part.hasLinkedBoolean||part.hasLinkedSketchExtrusion||
+                     part.hasInPlaceSketchFeature||part.hasInterleavedHistory||
+                     !part.linkedFoldedFlatSourceId.isEmpty();
+        node.unary=part.hasLinkedSketchExtrusion||!part.linkedFoldedFlatSourceId.isEmpty()||
+                   (part.hasInPlaceSketchFeature&&!part.hasInPlaceSketchFollowUp);
+        if(!part.linkedFoldedFlatSourceId.isEmpty()){
+            node.primary=part.linkedFoldedFlatSourceId.toStdString();
+        }else if(part.hasLinkedBoolean){
+            node.primary=part.linkedPrimaryId.toStdString();
+            node.tool=part.linkedToolId.toStdString();
+        }else if(part.hasLinkedSketchExtrusion){
+            node.primary=part.linkedSketchSourceId.toStdString();
+        }else if(part.hasInPlaceSketchFeature){
+            node.primary=part.inPlaceSketchSourceId.toStdString();
+            if(part.hasInPlaceSketchFollowUp)
+                node.tool=part.inPlaceFollowSourceId.toStdString();
+            for(const auto& stage:part.extraInPlaceSketchStages)
+                node.additionalSources.push_back(stage.sourceId.toStdString());
+        }else if(part.hasInterleavedHistory){
+            QStringList sources;
+            for(const auto& step:part.interleavedSteps)
+                if(step.kind!=QStringLiteral("Shape")&&!sources.contains(step.sketchSourceId))
+                    sources.append(step.sketchSourceId);
+            if(!sources.isEmpty()){
+                node.primary=sources.first().toStdString();
+                node.unary=sources.size()==1;
+                if(sources.size()>1)node.tool=sources[1].toStdString();
+                for(int i=2;i<sources.size();++i)node.additionalSources.push_back(sources[i].toStdString());
+            }else node.derived=false;
+        }
+        nodes.push_back(std::move(node));
+    }
+    return nodes;
+}
+
+bool planLinkedBodyOrder(const QVector<Part>& parts,QVector<int>* ordered,QString* error){
+    const auto nodes=linkedBodyGraphNodes(parts);
+    std::vector<std::size_t> planned;
+    std::string reason;
+    if(!linkedgraph::plan(nodes,&planned,&reason)){
+        if(error)*error=QStringLiteral("Linked-body dependency: %1").arg(QString::fromStdString(reason));
+        return false;
+    }
+    if(ordered){
+        QVector<int> next;
+        next.reserve(static_cast<qsizetype>(planned.size()));
+        for(std::size_t index:planned)next.append(static_cast<int>(index));
+        *ordered=std::move(next);
+    }
+    return true;
+}
+
+bool linkedBooleanResult(const TopoDS_Shape& primary,const TopoDS_Shape& tool,
+                         const QString& op,TopoDS_Shape* output,QString* error,
+                         std::shared_ptr<BRepAlgoAPI_BooleanOperation>* recordedHistory=nullptr){
+    try{
+        std::shared_ptr<BRepAlgoAPI_BooleanOperation> builder;
+        if(op=="Fuse")builder=std::make_shared<BRepAlgoAPI_Fuse>(primary,tool);
+        else if(op=="Cut")builder=std::make_shared<BRepAlgoAPI_Cut>(primary,tool);
+        else if(op=="Common")builder=std::make_shared<BRepAlgoAPI_Common>(primary,tool);
+        else{if(error)*error="Unknown linked Boolean operation.";return false;}
+        builder->Build();
+        if(!builder->IsDone()||builder->HasErrors()){
+            if(error)*error="Linked Boolean kernel operation failed.";return false;
+        }
+        *output=builder->Shape();
+        if(output->IsNull()||!BRepCheck_Analyzer(*output).IsValid()){
+            if(error)*error="Linked Boolean generated invalid geometry.";return false;
+        }
+        GProp_GProps properties;BRepGProp::VolumeProperties(*output,properties);
+        if(!std::isfinite(properties.Mass())||properties.Mass()<=1e-9){
+            if(error)*error="Linked Boolean has no remaining solid volume.";return false;
+        }
+        if(recordedHistory)*recordedHistory=std::move(builder);
+        return true;
+    }catch(const Standard_Failure& e){if(error)*error=QStringLiteral("Linked Boolean kernel error: %1").arg(e.what());}
+     catch(const std::exception& e){if(error)*error=e.what();}
+    return false;
+}
+// A linked sketch-derived cutter must remove measurable material, both when
+// first created and on *every* source edit. Without this check an upstream
+// sketch move could silently turn a live pocket into an ineffective Cut.
+bool linkedSketchCutEffective(const TopoDS_Shape& original,const TopoDS_Shape& cut,
+                              QString* error){
+    GProp_GProps before,after;
+    try{
+        BRepGProp::VolumeProperties(original,before);
+        BRepGProp::VolumeProperties(cut,after);
+    }catch(const Standard_Failure& failure){
+        if(error)*error=QStringLiteral("Cannot measure sketch-driven Cut: %1").arg(failure.what());
+        return false;
+    }catch(const std::exception& failure){
+        if(error)*error=QString::fromUtf8(failure.what());return false;
+    }
+    const double removed=before.Mass()-after.Mass();
+    if(!std::isfinite(before.Mass())||before.Mass()<=0||!std::isfinite(removed)||
+       removed<=std::max(1e-7,before.Mass()*1e-9)){
+        if(error)*error="Sketch-driven pocket misses the target or removes no measurable solid volume.";
+        return false;
+    }
+    return true;
+}
+
+// A sketch-driven boss must add measurable material and form one connected
+// solid. Otherwise OpenCascade may return a valid *compound* holding a
+// detached cutter, which is not a successful additive CAD feature.
+bool linkedSketchFuseEffective(const TopoDS_Shape& original,const TopoDS_Shape& fused,
+                               QString* error){
+    try{
+        GProp_GProps before,after;
+        BRepGProp::VolumeProperties(original,before);
+        BRepGProp::VolumeProperties(fused,after);
+        const double gained=after.Mass()-before.Mass();
+        if(!std::isfinite(before.Mass())||before.Mass()<=0||
+           !std::isfinite(gained)||gained<=std::max(1e-7,before.Mass()*1e-9)){
+            if(error)*error="Sketch-driven boss is entirely inside the target or adds no measurable solid volume.";
+            return false;
+        }
+        int solids=0;
+        for(TopExp_Explorer explorer(fused,TopAbs_SOLID);explorer.More();explorer.Next()){
+            if(++solids>1)break;
+        }
+        if(solids!=1){
+            if(error)*error="Sketch-driven boss is detached or produces multiple solid components.";
+            return false;
+        }
+        return true;
+    }catch(const Standard_Failure& failure){
+        if(error)*error=QStringLiteral("Cannot measure sketch-driven boss: %1").arg(failure.what());
+    }catch(const std::exception& failure){
+        if(error)*error=QString::fromUtf8(failure.what());
+    }
+    return false;
+}
 
 bool finitePositive(double v) { return std::isfinite(v) && v > 1e-5 && v <= 1e6; }
 bool finiteOffset(double v) { return std::isfinite(v) && std::abs(v) <= 1e6; }
@@ -274,21 +446,7 @@ QString drawingSourceFingerprint(QVector<const Part*> sources) {
 // changing the B-rep geometry token. Hash the complete source BOM/material
 // identity separately so annotation edits can preserve a stale revision.
 QString drawingSourceDataFingerprint(QVector<const Part*> sources) {
-    std::sort(sources.begin(),sources.end(),[](const Part* a,const Part* b){return a->id<b->id;});
-    QJsonArray records;
-    for(const Part* source:sources){
-        QJsonObject record;
-        record.insert("id",source->id);record.insert("part_number",source->partNumber);
-        record.insert("description",source->description);record.insert("revision",source->revision);
-        record.insert("assembly_path",source->assemblyPath);record.insert("procurement_type",source->procurementType);
-        record.insert("supplier",source->supplier);record.insert("supplier_part_number",source->supplierPartNumber);
-        record.insert("material",source->materialName);record.insert("density_kg_per_m3",source->materialDensityKgPerM3);
-        record.insert("material_provenance",source->materialEngineering.provenance);
-        record.insert("youngs_modulus_gpa",source->materialEngineering.youngsModulusGPa);
-        records.append(record);
-    }
-    return QString::fromLatin1(QCryptographicHash::hash(QJsonDocument(records).toJson(QJsonDocument::Compact),
-                                                        QCryptographicHash::Sha256).toHex());
+    return drawingSourceMetadataFingerprint(std::move(sources));
 }
 
 bool validDrawingSettings(const DrawingSheetSettings& s,QString* error) {
@@ -300,6 +458,7 @@ bool validDrawingSettings(const DrawingSheetSettings& s,QString* error) {
     for(const DrawingNoteAnnotation& note:s.noteAnnotations){xmlStrings.append(note.id);xmlStrings.append(note.text);}
     for(const DrawingDimensionAnnotation& dimension:s.dimensionAnnotations)xmlStrings.append(dimension.id);
     for(const DrawingEdgeDimensionAnnotation& dimension:s.edgeDimensionAnnotations){xmlStrings.append(dimension.id);xmlStrings.append(dimension.sourceBodyId);xmlStrings.append(dimension.sourceGeometryToken);}
+    for(const DrawingGdtFrameAnnotation& f:s.gdtFrames){xmlStrings.append(f.id);xmlStrings.append(f.sourceBodyId);xmlStrings.append(f.sourceGeometryToken);xmlStrings.append(f.characteristic);xmlStrings.append(f.datumA);xmlStrings.append(f.datumB);xmlStrings.append(f.datumC);}
     for(const DrawingBalloonAnnotation& balloon:s.balloonAnnotations){xmlStrings.append(balloon.id);xmlStrings.append(balloon.sourceBodyId);}
     for(const DrawingDetailAnnotation& detail:s.detailAnnotations)xmlStrings.append(detail.id);
     for(const DrawingSectionAnnotation& section:s.sectionAnnotations)xmlStrings.append(section.id);
@@ -315,6 +474,7 @@ bool validDrawingSettings(const DrawingSheetSettings& s,QString* error) {
     for(const DrawingNoteAnnotation& note:s.noteAnnotations)identityStrings.append(note.id);
     for(const DrawingDimensionAnnotation& dimension:s.dimensionAnnotations)identityStrings.append(dimension.id);
     for(const DrawingEdgeDimensionAnnotation& dimension:s.edgeDimensionAnnotations){identityStrings.append(dimension.id);identityStrings.append(dimension.sourceBodyId);identityStrings.append(dimension.sourceGeometryToken);}
+    for(const DrawingGdtFrameAnnotation& f:s.gdtFrames){identityStrings.append(f.id);identityStrings.append(f.sourceBodyId);identityStrings.append(f.sourceGeometryToken);}
     for(const DrawingBalloonAnnotation& balloon:s.balloonAnnotations){identityStrings.append(balloon.id);identityStrings.append(balloon.sourceBodyId);}
     for(const DrawingDetailAnnotation& detail:s.detailAnnotations)identityStrings.append(detail.id);
     for(const DrawingSectionAnnotation& section:s.sectionAnnotations)identityStrings.append(section.id);
@@ -403,10 +563,39 @@ bool validDrawingSettings(const DrawingSheetSettings& s,QString* error) {
         if(dimension.id.trimmed().isEmpty()||dimension.id.size()>64||uniqueIds.contains(dimension.id)||annotationIds.contains(dimension.id)||
            !sourceIds.contains(dimension.sourceBodyId)||dimension.sourceGeometryToken.trimmed().isEmpty()||dimension.sourceGeometryToken.size()>64||
            dimension.edgeIndex<1||!QSet<QString>{"TOP","FRONT","RIGHT"}.contains(dimension.view)||
+           (!dimension.edgeAnchor.isEmpty()&&!validDrawingEdgeWitness(dimension.edgeAnchor))||
+           !QSet<QString>{"LENGTH","DIAMETER","CENTER_DISTANCE","CENTER_X","CENTER_Y","CENTER_Z"}.contains(dimension.kind)||
+           (dimension.kind!="CENTER_DISTANCE"&&(dimension.secondEdgeIndex!=0||!dimension.secondEdgeAnchor.isEmpty()))||
+           ((dimension.kind=="CENTER_Z"&&dimension.view=="TOP")||
+            (dimension.kind=="CENTER_Y"&&dimension.view=="FRONT")||
+            (dimension.kind=="CENTER_X"&&dimension.view=="RIGHT"))||
+           (dimension.kind=="CENTER_DISTANCE"&&(dimension.secondEdgeIndex<1||
+                !validDrawingEdgeWitness(dimension.edgeAnchor)||!validDrawingEdgeWitness(dimension.secondEdgeAnchor)))||
+           (dimension.kind!="LENGTH"&&dimension.kind!="CENTER_DISTANCE"&&!validDrawingEdgeWitness(dimension.edgeAnchor))||
+           !std::isfinite(dimension.upperToleranceMm)||!std::isfinite(dimension.lowerToleranceMm)||
+           dimension.upperToleranceMm<0||dimension.lowerToleranceMm<0||
+           dimension.upperToleranceMm>1000||dimension.lowerToleranceMm>1000||
            !std::isfinite(dimension.offsetMm)||dimension.offsetMm<5.0||dimension.offsetMm>60.0){
             if(error)*error="Selected-edge dimensions need a unique ID, drawing source body, edge index, orthographic view, and 5-60 mm offset.";return false;
         }
         annotationIds.insert(dimension.id);
+    }
+    if(s.gdtFrames.size()>8){if(error)*error="At most eight saved geometric tolerance frames are supported.";return false;}
+    const QSet<QString> gdtKinds={"POSITION","FLATNESS","PARALLELISM","PERPENDICULARITY","PROFILE","CIRCULARITY"};
+    for(const DrawingGdtFrameAnnotation& f:s.gdtFrames){
+        const auto goodDatum=[](const QString& d){return d.isEmpty()||(d.size()==1&&d.front()>=QLatin1Char('A')&&d.front()<=QLatin1Char('Z'));};
+        if(f.id.trimmed().isEmpty()||f.id.size()>64||uniqueIds.contains(f.id)||annotationIds.contains(f.id)||
+           !sourceIds.contains(f.sourceBodyId)||f.sourceGeometryToken.trimmed().isEmpty()||f.sourceGeometryToken.size()>64||
+           !gdtKinds.contains(f.characteristic)||!std::isfinite(f.toleranceMm)||f.toleranceMm<=0||f.toleranceMm>1000||
+           !goodDatum(f.datumA)||!goodDatum(f.datumB)||!goodDatum(f.datumC)||
+           (!f.datumB.isEmpty()&&f.datumA.isEmpty())||(!f.datumC.isEmpty()&&f.datumB.isEmpty())||
+           (!f.datumA.isEmpty()&&(f.datumA==f.datumB||f.datumA==f.datumC))||
+           (!f.datumB.isEmpty()&&f.datumB==f.datumC)||
+           !std::isfinite(f.xMm)||!std::isfinite(f.yMm)||
+           f.xMm<10||f.xMm>maxX-75||f.yMm<20||f.yMm>maxY-12){
+            if(error)*error="Invalid source-referenced manual geometric tolerance frame.";return false;
+        }
+        annotationIds.insert(f.id);
     }
     const DrawingPartsListAnnotation& partsList=s.partsListAnnotation;
     if(partsList.id.trimmed().isEmpty()||partsList.id.size()>64||uniqueIds.contains(partsList.id)||annotationIds.contains(partsList.id)||
@@ -542,7 +731,20 @@ TopoDS_Shape makeFoldedSheetSolid(const QVector<double>& flanges,double width,do
     if(!boundary.IsDone()){if(error)*error="Could not close the folded sheet cross-section.";return {};}
     BRepBuilderAPI_MakeFace face(boundary.Wire());
     if(!face.IsDone()){if(error)*error="The folded sheet profile is self-intersecting or has invalid thickness.";return {};}
-    return BRepPrimAPI_MakePrism(face.Face(),gp_Vec(0.0,0.0,width)).Shape();
+    // Do not request Shape() from an unchecked OCCT extrusion builder. An
+    // unsuccessful prism can otherwise propagate an invalid topology handle
+    // into volume inspection, deep-copy checkpoints, and scene persistence.
+    BRepPrimAPI_MakePrism extrusion(face.Face(),gp_Vec(0.0,0.0,width));
+    if(!extrusion.IsDone()){
+        if(error)*error="OCCT could not extrude the folded sheet cross-section into a solid.";
+        return {};
+    }
+    const TopoDS_Shape solid=extrusion.Shape();
+    if(solid.IsNull()){
+        if(error)*error="OCCT returned a null folded sheet solid.";
+        return {};
+    }
+    return solid;
 }
 } // namespace
 
@@ -609,7 +811,10 @@ bool rebuildParametricSolid(const Part& part,const QMap<QString,double>& paramet
     const bool activeFillet=hasFillet&&!suppressed.contains(QStringLiteral("edge_fillet"));
     TopoDS_Shape rebuilt=BRepPrimAPI_MakeBox(gp_Pnt(originX,originY,0),
         gp_Pnt(originX+width,originY+height,depth)).Shape();
-    if(hasHole){
+    // A suppressed optional cut must not invalidate the remaining base solid
+    // merely because its archived hole center no longer fits a resized body.
+    // Re-enabling the cut revalidates the preserved original design parameters.
+    if(activeHole){
         const double diameter=parameters.value(QStringLiteral("hole_diameter"));
         const double holeDepth=hasBlindHole?parameters.value(QStringLiteral("hole_depth")):depth;
         const double radius=diameter/2.0;
@@ -716,9 +921,20 @@ QString SceneDocument::uniqueName(const QString& base) const {
 }
 
 void SceneDocument::checkpoint() {
+    const bool traceFolded=qEnvironmentVariableIsSet("CAD_V170_FOLDED_TRACE")&&
+        std::any_of(parts_.cbegin(),parts_.cend(),[](const Part& part){return part.hasFoldedSheetMetalDefinition;});
+    if(traceFolded){std::fprintf(stderr,"[folded checkpoint] scene copy: before\n");std::fflush(stderr);}
     QVector<Part> snapshotParts = parts_;
-    for (auto& part : snapshotParts) part.shape = BRepBuilderAPI_Copy(part.shape).Shape();
-    undo_.append({std::move(snapshotParts), drawingReadinessPolicy_, revision_});
+    if(traceFolded){std::fprintf(stderr,"[folded checkpoint] scene copy: after; parts=%lld\n",
+                  static_cast<long long>(snapshotParts.size()));std::fflush(stderr);}
+    for (auto& part : snapshotParts){
+        if(traceFolded){std::fprintf(stderr,"[folded checkpoint] B-rep deep copy: before\n");std::fflush(stderr);}
+        part.shape = BRepBuilderAPI_Copy(part.shape).Shape();
+        if(traceFolded){std::fprintf(stderr,"[folded checkpoint] B-rep deep copy: after\n");std::fflush(stderr);}
+    }
+    undo_.append({std::move(snapshotParts), drawingReadinessPolicy_, revision_,
+                  liveRigidMateFixed_, liveRigidMates_,
+                  liveArticulatedFixed_,liveArticulatedJoints_,liveArticulatedReferencePoses_});
     if (undo_.size() > kHistoryDepth) undo_.removeFirst();
     redo_.clear();
     revision_ = nextRevision_++;
@@ -1180,6 +1396,124 @@ bool SceneDocument::splitSurfaceBodyBySolid(const QString& surfaceBodyId,const Q
     return false;
 }
 
+// Build a linked flat solid from the same validated bend stations and end reliefs
+// used in manufacturing DXF/SVG. This is still a neutral flat development, not
+// bend compensation, springback simulation, or production-certified unfolding.
+namespace {
+bool createLinkedFlatBlank(const Part& folded,const QVector<double>& requestedK,
+                           const SheetMetalRelief& relief,TopoDS_Shape* blank,QString* error){
+    if(!blank||!folded.hasFoldedSheetMetalDefinition||
+       folded.geometryToken!=folded.foldedSheetGeometryToken){
+        if(error)*error="Linked flat blank requires a current folded-sheet source.";return false;
+    }
+    const QVector<double> k=requestedK.isEmpty()?
+        QVector<double>(folded.foldedSheetBends.size(),0.33):requestedK;
+    // DXF's station precision, clipping and relief-overlap checks form the
+    // common geometry contract for both exports and the derived 3-D solid.
+    QByteArray referenceDxf;MultiBendFlatPattern pattern;
+    if(!buildFoldedSheetFlatPatternDxf(folded.foldedSheetFlangesMm,
+            folded.foldedSheetWidthMm,folded.foldedSheetThicknessMm,
+            folded.foldedSheetBends,k,relief,&referenceDxf,&pattern,error))return false;
+    try{
+        const double width=folded.foldedSheetWidthMm;
+        const double thickness=folded.foldedSheetThicknessMm;
+        TopoDS_Shape candidate=BRepPrimAPI_MakeBox(pattern.flatLengthMm,width,thickness).Shape();
+        if(relief.widthMm>0.0){
+            // Each station receives a matching pair of through-thickness
+            // rectangular edge reliefs. Cutting tools extend beyond the blank
+            // in Y/Z to avoid a coincident exterior face on the Boolean tool.
+            for(double station:pattern.bendLinePositionsMm){
+                const double left=station-relief.widthMm/2.0;
+                const double right=station+relief.widthMm/2.0;
+                const TopoDS_Shape lower=BRepPrimAPI_MakeBox(
+                    gp_Pnt(left,-thickness,-thickness),
+                    gp_Pnt(right,relief.depthMm,2.0*thickness)).Shape();
+                const TopoDS_Shape upper=BRepPrimAPI_MakeBox(
+                    gp_Pnt(left,width-relief.depthMm,-thickness),
+                    gp_Pnt(right,width+thickness,2.0*thickness)).Shape();
+                for(const TopoDS_Shape& tool:{lower,upper}){
+                    BRepAlgoAPI_Cut cut(candidate,tool);cut.Build();
+                    if(!cut.IsDone()||cut.Shape().IsNull()||!BRepCheck_Analyzer(cut.Shape()).IsValid()){
+                        if(error)*error="Linked flat relief Boolean produced an invalid solid.";
+                        return false;
+                    }
+                    candidate=cut.Shape();
+                }
+            }
+        }
+        if(candidate.IsNull()||!BRepCheck_Analyzer(candidate).IsValid()){
+            if(error)*error="Linked developed blank failed B-rep topology validation.";
+            return false;
+        }
+        GProp_GProps measured;BRepGProp::VolumeProperties(candidate,measured);
+        const double expected=(pattern.flatLengthMm*width-
+            2.0*pattern.bendLinePositionsMm.size()*relief.widthMm*relief.depthMm)*thickness;
+        if(!std::isfinite(measured.Mass())||expected<=1e-9||
+           std::abs(measured.Mass()-expected)>std::max(1e-6,expected*1e-7)){
+            if(error)*error="Linked flat blank volume differs from the validated relief development.";
+            return false;
+        }
+        *blank=candidate;return true;
+    }catch(const Standard_Failure& e){
+        if(error)*error=QStringLiteral("Linked developed blank kernel failed: %1").arg(e.what());
+    }
+    return false;
+}
+}
+
+bool SceneDocument::addLinkedFoldedFlatBlank(const QString& foldedBodyId,QString* error){
+    return addLinkedFoldedFlatBlank(foldedBodyId,{},SheetMetalRelief{},error);
+}
+
+bool SceneDocument::addLinkedFoldedFlatBlank(const QString& foldedBodyId,
+        const QVector<double>& kFactors,const SheetMetalRelief& relief,QString* error){
+    if(parts_.size()>=kMaxObjects){setError(error,"Scene object limit reached.");return false;}
+    const Part* source=find(foldedBodyId);
+    if(!source){setError(error,"Select a saved folded sheet-metal body.");return false;}
+    TopoDS_Shape blank;
+    if(!createLinkedFlatBlank(*source,kFactors,relief,&blank,error))return false;
+    Part derived{generatedId(),uniqueName("Linked Flat Blank"),blank,true,source->color};
+    derived.linkedFoldedFlatSourceId=foldedBodyId;
+    derived.linkedFoldedFlatSourceToken=source->geometryToken;
+    derived.linkedFoldedFlatKFactors=kFactors;
+    derived.linkedFoldedFlatRelief=relief;
+    derived.materialName=source->materialName;
+    derived.materialDensityKgPerM3=source->materialDensityKgPerM3;
+    derived.materialEngineering=source->materialEngineering;
+    checkpoint();parts_.append(std::move(derived));
+    if(error)error->clear();return true;
+}
+
+bool SceneDocument::editLinkedFoldedFlatDevelopment(const QString& flatBodyId,
+        const QVector<double>& kFactors,const SheetMetalRelief& relief,QString* error){
+    const Part* existing=find(flatBodyId);
+    if(!existing||existing->linkedFoldedFlatSourceId.isEmpty()){
+        setError(error,"Select a linked folded flat blank to edit its development.");return false;
+    }
+    const Part* source=find(existing->linkedFoldedFlatSourceId);
+    if(!source||source->geometryToken!=existing->linkedFoldedFlatSourceToken){
+        setError(error,"Linked flat source is missing or out of date.");return false;
+    }
+    TopoDS_Shape rebuilt;
+    if(!createLinkedFlatBlank(*source,kFactors,relief,&rebuilt,error))return false;
+    if(existing->linkedFoldedFlatKFactors==kFactors&&
+       existing->linkedFoldedFlatRelief.widthMm==relief.widthMm&&
+       existing->linkedFoldedFlatRelief.depthMm==relief.depthMm){
+        if(error)error->clear();return true; // An unchanged edit is not a revision.
+    }
+    QVector<Part> staged=parts_;
+    for(Part& part:staged)if(part.id==flatBodyId){
+        part.shape=rebuilt;
+        part.geometryToken=generatedId();
+        part.linkedFoldedFlatKFactors=kFactors;
+        part.linkedFoldedFlatRelief=relief;
+        break;
+    }
+    if(!propagateLinkedBodies(&staged,error))return false;
+    checkpoint();parts_=std::move(staged);
+    if(error)error->clear();return true;
+}
+
 bool SceneDocument::addFoldedSheetMetal(const QVector<double>& flanges,double sheetWidth,double thickness,
         const QVector<FoldedSheetBend>& bends,QString* error) {
     if(parts_.size()>=kMaxObjects){setError(error,"Scene object limit reached.");return false;}
@@ -1209,25 +1543,480 @@ bool SceneDocument::foldedSheetMetalDefinition(const QString& partId,QVector<dou
     return true;
 }
 
+bool SceneDocument::previewFoldedSheetMetalEdit(const QString& partId,
+        const QVector<double>& flanges,double width,double thickness,
+        const QVector<FoldedSheetBend>& bends,double* solidVolumeMm3,
+        double* neutralFlatLengthMm,QString* error) const {
+    if(!solidVolumeMm3||!neutralFlatLengthMm){
+        setError(error,"Folded-body preview needs volume and flat-length outputs.");return false;
+    }
+    const Part* part=find(partId);
+    if(!part||!part->hasFoldedSheetMetalDefinition||
+       part->geometryToken!=part->foldedSheetGeometryToken){
+        setError(error,"Folded-body preview requires a current editable folded definition.");return false;
+    }
+    try{
+        // Use the same production solid builder as a committed edit, without
+        // checkpointing or changing any source body, history or drawing link.
+        const TopoDS_Shape candidate=makeFoldedSheetSolid(flanges,width,thickness,bends,error);
+        if(!validShape(candidate,error))return false;
+        GProp_GProps measured;
+        BRepGProp::VolumeProperties(candidate,measured);
+        const double volume=measured.Mass();
+        if(!std::isfinite(volume)||volume<=1e-9){
+            setError(error,"The proposed folded solid has invalid measured volume.");return false;
+        }
+        MultiBendFlatPattern flat;
+        if(!calculateFoldedSheetFlatPattern(flanges,width,thickness,bends,0.33,&flat,error))return false;
+        if(!std::isfinite(flat.flatLengthMm)||flat.flatLengthMm<=0){
+            setError(error,"The proposed neutral development is invalid.");return false;
+        }
+        // Commit both numeric outputs together only after all validation.
+        *solidVolumeMm3=volume;
+        *neutralFlatLengthMm=flat.flatLengthMm;
+        if(error)error->clear();
+        return true;
+    }catch(const Standard_Failure& e){
+        setError(error,QStringLiteral("Folded-body preview failed in OCCT: %1").arg(e.what()));
+    }catch(const std::exception& e){
+        setError(error,QStringLiteral("Folded-body preview failed: %1").arg(QString::fromUtf8(e.what())));
+    }
+    return false;
+}
+
+bool SceneDocument::buildLinkedFlatDevelopmentSet(const QString& flatBodyId,
+        QByteArray* svg,QByteArray* dxf,QByteArray* bendCsv,QString* error) const{
+    if(!svg||!dxf||!bendCsv||svg==dxf||svg==bendCsv||dxf==bendCsv){
+        setError(error,"Three separate output buffers are required for a complete flat-development set.");return false;
+    }
+    const Part* flat=find(flatBodyId);
+    if(!flat||flat->linkedFoldedFlatSourceId.isEmpty()){
+        setError(error,"Select a saved associative flat blank, not the folded source.");return false;
+    }
+    const Part* folded=find(flat->linkedFoldedFlatSourceId);
+    if(!folded||!folded->hasFoldedSheetMetalDefinition||
+       folded->geometryToken!=folded->foldedSheetGeometryToken||
+       flat->linkedFoldedFlatSourceToken!=folded->geometryToken){
+        setError(error,"The linked flat development is missing or stale; rebuild the folded source.");return false;
+    }
+    const QVector<double> factors=flat->linkedFoldedFlatKFactors.isEmpty()?
+        QVector<double>(folded->foldedSheetBends.size(),0.33):flat->linkedFoldedFlatKFactors;
+    QByteArray stagedSvg,stagedDxf,stagedCsv;
+    MultiBendFlatPattern visual,manufacturing;
+    QString issue;
+    if(!buildFoldedSheetFlatPatternSvg(folded->foldedSheetFlangesMm,
+           folded->foldedSheetWidthMm,folded->foldedSheetThicknessMm,
+           folded->foldedSheetBends,factors,flat->linkedFoldedFlatRelief,
+           &stagedSvg,&visual,&issue)||
+       !buildFoldedSheetFlatPatternDxf(folded->foldedSheetFlangesMm,
+           folded->foldedSheetWidthMm,folded->foldedSheetThicknessMm,
+           folded->foldedSheetBends,factors,flat->linkedFoldedFlatRelief,
+           &stagedDxf,&manufacturing,&issue)||
+       !buildFoldedSheetBendTableCsv(folded->foldedSheetFlangesMm,
+           folded->foldedSheetWidthMm,folded->foldedSheetThicknessMm,
+           folded->foldedSheetBends,factors,&stagedCsv,&issue)||
+       !equivalentFoldedSheetDevelopment(visual,manufacturing,&issue)||
+       stagedSvg.isEmpty()||stagedDxf.isEmpty()||stagedCsv.isEmpty()){
+        setError(error,issue.isEmpty()?"Linked SVG/DXF/CSV set could not be validated.":issue);
+        return false; // Caller outputs remain unchanged even if one generator failed.
+    }
+    *svg=std::move(stagedSvg);*dxf=std::move(stagedDxf);*bendCsv=std::move(stagedCsv);
+    if(error)error->clear();
+    return true;
+}
+
+bool SceneDocument::exportLinkedFlatManufacturingPackage(const QString& flatBodyId,
+        const QString& newDirectory,QString* error) const{
+    const QFileInfo destination(newDirectory);
+    if(newDirectory.trimmed().isEmpty()||destination.exists()||
+       !destination.isAbsolute()||!QDir(destination.absolutePath()).exists()){
+        setError(error,"Choose a new package folder under an existing directory; existing packages are not overwritten.");return false;
+    }
+    const Part* flat=find(flatBodyId);
+    const Part* folded=flat?find(flat->linkedFoldedFlatSourceId):nullptr;
+    if(!flat||!folded){setError(error,"A current saved associative flat blank is required.");return false;}
+    QByteArray svg,dxf,bendCsv;
+    if(!buildLinkedFlatDevelopmentSet(flatBodyId,&svg,&dxf,&bendCsv,error))return false;
+    const QVector<double> factors=flat->linkedFoldedFlatKFactors.isEmpty()?
+        QVector<double>(folded->foldedSheetBends.size(),0.33):flat->linkedFoldedFlatKFactors;
+    QJsonObject manifest;
+    manifest.insert("format","CADWorkbench associative multi-flange package v1");
+    manifest.insert("folded_source_id",folded->id);
+    manifest.insert("flat_body_id",flat->id);
+    manifest.insert("source_geometry_token",folded->geometryToken);
+    manifest.insert("linked_source_token",flat->linkedFoldedFlatSourceToken);
+    manifest.insert("source_name",folded->name);
+    manifest.insert("width_mm",folded->foldedSheetWidthMm);
+    manifest.insert("thickness_mm",folded->foldedSheetThicknessMm);
+    manifest.insert("relief_width_mm",flat->linkedFoldedFlatRelief.widthMm);
+    manifest.insert("relief_depth_mm",flat->linkedFoldedFlatRelief.depthMm);
+    QJsonArray flanges,kValues,bends;
+    for(double length:folded->foldedSheetFlangesMm)flanges.append(length);
+    for(double factor:factors)kValues.append(factor);
+    for(const auto& bend:folded->foldedSheetBends){
+        QJsonObject entry;entry.insert("signed_angle_degrees",bend.angleDegrees);
+        entry.insert("inside_radius_mm",bend.insideRadiusMm);bends.append(entry);
+    }
+    manifest.insert("straight_flange_lengths_mm",flanges);
+    manifest.insert("per_bend_k_factors",kValues);
+    manifest.insert("bends",bends);
+    QJsonObject hashes;
+    const QMap<QString,QByteArray> files{
+        {QStringLiteral("flat-pattern.svg"),svg},
+        {QStringLiteral("flat-pattern.dxf"),dxf},
+        {QStringLiteral("bend-schedule.csv"),bendCsv}};
+    for(auto it=files.cbegin();it!=files.cend();++it)
+        hashes.insert(it.key(),QString::fromLatin1(QCryptographicHash::hash(it.value(),
+            QCryptographicHash::Sha256).toHex()));
+    manifest.insert("sha256",hashes);
+    manifest.insert("note","Neutral flat geometry is not proof of forming, tooling clearance, or springback accuracy.");
+    QTemporaryDir staging(QDir(destination.absolutePath()).filePath(".cadworkbench-package-XXXXXX"));
+    if(!staging.isValid()){
+        setError(error,"Could not create a temporary manufacturing package folder.");return false;
+    }
+    auto write=[&](const QString& name,const QByteArray& data)->bool{
+        QSaveFile output(QDir(staging.path()).filePath(name));
+        if(!output.open(QIODevice::WriteOnly)||output.write(data)!=data.size()||!output.commit()){
+            setError(error,QString("Failed to write manufacturing package file: %1").arg(name));return false;
+        }
+        return true;
+    };
+    for(auto it=files.cbegin();it!=files.cend();++it)
+        if(!write(it.key(),it.value()))return false;
+    if(!write("manifest.json",QJsonDocument(manifest).toJson(QJsonDocument::Indented)))return false;
+    if(QDir(newDirectory).exists()||!QDir().rename(staging.path(),newDirectory)){
+        setError(error,"Could not publish manufacturing package; the temporary export was discarded.");return false;
+    }
+    staging.setAutoRemove(false);
+    if(error)error->clear();return true;
+}
+
+bool SceneDocument::exportLinkedFlatManufacturingBatch(const QStringList& flatBodyIds,
+        const QString& newDirectory,QString* error,
+        const StockLayoutSettings& stock) const{
+    if(flatBodyIds.size()<2||flatBodyIds.size()>24){
+        setError(error,"Select 2-24 distinct associative flat blanks for a batch job.");return false;
+    }
+    QSet<QString> unique;
+    struct Item{QString id;QString source;QString folder;QByteArray svg,dxf,csv;
+        double flatLengthMm=0.0,sheetWidthMm=0.0;
+        std::vector<contour_nesting::Rect> reliefCutouts;};
+    QVector<Item> items;
+    items.reserve(flatBodyIds.size());
+    for(int i=0;i<flatBodyIds.size();++i){
+        const QString id=flatBodyIds[i];
+        const Part* flat=find(id);
+        if(unique.contains(id)||!flat||flat->linkedFoldedFlatSourceId.isEmpty()){
+            setError(error,"Every selected body must be a unique associative flat blank.");return false;
+        }
+        unique.insert(id);
+        Item item;item.id=id;item.source=flat->linkedFoldedFlatSourceId;
+        item.folder=QString("part_%1_%2").arg(i+1,3,10,QChar('0')).arg(id.left(12));
+        if(!buildLinkedFlatDevelopmentSet(id,&item.svg,&item.dxf,&item.csv,error))return false;
+        if(stock.enabled){
+            const Part* folded=find(item.source);
+            if(!folded){setError(error,"A linked flat blank lost its folded source.");return false;}
+            const QVector<double> factors=flat->linkedFoldedFlatKFactors.isEmpty()?
+                QVector<double>(folded->foldedSheetBends.size(),0.33):flat->linkedFoldedFlatKFactors;
+            MultiBendFlatPattern developed;
+            if(!calculateFoldedSheetFlatPattern(folded->foldedSheetFlangesMm,
+                    folded->foldedSheetWidthMm,folded->foldedSheetThicknessMm,
+                    folded->foldedSheetBends,factors,&developed,error))return false;
+            item.flatLengthMm=developed.flatLengthMm;
+            item.sheetWidthMm=developed.widthMm;
+            const SheetMetalRelief relief=flat->linkedFoldedFlatRelief;
+            // This IS the same neutral bend-station rule used by linked B-rep
+            // relief cutting and DXF. No approximation to a filled rectangle
+            // is needed when the blank has orthogonal end reliefs.
+            if(relief.widthMm>0){
+                for(double station:developed.bendLinePositionsMm){
+                    const double left=station-relief.widthMm/2.0;
+                    item.reliefCutouts.push_back({left,0,relief.widthMm,relief.depthMm});
+                    item.reliefCutouts.push_back({left,developed.widthMm-relief.depthMm,
+                        relief.widthMm,relief.depthMm});
+                }
+            }
+        }
+        items.append(std::move(item));
+    }
+    stock_material::Result gaugeReport;
+    if(stock.enabled&&stock.requireCompatibleGaugeAndMaterial){
+        std::vector<stock_material::Part> gaugeItems;
+        gaugeItems.reserve(static_cast<std::size_t>(items.size()));
+        for(const Item& item:items){
+            const Part* folded=find(item.source);
+            const Part* flat=find(item.id);
+            if(!folded||!flat){
+                setError(error,"A stock item lost its source or flat body.");return false;
+            }
+            const QString grade=folded->materialName.isEmpty()?
+                flat->materialName:folded->materialName;
+            gaugeItems.push_back({item.id.toStdString(),grade.trimmed().toUpper().toStdString(),
+                folded->foldedSheetThicknessMm});
+        }
+        std::string detail;
+        if(!stock_material::validate(gaugeItems,&gaugeReport,&detail)){
+            setError(error,QStringLiteral("Stock material/gauge issue: ")+
+                QString::fromStdString(detail));return false;
+        }
+    }
+    stock_layout::Plan sheetPlan;
+    contour_nesting::Layout contourPlan;
+    const bool reliefAware=stock.enabled&&std::any_of(items.cbegin(),items.cend(),
+        [](const Item& item){return !item.reliefCutouts.empty();});
+    if(stock.enabled){
+        std::string issue;
+        if(reliefAware){
+            std::vector<contour_nesting::Blank> blanks;
+            for(const Item& item:items)
+                blanks.push_back({item.id.toStdString(),item.flatLengthMm,
+                    item.sheetWidthMm,item.reliefCutouts});
+            if(!contour_nesting::build(blanks,stock.stockWidthMm,stock.stockHeightMm,
+                    stock.gapMm,stock.allowRotation,&contourPlan,&issue)){
+                setError(error,QStringLiteral("Relief-aware contour planning rejected: ")+
+                    QString::fromStdString(issue));return false;
+            }
+            sheetPlan=contourPlan.plan;
+        }else{
+            std::vector<stock_layout::Blank> blanks;
+            for(const Item& item:items)blanks.push_back({item.id.toStdString(),
+                item.flatLengthMm,item.sheetWidthMm});
+            if(!stock_layout::build(blanks,stock.stockWidthMm,stock.stockHeightMm,
+                    stock.gapMm,stock.allowRotation,&sheetPlan,&issue)){
+                setError(error,QStringLiteral("Stock-layout planning rejected: ")+
+                    QString::fromStdString(issue));return false;
+            }
+        }
+    }
+    const QFileInfo destination(newDirectory);
+    if(newDirectory.trimmed().isEmpty()||!destination.isAbsolute()||
+       destination.exists()||!QDir(destination.absolutePath()).exists()){
+        setError(error,"The manufacturing batch needs a new folder under an existing directory.");return false;
+    }
+    QTemporaryDir staging(QDir(destination.absolutePath()).filePath(".cadworkbench-batch-XXXXXX"));
+    if(!staging.isValid()){setError(error,"Cannot stage batch package in destination directory.");return false;}
+    QJsonArray manifestParts;
+    QByteArray index("part_folder,flat_body_id,folded_source_id,svg_sha256,dxf_sha256,bend_csv_sha256\n");
+    const auto hash=[](const QByteArray& bytes){return QString::fromLatin1(
+        QCryptographicHash::hash(bytes,QCryptographicHash::Sha256).toHex());};
+    for(const Item& item:items){
+        const QString folder=QDir(staging.path()).filePath(item.folder);
+        // Reuse the normal per-part package implementation, including its
+        // geometry provenance and SHA-256 manifest. The outer temporary dir
+        // removes every partial part if any later item fails.
+        if(!exportLinkedFlatManufacturingPackage(item.id,folder,error))return false;
+        QJsonObject entry;
+        entry.insert("flat_body_id",item.id);entry.insert("folded_source_id",item.source);
+        entry.insert("package_directory",item.folder);
+        entry.insert("svg_sha256",hash(item.svg));
+        entry.insert("dxf_sha256",hash(item.dxf));
+        entry.insert("bend_csv_sha256",hash(item.csv));
+        manifestParts.append(entry);
+        index+=QString("%1,%2,%3,%4,%5,%6\n")
+            .arg(item.folder,item.id,item.source,hash(item.svg),hash(item.dxf),hash(item.csv)).toUtf8();
+    }
+    QJsonObject indexManifest;
+    indexManifest.insert("format","CADWorkbench multi-part associative sheet-metal job v1");
+    QByteArray stockCsv,stockSvg,cutLengthCsv;
+    double totalCutLength=0.0;
+    if(stock.enabled){
+        // Calculate exposed neutral-material cut length from each developed
+        // contour, not the outside envelope. Interior seams created by our
+        // orthogonal decomposition are excluded. This is planning evidence,
+        // not a cutter toolpath, kerf allowance or piercing schedule.
+        cutLengthCsv="flat_body_id,material_area_mm2,relief_area_mm2,exposed_cut_length_mm\n";
+        for(const Item& item:items){
+            contour_metrics::Result metrics;std::string detail;
+            if(!contour_metrics::measure({item.id.toStdString(),item.flatLengthMm,
+                    item.sheetWidthMm,item.reliefCutouts},&metrics,&detail)){
+                setError(error,QStringLiteral("Cut-length planning failed for %1: %2")
+                    .arg(item.id,QString::fromStdString(detail)));return false;
+            }
+            totalCutLength+=metrics.exposedCutLengthMm;
+            cutLengthCsv+=QString("%1,%2,%3,%4\n").arg(item.id)
+                .arg(metrics.netAreaMm2,0,'g',16)
+                .arg(metrics.removedAreaMm2,0,'g',16)
+                .arg(metrics.exposedCutLengthMm,0,'g',16).toUtf8();
+        }
+        // The manifest is assembled after stock-layout generation; attach
+        // totalCutLength to its stock-layout record below.
+
+        stockCsv="sheet,flat_body_id,x_mm,y_mm,length_mm,width_mm,rotated_90_deg\n";
+        for(const auto& position:sheetPlan.placements){
+            stockCsv+=QString("%1,%2,%3,%4,%5,%6,%7\n")
+                .arg(static_cast<qulonglong>(position.sheet)).arg(QString::fromStdString(position.id))
+                .arg(position.xMm,0,'g',16).arg(position.yMm,0,'g',16)
+                .arg(position.lengthMm,0,'g',16).arg(position.widthMm,0,'g',16)
+                .arg(position.rotated?"YES":"NO").toUtf8();
+        }
+        // SVG shows actual material regions for orthogonal relieved flats,
+        // otherwise the enclosing rectangles. Neither is a certified cut path.
+        QString svg=QStringLiteral("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 %1 %2\">\n")
+            .arg(stock.stockWidthMm,0,'g',16)
+            .arg(stock.stockHeightMm*sheetPlan.sheets+stock.gapMm*(sheetPlan.sheets-1),0,'g',16);
+        for(std::size_t sheet=1;sheet<=sheetPlan.sheets;++sheet){
+            const double oy=(sheet-1)*(stock.stockHeightMm+stock.gapMm);
+            svg+=QStringLiteral("<rect x=\"0\" y=\"%1\" width=\"%2\" height=\"%3\" fill=\"none\" stroke=\"#555\" stroke-width=\"0.8\"/>\n")
+                .arg(oy,0,'g',16).arg(stock.stockWidthMm,0,'g',16).arg(stock.stockHeightMm,0,'g',16);
+        }
+        if(reliefAware){
+            // Draw ACTUAL material patches after the exact rectangular-relief
+            // subtraction. Separate patches are nonoverlapping by construction.
+            for(const auto& item:contourPlan.items){
+                const double oy=(item.placement.sheet-1)*(stock.stockHeightMm+stock.gapMm);
+                for(const auto& piece:item.material){
+                    svg+=QStringLiteral("<rect x=\"%1\" y=\"%2\" width=\"%3\" height=\"%4\" fill=\"#d9e4f4\" stroke=\"#183c59\" stroke-width=\"0.15\"/>\n")
+                        .arg(piece.x,0,'g',16).arg(piece.y+oy,0,'g',16)
+                        .arg(piece.w,0,'g',16).arg(piece.h,0,'g',16);
+                }
+                svg+=QStringLiteral("<text x=\"%1\" y=\"%2\" font-size=\"4\" fill=\"#14334d\">%3</text>\n")
+                    .arg(item.placement.xMm+2,0,'g',16)
+                    .arg(item.placement.yMm+oy+5,0,'g',16)
+                    .arg(QString::fromStdString(item.placement.id).left(12).toHtmlEscaped());
+            }
+        }else for(const auto& position:sheetPlan.placements){
+            const double oy=(position.sheet-1)*(stock.stockHeightMm+stock.gapMm);
+            svg+=QStringLiteral("<rect x=\"%1\" y=\"%2\" width=\"%3\" height=\"%4\" fill=\"#d9e4f4\" stroke=\"#183c59\" stroke-width=\"0.5\"/>\n")
+                .arg(position.xMm,0,'g',16).arg(position.yMm+oy,0,'g',16)
+                .arg(position.lengthMm,0,'g',16).arg(position.widthMm,0,'g',16);
+            svg+=QStringLiteral("<text x=\"%1\" y=\"%2\" font-size=\"4\" fill=\"#14334d\">%3</text>\n")
+                .arg(position.xMm+2,0,'g',16).arg(position.yMm+oy+5,0,'g',16)
+                .arg(QString::fromStdString(position.id).left(12).toHtmlEscaped());
+        }
+        svg+=QStringLiteral("</svg>\n");stockSvg=svg.toUtf8();
+        QJsonObject layout;
+        layout.insert("stock_material_compatibility_checked",stock.requireCompatibleGaugeAndMaterial);
+        if(stock.requireCompatibleGaugeAndMaterial){
+            layout.insert("common_sheet_thickness_mm",gaugeReport.thicknessMm);
+            layout.insert("common_material_grade",QString::fromStdString(gaugeReport.material));
+            layout.insert("material_grade_assigned",gaugeReport.materialAssigned);
+            layout.insert("grade_note",gaugeReport.materialAssigned?
+                "Assigned grades agree; independently verify heat/lot and specification.":
+                "No material grade is assigned; identify stock before manufacturing.");
+        }
+        layout.insert("stock_width_mm",stock.stockWidthMm);
+        layout.insert("stock_height_mm",stock.stockHeightMm);
+        layout.insert("gap_mm",stock.gapMm);
+        layout.insert("allow_90_degree_rotation",stock.allowRotation);
+        layout.insert("sheet_count",static_cast<int>(sheetPlan.sheets));
+        // Backward-compatible envelope utilization is retained for legacy
+        // consumers; contour-aware net material utilization is additional.
+        double envelopeArea=0.0;
+        for(const Item& item:items)envelopeArea+=item.flatLengthMm*item.sheetWidthMm;
+        layout.insert("blank_envelope_area_mm2",envelopeArea);
+        const double availableArea=stock.stockWidthMm*stock.stockHeightMm*sheetPlan.sheets;
+        layout.insert("rectangular_utilization_fraction",envelopeArea/availableArea);
+        layout.insert("material_utilization_fraction",sheetPlan.utilization);
+        layout.insert("stock_layout_csv_sha256",hash(stockCsv));
+        layout.insert("stock_layout_svg_sha256",hash(stockSvg));
+        layout.insert("cut_length_csv_sha256",hash(cutLengthCsv));
+        layout.insert("total_exposed_neutral_cut_length_mm",totalCutLength);
+        layout.insert("cut_length_qualification","Neutral orthogonal contours only; no kerf, lead-ins, piercing or toolpath ordering.");
+        layout.insert("relief_aware_contour_placement",reliefAware);
+        layout.insert("net_contour_material_area_mm2",sheetPlan.totalBlankAreaMm2);
+        layout.insert("qualification",reliefAware?
+            "Orthogonal neutral-relief material regions with exact planar overlap checks; greedy placement, not CNC nesting or grain/kerf certification.":
+            "Rectangular envelope free-region packing; not cut-contour nesting or grain/kerf certification.");
+        indexManifest.insert("stock_layout",layout);
+    }
+    indexManifest.insert("part_count",static_cast<int>(items.size()));
+    indexManifest.insert("parts",manifestParts);
+    indexManifest.insert("index_csv_sha256",hash(index));
+    indexManifest.insert("qualification","Neutral developments require independent shop validation.");
+    const auto write=[&](const QString& name,const QByteArray& bytes)->bool{
+        QSaveFile file(QDir(staging.path()).filePath(name));
+        if(!file.open(QIODevice::WriteOnly)||file.write(bytes)!=bytes.size()||!file.commit()){
+            setError(error,"Could not finish the staged batch index/manifest.");return false;
+        }
+        return true;
+    };
+    if(stock.enabled&&(!write("stock-layout.csv",stockCsv)||
+        !write("stock-layout.svg",stockSvg)||
+        !write("cut-length-summary.csv",cutLengthCsv)))return false;
+    if(!write("batch-index.csv",index)||!write("batch-manifest.json",
+            QJsonDocument(indexManifest).toJson(QJsonDocument::Indented)))return false;
+    if(QDir(newDirectory).exists()||!QDir().rename(staging.path(),newDirectory)){
+        setError(error,"Batch publication failed; no incomplete job was published.");return false;
+    }
+    staging.setAutoRemove(false);
+    if(error)error->clear();return true;
+}
+
 bool SceneDocument::editFoldedSheetMetal(const QString& partId,const QVector<double>& flanges,
         double width,double thickness,const QVector<FoldedSheetBend>& bends,QString* error) {
-    const auto found=std::find_if(parts_.begin(),parts_.end(),[&](const Part& part){return part.id==partId;});
-    if(found==parts_.end()||!found->hasFoldedSheetMetalDefinition){setError(error,"Selected body has no editable folded sheet-metal definition.");return false;}
+    return editFoldedSheetMetalWithDevelopments(partId,flanges,width,thickness,bends,{},error);
+}
+
+bool SceneDocument::editFoldedSheetMetalWithDevelopments(const QString& partId,
+        const QVector<double>& flanges,double width,double thickness,
+        const QVector<FoldedSheetBend>& bends,
+        const QMap<QString,QVector<double>>& linkedKFactors,QString* error) {
+    // Qt 6's QVector (QList) is implicitly shared.  Store a stable integer
+    // index BEFORE copying parts_: calling non-const parts_.begin() after
+    // the copy may detach storage and invalidate a saved mutable iterator.
+    // This previously caused undefined behavior (and a Windows segfault)
+    // when the staged folded edit indexed back into its source scene.
+    const auto found=std::find_if(parts_.cbegin(),parts_.cend(),[&](const Part& part){return part.id==partId;});
+    if(found==parts_.cend()||!found->hasFoldedSheetMetalDefinition){setError(error,"Selected body has no editable folded sheet-metal definition.");return false;}
     if(found->geometryToken!=found->foldedSheetGeometryToken){setError(error,"Folded sheet-metal definition is stale because the body was changed by another modeling operation.");return false;}
+    const qsizetype sourceIndex=static_cast<qsizetype>(std::distance(parts_.cbegin(),found));
+    // Explicitly identify each associated blank. Unknown or unrelated IDs
+    // cannot alter another source's K-factors, even if the source itself is
+    // otherwise valid. A nonempty K-factor list must match every new bend.
+    bool developmentChanged=false;
+    for(auto it=linkedKFactors.cbegin();it!=linkedKFactors.cend();++it){
+        const Part* linked=find(it.key());
+        if(!linked||linked->linkedFoldedFlatSourceId!=partId||
+           (!it.value().isEmpty()&&it.value().size()!=bends.size())){
+            setError(error,"New linked development must name a flat blank of this source and provide one K-factor per new bend.");
+            return false;
+        }
+        for(const double factor:it.value())if(!std::isfinite(factor)||factor<0||factor>1){
+            setError(error,"Every linked development K-factor must be finite and between zero and one.");return false;
+        }
+        if(linked->linkedFoldedFlatKFactors!=it.value())developmentChanged=true;
+    }
+    // Diagnostic-only trace for Windows crash triage; no normal-console output.
+    // The environment variable is explicitly set by RUN_V170_COMPREHENSIVE_AUDIT.ps1.
+    const bool foldedTrace=qEnvironmentVariableIsSet("CAD_V170_FOLDED_TRACE");
+    const auto traceFolded=[foldedTrace](const char* stage){
+        if(foldedTrace){std::fprintf(stderr,"[folded commit] %s\n",stage);std::fflush(stderr);}
+    };
     try{
+        traceFolded("solid builder: before");
         const TopoDS_Shape rebuilt=makeFoldedSheetSolid(flanges,width,thickness,bends,error);
+        traceFolded("solid builder: after");
         if(!validShape(rebuilt,error))return false;
+        traceFolded("solid validation: after");
         if(flanges==found->foldedSheetFlangesMm&&width==found->foldedSheetWidthMm&&
            thickness==found->foldedSheetThicknessMm&&bends.size()==found->foldedSheetBends.size()){
             bool same=true;for(int i=0;i<bends.size();++i)same=same&&bends[i].angleDegrees==found->foldedSheetBends[i].angleDegrees&&
                 bends[i].insideRadiusMm==found->foldedSheetBends[i].insideRadiusMm;
-            if(same)return true;
+            if(same&&!developmentChanged)return true;
         }
-        checkpoint();
-        Part& part=*std::find_if(parts_.begin(),parts_.end(),[&](const Part& candidate){return candidate.id==partId;});
+        traceFolded("staged part copy: before");
+        QVector<Part> proposed=parts_;
+        traceFolded("staged part copy: after");
+        Part& part=proposed[sourceIndex]; // stable index, no iterator into detached Qt storage
         part.shape=rebuilt;part.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);
         part.foldedSheetGeometryToken=part.geometryToken;part.foldedSheetFlangesMm=flanges;
         part.foldedSheetWidthMm=width;part.foldedSheetThicknessMm=thickness;part.foldedSheetBends=bends;
+        for(Part& linked:proposed){
+            const auto update=linkedKFactors.constFind(linked.id);
+            if(update==linkedKFactors.cend())continue;
+            if(linked.linkedFoldedFlatKFactors!=update.value()){
+                linked.linkedFoldedFlatKFactors=update.value();
+                linked.linkedFoldedFlatSourceToken.clear(); // force rebuild even for same source dimensions
+            }
+        }
+        // The source body and every linked neutral blank regenerate in one
+        // transaction. An invalid dependent rejects the entire proposed edit.
+        traceFolded("linked propagation: before");
+        if(!propagateLinkedBodies(&proposed,error))return false;
+        traceFolded("linked propagation: after");
+        traceFolded("undo snapshot: before");
+        checkpoint();parts_=std::move(proposed);
+        traceFolded("commit: after");
         return true;
     }catch(const Standard_Failure& e){setError(error,QStringLiteral("Folded sheet-metal rebuild failed: %1").arg(e.what()));}
      catch(const std::exception& e){setError(error,QString::fromUtf8(e.what()));}
@@ -1545,6 +2334,7 @@ bool SceneDocument::translate(const QString& id, double x, double y, double z, Q
     if (!finiteOffset(x) || !finiteOffset(y) || !finiteOffset(z)) { setError(error, "Translation offset out of range."); return false; }
     int rootIndex=-1;for(int i=0;i<parts_.size();++i)if(parts_[i].id==id){rootIndex=i;break;}
     if (rootIndex<0) { setError(error, "Object not found."); return false; }
+    if(parts_[rootIndex].hasLinkedBoolean||parts_[rootIndex].hasLinkedSketchExtrusion||parts_[rootIndex].hasInPlaceSketchFeature||!parts_[rootIndex].linkedFoldedFlatSourceId.isEmpty()){setError(error,"Edit a linked Boolean source instead of directly transforming its result.");return false;}
     if (x == 0 && y == 0 && z == 0) return true;
     try {
         gp_Trsf transform;
@@ -1570,14 +2360,16 @@ bool SceneDocument::translate(const QString& id, double x, double y, double z, Q
             }
             updates.append({index,result});
         }
-        checkpoint();
+        QVector<Part> candidate=parts_;
         for(const TranslationUpdate& update:updates){
-            Part& target=parts_[update.index];target.shape=update.shape;target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);
+            Part& target=candidate[update.index];target.shape=update.shape;target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);
             if(!target.componentDefinitionId.isEmpty()){target.placementX+=x;target.placementY+=y;target.placementZ+=z;}
             if(target.assemblyJointType==QStringLiteral("Revolute")||target.assemblyJointType==QStringLiteral("Prismatic")){
                 target.jointOriginX+=x;target.jointOriginY+=y;target.jointOriginZ+=z;
             }
         }
+        if(!propagateLinkedBodies(&candidate,error))return false;
+        checkpoint();parts_=std::move(candidate);
         return true;
     } catch (const Standard_Failure& e) { setError(error, QStringLiteral("CAD kernel error: %1").arg(e.what())); }
       catch (const std::exception& e) { setError(error, QString::fromUtf8(e.what())); }
@@ -1588,6 +2380,7 @@ bool SceneDocument::rotate(const QString& id, Axis axis, double degrees, QString
     if (!std::isfinite(degrees) || std::abs(degrees) > 36000) { setError(error, "Angle must be finite and within Â±36,000 degrees."); return false; }
     int rootIndex=-1;for(int i=0;i<parts_.size();++i)if(parts_[i].id==id){rootIndex=i;break;}
     if (rootIndex<0) { setError(error, "Object not found."); return false; }
+    if(parts_[rootIndex].hasLinkedBoolean||parts_[rootIndex].hasLinkedSketchExtrusion||parts_[rootIndex].hasInPlaceSketchFeature||!parts_[rootIndex].linkedFoldedFlatSourceId.isEmpty()){setError(error,"Edit a linked Boolean source instead of directly rotating its result.");return false;}
     if (degrees == 0.0) return true;
     try {
         const gp_Dir direction = axis == Axis::X ? gp_Dir(1,0,0) : axis == Axis::Y ? gp_Dir(0,1,0) : gp_Dir(0,0,1);
@@ -1631,9 +2424,9 @@ bool SceneDocument::rotate(const QString& id, Axis axis, double degrees, QString
             }
             updates.append({index,result});
         }
-        checkpoint();
+        QVector<Part> candidate=parts_;
         for(const RotationUpdate& update:updates){
-            Part& target=parts_[update.index];target.shape=update.shape;target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);
+            Part& target=candidate[update.index];target.shape=update.shape;target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);
             if(!target.componentDefinitionId.isEmpty()){
                 const gp_Pnt position=gp_Pnt(target.placementX,target.placementY,target.placementZ).Transformed(transform);
                 target.placementX=position.X();target.placementY=position.Y();target.placementZ=position.Z();
@@ -1649,6 +2442,8 @@ bool SceneDocument::rotate(const QString& id, Axis axis, double degrees, QString
                 target.jointAxisX=normalizedAxis.X();target.jointAxisY=normalizedAxis.Y();target.jointAxisZ=normalizedAxis.Z();
             }
         }
+        if(!propagateLinkedBodies(&candidate,error))return false;
+        checkpoint();parts_=std::move(candidate);
         return true;
     } catch (const Standard_Failure& e) { setError(error, QStringLiteral("CAD kernel error: %1").arg(e.what())); }
       catch (const std::exception& e) { setError(error, QString::fromUtf8(e.what())); }
@@ -1659,14 +2454,18 @@ bool SceneDocument::scale(const QString& id, double factor, QString* error) {
     if (!std::isfinite(factor) || factor < 1e-4 || factor > 1e4) { setError(error, "Scale must be 0.0001â€“10,000."); return false; }
     const Part* part = find(id);
     if (!part) { setError(error, "Object not found."); return false; }
+    if(part->hasLinkedBoolean||part->hasLinkedSketchExtrusion||part->hasInPlaceSketchFeature){setError(error,"Edit a linked Boolean source rather than scaling the derived result.");return false;}
+    if(!part->linkedFoldedFlatSourceId.isEmpty()){setError(error,"Associative flat blanks are read-only; edit the folded source.");return false;}
     if (factor == 1.0) return true;
     try {
         gp_Trsf transform;
         transform.SetScale(gp_Pnt(0,0,0), factor);
         const TopoDS_Shape result = BRepBuilderAPI_Transform(part->shape, transform, true).Shape();
         if(part->isSurfaceBody?!validSurfaceBodyShape(result,error):!validShape(result,error))return false;
-        checkpoint();
-        for (auto& target : parts_) if (target.id == id) { target.shape = result; target.geometryToken = QUuid::createUuid().toString(QUuid::WithoutBraces); break; }
+        QVector<Part> candidate=parts_;
+        for(auto& target:candidate)if(target.id==id){target.shape=result;target.geometryToken=generatedId();break;}
+        if(!propagateLinkedBodies(&candidate,error))return false;
+        checkpoint();parts_=std::move(candidate);
         return true;
     } catch (const Standard_Failure& e) { setError(error, QStringLiteral("CAD kernel error: %1").arg(e.what())); }
       catch (const std::exception& e) { setError(error, QString::fromUtf8(e.what())); }
@@ -1681,13 +2480,17 @@ bool SceneDocument::scaleNonUniform(const QString& id,double factorX,double fact
     }
     const Part* part=find(id);
     if(!part){setError(error,"Object not found.");return false;}
+    if(part->hasLinkedBoolean||part->hasLinkedSketchExtrusion||part->hasInPlaceSketchFeature){setError(error,"Edit a linked Boolean source rather than scaling its result.");return false;}
+    if(!part->linkedFoldedFlatSourceId.isEmpty()){setError(error,"Associative flat blanks are read-only; edit the folded source.");return false;}
     if(factorX==1.0&&factorY==1.0&&factorZ==1.0)return true;
     try{
         const gp_GTrsf transform(gp_Mat(factorX,0,0,0,factorY,0,0,0,factorZ),gp_XYZ(0,0,0));
         const TopoDS_Shape result=BRepBuilderAPI_GTransform(part->shape,transform,true).Shape();
         if(part->isSurfaceBody?!validSurfaceBodyShape(result,error):!validShape(result,error))return false;
-        checkpoint();
-        for(auto& target:parts_)if(target.id==id){target.shape=result;target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);break;}
+        QVector<Part> candidate=parts_;
+        for(auto& target:candidate)if(target.id==id){target.shape=result;target.geometryToken=generatedId();break;}
+        if(!propagateLinkedBodies(&candidate,error))return false;
+        checkpoint();parts_=std::move(candidate);
         return true;
     }catch(const Standard_Failure& e){setError(error,QStringLiteral("CAD kernel error: %1").arg(e.what()));}
      catch(const std::exception& e){setError(error,QString::fromUtf8(e.what()));}
@@ -2191,6 +2994,1632 @@ bool SceneDocument::solveAssemblyPose(const QMap<QString,double>& jointPositions
     checkpoint();parts_=std::move(candidate.parts_);return true;
 }
 
+bool SceneDocument::solveAssemblyMates(const QString& parentId,const QString& childId,
+                                       const std::vector<mates::Constraint>& constraints,
+                                       bool attachRigidJoint,QString* error){
+    const Part* parent=find(parentId);
+    const Part* child=find(childId);
+    if(!parent||!child||parentId==childId||parent->componentDefinitionId.isEmpty()||
+       child->componentDefinitionId.isEmpty()||!child->assemblyJointType.isEmpty()||
+       std::any_of(parts_.cbegin(),parts_.cend(),[&](const Part& part){
+           return part.assemblyJointParentBodyId==childId;
+       })||hasDrivenRevoluteAncestor(*child,parts_)){
+        setError(error,"Mate solve needs a distinct parent and a free component child with no jointed descendants.");return false;
+    }
+    std::string reason;mates::Transform solution;
+    if(!mates::solve(constraints,&solution,&reason)){
+        setError(error,QString::fromStdString(reason));return false;
+    }
+    try{
+        const auto& r=solution.rotation;
+        gp_Trsf delta;
+        delta.SetValues(r[0],r[1],r[2],solution.translation.x,
+                        r[3],r[4],r[5],solution.translation.y,
+                        r[6],r[7],r[8],solution.translation.z);
+        const TopoDS_Shape moved=BRepBuilderAPI_Transform(child->shape,delta,true).Shape();
+        if(!validShape(moved,error))return false;
+        const gp_Trsf newPose=delta.Multiplied(freeOccurrencePlacement(*child));
+        const gp_XYZ origin=newPose.TranslationPart();
+        const double r11=newPose.Value(1,1),r21=newPose.Value(2,1),r31=newPose.Value(3,1);
+        const double r12=newPose.Value(1,2),r22=newPose.Value(2,2);
+        const double r32=newPose.Value(3,2),r33=newPose.Value(3,3);
+        const double pitch=std::asin(std::clamp(-r31,-1.0,1.0));
+        const double cp=std::cos(pitch);
+        const double yaw=std::abs(cp)>1e-8?std::atan2(r21,r11):std::atan2(-r12,r22);
+        const double roll=std::abs(cp)>1e-8?std::atan2(r32,r33):0.0;
+        const double deg=180.0/std::numbers::pi;
+        if(!finiteOffset(origin.X())||!finiteOffset(origin.Y())||!finiteOffset(origin.Z())||
+           !std::isfinite(yaw)||!std::isfinite(pitch)||!std::isfinite(roll)){
+            setError(error,"Mate solve produced an unsupported component placement.");return false;
+        }
+        QVector<Part> candidate=parts_;
+        for(Part& part:candidate)if(part.id==childId){
+            part.shape=moved;part.geometryToken=generatedId();
+            part.placementX=origin.X();part.placementY=origin.Y();part.placementZ=origin.Z();
+            part.placementYawDegrees=yaw*deg;part.placementPitchDegrees=pitch*deg;
+            part.placementRollDegrees=roll*deg;
+            if(attachRigidJoint){
+                part.assemblyJointType=QStringLiteral("Rigid");
+                part.assemblyJointParentBodyId=parentId;
+            }
+            break;
+        }
+        // Prove placement metadata replays the same rigid pose on save/reopen.
+        const Part* updated=nullptr;
+        for(const auto& part:candidate)if(part.id==childId){updated=&part;break;}
+        const gp_Trsf reconstructed=freeOccurrencePlacement(*updated);
+        for(int row=1;row<=3;++row)for(int column=1;column<=4;++column)
+            if(std::abs(reconstructed.Value(row,column)-newPose.Value(row,column))>1e-5){
+                setError(error,"Solved orientation cannot be represented in persistent yaw/pitch/roll placement.");return false;
+            }
+        checkpoint();parts_=std::move(candidate);return true;
+    }catch(const Standard_Failure& failure){
+        setError(error,QStringLiteral("Assembly mate geometry failed: %1").arg(failure.what()));
+    }catch(const std::exception& failure){setError(error,QString::fromUtf8(failure.what()));}
+    return false;
+}
+
+bool SceneDocument::solveAssemblyMateNetwork(const QString& fixedBodyId,
+        const QVector<AssemblyNetworkMate>& connections,QString* error){
+    if(fixedBodyId.isEmpty()||connections.isEmpty()||connections.size()>128){
+        setError(error,"Provide a fixed component and 1-128 fully constrained mate connections.");return false;
+    }
+    QStringList ids{fixedBodyId};
+    for(const auto& connection:connections){
+        if(connection.parentBodyId.isEmpty()||connection.childBodyId.isEmpty()||
+           connection.parentBodyId==connection.childBodyId){
+            setError(error,"Mate network has a missing or self-linked component.");return false;
+        }
+        if(!ids.contains(connection.parentBodyId))ids.append(connection.parentBodyId);
+        if(!ids.contains(connection.childBodyId))ids.append(connection.childBodyId);
+    }
+    if(ids.size()>32||ids.size()<2){setError(error,"Rigid mate networks require 2-32 component occurrences.");return false;}
+    std::vector<mates::NetworkConnection> graph;
+    graph.reserve(static_cast<std::size_t>(connections.size()));
+    for(const auto& connection:connections){
+        graph.push_back({static_cast<std::size_t>(ids.indexOf(connection.parentBodyId)),
+                         static_cast<std::size_t>(ids.indexOf(connection.childBodyId)),
+                         connection.constraints});
+    }
+    for(const QString& id:ids){
+        const Part* part=find(id);
+        if(!part||part->componentDefinitionId.isEmpty()||
+           !part->assemblyJointType.isEmpty()||hasDrivenRevoluteAncestor(*part,parts_)||
+           std::any_of(parts_.cbegin(),parts_.cend(),[&](const Part& candidate){
+               return candidate.assemblyJointParentBodyId==id;
+           })){
+            setError(error,"All network components must exist as independent free occurrences without jointed descendants.");return false;
+        }
+    }
+    mates::NetworkSolution solution;std::string detail;
+    if(!mates::solveRigidNetwork(static_cast<std::size_t>(ids.size()),0,graph,&solution,&detail)){
+        setError(error,QString::fromStdString(detail));return false;
+    }
+    // A refresh that is already satisfied must not invent new B-rep tokens,
+    // create an undo entry, or invalidate dependent drawings.
+    const auto needsMovement=[&](const mates::Transform& correction){
+        if(std::abs(correction.translation.x)>1e-5||
+           std::abs(correction.translation.y)>1e-5||
+           std::abs(correction.translation.z)>1e-5)return true;
+        for(int row=0;row<3;++row)for(int col=0;col<3;++col)
+            if(std::abs(correction.rotation[3*row+col]-(row==col?1.0:0.0))>1e-7)
+                return true;
+        return false;
+    };
+    if(std::none_of(solution.worldCorrections.cbegin()+1,
+                    solution.worldCorrections.cend(),needsMovement))return true;
+    try{
+        QVector<Part> candidate=parts_;
+        const double degrees=180.0/std::numbers::pi;
+        bool changed=false;
+        for(int index=1;index<ids.size();++index){
+            const QString& id=ids[index];
+            auto at=std::find_if(candidate.begin(),candidate.end(),[&](const Part& part){return part.id==id;});
+            if(at==candidate.end()){setError(error,"Assembly component disappeared during staged solve.");return false;}
+            const auto& correction=solution.worldCorrections[static_cast<std::size_t>(index)];
+            const auto& r=correction.rotation;
+            gp_Trsf delta;
+            delta.SetValues(r[0],r[1],r[2],correction.translation.x,
+                            r[3],r[4],r[5],correction.translation.y,
+                            r[6],r[7],r[8],correction.translation.z);
+            const gp_Trsf newPose=delta.Multiplied(freeOccurrencePlacement(*at));
+            const gp_XYZ translation=newPose.TranslationPart();
+            const double r11=newPose.Value(1,1),r21=newPose.Value(2,1),r31=newPose.Value(3,1);
+            const double r12=newPose.Value(1,2),r22=newPose.Value(2,2);
+            const double r32=newPose.Value(3,2),r33=newPose.Value(3,3);
+            const double pitch=std::asin(std::clamp(-r31,-1.0,1.0));
+            const double cp=std::cos(pitch);
+            const double yaw=std::abs(cp)>1e-8?std::atan2(r21,r11):std::atan2(-r12,r22);
+            const double roll=std::abs(cp)>1e-8?std::atan2(r32,r33):0.0;
+            if(!finiteOffset(translation.X())||!finiteOffset(translation.Y())||
+               !finiteOffset(translation.Z())||!std::isfinite(pitch)||
+               !std::isfinite(roll)||!std::isfinite(yaw)){
+                setError(error,"Network mate placement exceeds supported coordinates.");return false;
+            }
+            const TopoDS_Shape moved=BRepBuilderAPI_Transform(at->shape,delta,true).Shape();
+            if(!validShape(moved,error))return false;
+            at->shape=moved;
+            at->placementX=translation.X();at->placementY=translation.Y();at->placementZ=translation.Z();
+            at->placementYawDegrees=yaw*degrees;at->placementPitchDegrees=pitch*degrees;
+            at->placementRollDegrees=roll*degrees;
+            const gp_Trsf roundTrip=freeOccurrencePlacement(*at);
+            for(int row=1;row<=3;++row)for(int col=1;col<=4;++col)
+                if(std::abs(roundTrip.Value(row,col)-newPose.Value(row,col))>1e-5){
+                    setError(error,"Mate network placement cannot be serialized with current Euler coordinates.");return false;
+                }
+            at->geometryToken=generatedId();
+            changed=true;
+        }
+        if(!changed)return true;
+        // Do not move the pinned component; commit only after *all* B-reps and
+        // persistent placements have been verified in this staged copy.
+        checkpoint();parts_=std::move(candidate);return true;
+    }catch(const Standard_Failure& failure){
+        setError(error,QStringLiteral("Assembly mate network failed in OCCT: %1").arg(failure.what()));
+    }catch(const std::exception& failure){
+        setError(error,QString::fromUtf8(failure.what()));
+    }
+    return false;
+}
+
+// Convert world observations into the original component-local frames. The
+// definitions then remain attached to each occurrence as placements change.
+// No inference about persistent face identity is made by these frame mates.
+namespace {
+mates::Transform toMateFrame(const gp_Trsf& frame){
+    mates::Transform out;
+    out.translation={frame.Value(1,4),frame.Value(2,4),frame.Value(3,4)};
+    out.rotation={{frame.Value(1,1),frame.Value(1,2),frame.Value(1,3),
+                   frame.Value(2,1),frame.Value(2,2),frame.Value(2,3),
+                   frame.Value(3,1),frame.Value(3,2),frame.Value(3,3)}};
+    return out;
+}
+mates::Vec3 matePoint(const gp_Trsf& frame,mates::Vec3 v){
+    gp_Pnt point(v.x,v.y,v.z);point.Transform(frame);
+    return {point.X(),point.Y(),point.Z()};
+}
+mates::Vec3 mateAxis(const gp_Trsf& frame,mates::Vec3 v){
+    gp_Vec axis(v.x,v.y,v.z);axis.Transform(frame);
+    return {axis.X(),axis.Y(),axis.Z()};
+}
+}
+
+bool SceneDocument::setLiveRigidMateNetwork(const QString& fixedId,
+        const QVector<AssemblyNetworkMate>& worldConnections,QString* error){
+    if(hasLiveArticulatedNetwork()){
+        setError(error,"Remove the saved articulated network before creating a rigid mate graph.");return false;
+    }
+    if(fixedId.isEmpty()||worldConnections.isEmpty()||worldConnections.size()>128){
+        setError(error,"A fixed occurrence and 1-128 connections are required.");return false;
+    }
+    QVector<AssemblyNetworkMate> local=worldConnections;
+    try{
+        for(AssemblyNetworkMate& connection:local){
+            const Part* parent=find(connection.parentBodyId);
+            const Part* child=find(connection.childBodyId);
+            if(!parent||!child||connection.constraints.empty()||connection.constraints.size()>32){
+                setError(error,"Live mates reference a missing occurrence or invalid constraint count.");return false;
+            }
+            const gp_Trsf parentToLocal=freeOccurrencePlacement(*parent).Inverted();
+            const gp_Trsf childToLocal=freeOccurrencePlacement(*child).Inverted();
+            for(auto& c:connection.constraints){
+                if(c.kind!=mates::Kind::Point&&c.kind!=mates::Kind::CoaxialAxis&&
+                   c.kind!=mates::Kind::CoincidentPlane){
+                    setError(error,"Invalid live-mate constraint kind.");return false;
+                }
+                c.parentPoint=matePoint(parentToLocal,c.parentPoint);
+                c.childPoint=matePoint(childToLocal,c.childPoint);
+                if(c.kind!=mates::Kind::Point){
+                    c.parentDirection=mateAxis(parentToLocal,c.parentDirection);
+                    c.childDirection=mateAxis(childToLocal,c.childDirection);
+                }
+            }
+        }
+    }catch(const Standard_Failure& e){
+        setError(error,QStringLiteral("Cannot capture local mate frames: %1").arg(e.what()));return false;
+    }catch(const std::exception& e){setError(error,QString::fromUtf8(e.what()));return false;}
+    const quint64 initialRevision=revision_;
+    // The existing transactional OCCT path validates every mate and commits
+    // all solved occurrences together, or none of them.
+    if(!solveAssemblyMateNetwork(fixedId,worldConnections,error))return false;
+    if(revision_==initialRevision)checkpoint(); // changed definitions, unchanged geometry
+    liveRigidMateFixed_=fixedId;
+    liveRigidMates_=std::move(local);
+    return true;
+}
+
+// Materialize the currently saved local observations as world observations.
+// This helper is read-only; committing or changing definitions happens only
+// after validation by the existing atomic rigid network solver.
+namespace {
+bool liveMateWorldObservations(const QVector<Part>& parts,
+                               const QVector<SceneDocument::AssemblyNetworkMate>& local,
+                               QVector<SceneDocument::AssemblyNetworkMate>* world,
+                               QString* error){
+    if(!world)return false;
+    QVector<SceneDocument::AssemblyNetworkMate> projected=local;
+    const auto partFor=[&](const QString& id)->const Part*{
+        for(const auto& part:parts)if(part.id==id)return &part;
+        return nullptr;
+    };
+    try{
+        for(auto& link:projected){
+            const Part* parent=partFor(link.parentBodyId);
+            const Part* child=partFor(link.childBodyId);
+            if(!parent||!child){if(error)*error="A saved mate references a removed occurrence.";return false;}
+            const gp_Trsf pw=freeOccurrencePlacement(*parent);
+            const gp_Trsf cw=freeOccurrencePlacement(*child);
+            for(auto& constraint:link.constraints){
+                constraint.parentPoint=matePoint(pw,constraint.parentPoint);
+                constraint.childPoint=matePoint(cw,constraint.childPoint);
+                if(constraint.kind!=mates::Kind::Point){
+                    constraint.parentDirection=mateAxis(pw,constraint.parentDirection);
+                    constraint.childDirection=mateAxis(cw,constraint.childDirection);
+                }
+            }
+        }
+    }catch(const Standard_Failure& e){
+        if(error)*error=QStringLiteral("Cannot project saved mate frames: %1").arg(e.what());return false;
+    }catch(const std::exception& e){if(error)*error=QString::fromUtf8(e.what());return false;}
+    *world=std::move(projected);return true;
+}
+}
+
+bool SceneDocument::liveRigidMateWorldDefinitions(QVector<AssemblyNetworkMate>* world,
+        QString* error) const{
+    if(!hasLiveRigidMateNetwork()||!world){
+        setError(error,"A saved rigid mate network and a valid output are required.");return false;
+    }
+    return liveMateWorldObservations(parts_,liveRigidMates_,world,error);
+}
+
+namespace {
+bool mateObservationsExactlyEqual(const SceneDocument::AssemblyNetworkMate& a,
+                                  const SceneDocument::AssemblyNetworkMate& b){
+    if(a.parentBodyId!=b.parentBodyId||a.childBodyId!=b.childBodyId||
+       a.constraints.size()!=b.constraints.size())return false;
+    const auto equal=[](mates::Vec3 x,mates::Vec3 y){
+        return x.x==y.x&&x.y==y.y&&x.z==y.z;
+    };
+    for(std::size_t i=0;i<a.constraints.size();++i){
+        const auto& x=a.constraints[i];
+        const auto& y=b.constraints[i];
+        if(x.kind!=y.kind||x.offsetMm!=y.offsetMm||
+           !equal(x.parentPoint,y.parentPoint)||
+           !equal(x.childPoint,y.childPoint))return false;
+        if(x.kind!=mates::Kind::Point&&
+           (!equal(x.parentDirection,y.parentDirection)||
+            !equal(x.childDirection,y.childDirection)))return false;
+    }
+    return true;
+}
+}
+
+bool SceneDocument::previewLiveRigidMateConnectionEdit(int index,
+        const AssemblyNetworkMate& proposed,QString* report,QString* error,
+        double requiredClearanceMm) const{
+    if(!fit::validThreshold(requiredClearanceMm)){
+        setError(error,"Mate preview clearance must be between 0 and 1,000,000 mm.");return false;
+    }
+    if(!report||!hasLiveRigidMateNetwork()||index<0||index>=liveRigidMates_.size()){
+        setError(error,"Choose a valid saved mate connection and preview destination.");return false;
+    }
+    const auto& old=liveRigidMates_.at(index);
+    if(proposed.parentBodyId!=old.parentBodyId||proposed.childBodyId!=old.childBodyId){
+        setError(error,"Editing cannot silently rebind mate endpoints.");return false;
+    }
+    QVector<AssemblyNetworkMate> world;
+    if(!liveRigidMateWorldDefinitions(&world,error))return false;
+    world[index]=proposed;
+    QStringList ids{liveRigidMateFixed_};
+    std::vector<mates::NetworkConnection> edges;
+    edges.reserve(static_cast<std::size_t>(world.size()));
+    for(const auto& connection:world){
+        if(connection.parentBodyId.isEmpty()||connection.childBodyId.isEmpty()||
+           connection.parentBodyId==connection.childBodyId){
+            setError(error,"Mate preview contains an invalid component pair.");return false;
+        }
+        if(!ids.contains(connection.parentBodyId))ids.append(connection.parentBodyId);
+        if(!ids.contains(connection.childBodyId))ids.append(connection.childBodyId);
+    }
+    if(ids.size()<2||ids.size()>32){
+        setError(error,"Mate preview supports 2-32 connected occurrences.");return false;
+    }
+    for(const auto& id:ids){
+        const Part* part=find(id);
+        if(!part||part->componentDefinitionId.isEmpty()||
+           !part->assemblyJointType.isEmpty()||hasDrivenRevoluteAncestor(*part,parts_)||
+           std::any_of(parts_.cbegin(),parts_.cend(),[&](const Part& other){
+               return other.assemblyJointParentBodyId==id;
+           })){
+            setError(error,"Mate preview requires independent free component occurrences.");return false;
+        }
+    }
+    for(const auto& connection:world){
+        edges.push_back({static_cast<std::size_t>(ids.indexOf(connection.parentBodyId)),
+                         static_cast<std::size_t>(ids.indexOf(connection.childBodyId)),
+                         connection.constraints});
+    }
+    mates::NetworkSolution solution;std::string detail;
+    if(!mates::solveRigidNetwork(static_cast<std::size_t>(ids.size()),0,edges,&solution,&detail)){
+        setError(error,QString::fromStdString(detail));return false;
+    }
+    QStringList lines;
+    lines << "READ-ONLY KINEMATIC PREVIEW: nominal geometry check, NOT continuous collision certification";
+    int moved=0;
+    try{
+        for(int j=1;j<ids.size();++j){
+            const Part* part=find(ids.at(j));
+            const auto& delta=solution.worldCorrections.at(static_cast<std::size_t>(j));
+            gp_Pnt origin(0,0,0);
+            origin.Transform(freeOccurrencePlacement(*part));
+            const mates::Vec3 original{origin.X(),origin.Y(),origin.Z()};
+            const auto next=mates::apply(delta,original);
+            const double x=next.x-original.x,y=next.y-original.y,z=next.z-original.z;
+            const double distance=std::sqrt(x*x+y*y+z*z);
+            const auto& a=delta.rotation;
+            const double cosine=std::clamp((a[0]+a[4]+a[8]-1.0)/2.0,-1.0,1.0);
+            const double degrees=std::acos(cosine)*180.0/std::numbers::pi;
+            if(!std::isfinite(distance)||!std::isfinite(degrees)||distance>1.0e6){
+                setError(error,"Kinematic preview exceeds supported placement bounds.");return false;
+            }
+            if(distance>1e-5||degrees>1e-5)++moved;
+            lines << QString("%1 (%2): origin displacement %3 mm, rotation %4 degrees")
+                 .arg(part->name,ids.at(j),QString::number(distance,'f',6),
+                      QString::number(degrees,'f',6));
+        }
+    }catch(const Standard_Failure& e){
+        setError(error,QStringLiteral("Cannot preview occurrence placement: %1").arg(e.what()));return false;
+    }catch(const std::exception& e){setError(error,QString::fromUtf8(e.what()));return false;}
+    lines.prepend(QString("Predicted moving occurrences: %1 / %2")
+                       .arg(moved).arg(ids.size()-1));
+    lines << QString("Worst mate-loop closure residual: %1 mm-equivalent")
+                 .arg(solution.worstClosureResidualMm,0,'g',10);
+    lines << QString("Worst linear gap: %1 mm; largest axis error: %2 degrees")
+                 .arg(solution.worstPointOrAxisGapMm,0,'g',10)
+                 .arg(solution.worstAngularErrorDegrees,0,'g',10);
+    // Read-only connection diagnostics are returned only when the entire
+    // network is consistent. An inconsistent edit never commits any poses.
+    for(std::size_t i=0;i<solution.perConnection.size()&&i<8;++i){
+        const auto& closure=solution.perConnection[i];
+        lines << QString("Mate connection %1: mixed %2 mm-equivalent; linear %3 mm; angular %4 deg")
+            .arg(i+1)
+            .arg(closure.maximumMixedResidualMm,0,'g',8)
+            .arg(closure.maximumLinearGapMm,0,'g',8)
+            .arg(closure.maximumAngularErrorDegrees,0,'g',8);
+    }
+    if(solution.perConnection.size()>8)
+        lines << QString("%1 additional connections omitted from preview summary.")
+                    .arg(solution.perConnection.size()-8);
+    // Materialize the proposed rigid solution into a detached scene. Neither
+    // the OCCT solids nor the source document's revision/undo history change.
+    // Every moved B-rep is validated before the preview can be reported.
+    try{
+        SceneDocument staged;
+        staged.parts_=parts_;
+        for(int j=1;j<ids.size();++j){
+            auto stagedPart=std::find_if(staged.parts_.begin(),staged.parts_.end(),
+                [&](const Part& candidate){return candidate.id==ids.at(j);});
+            if(stagedPart==staged.parts_.end()){
+                setError(error,"Mate preview component was not found in its staged scene.");return false;
+            }
+            const auto& correction=solution.worldCorrections.at(static_cast<std::size_t>(j));
+            const auto& r=correction.rotation;
+            gp_Trsf delta;
+            delta.SetValues(r[0],r[1],r[2],correction.translation.x,
+                            r[3],r[4],r[5],correction.translation.y,
+                            r[6],r[7],r[8],correction.translation.z);
+            const TopoDS_Shape moved=BRepBuilderAPI_Transform(stagedPart->shape,delta,true).Shape();
+            if(!validShape(moved,error))return false;
+            stagedPart->shape=moved;
+        }
+        lines << "GEOMETRY PREFLIGHT: all predicted occurrence solids passed B-rep validation.";
+        // Exact pairwise OCCT checks grow quadratically. Larger graphs still
+        // get B-rep validation but are explicitly NOT collision-certified.
+        constexpr int maxFitPreviewBodies=12;
+        if(ids.size()<=maxFitPreviewBodies){
+            QVector<AssemblyFitPair> fitPairs;
+            if(!inspectAssemblyFit(staged,ids,requiredClearanceMm,&fitPairs,error))return false;
+            int overlaps=0,contacts=0,belowRequired=0;
+            double smallestPositiveGap=std::numeric_limits<double>::infinity();
+            QStringList overlappingNames;
+            for(const auto& pair:fitPairs){
+                if(pair.status==fit::Status::Interference){
+                    ++overlaps;
+                    if(overlappingNames.size()<5)
+                        overlappingNames << QString("%1 / %2: %3 mm^3")
+                            .arg(pair.firstName,pair.secondName,
+                                 QString::number(pair.overlapVolumeMm3,'g',10));
+                }else if(pair.status==fit::Status::Contact){
+                    ++contacts;if(requiredClearanceMm>0)++belowRequired;
+                }
+                else if(pair.status==fit::Status::InsufficientClearance)++belowRequired;
+                else smallestPositiveGap=std::min(smallestPositiveGap,pair.distanceMm);
+            }
+            lines << QString("NOMINAL FIT PREVIEW: %1 exact pair checks; %2 interference pairs; %3 contact pairs; %4 below-required-clearance pairs (required %5 mm).")
+                         .arg(fitPairs.size()).arg(overlaps).arg(contacts).arg(belowRequired)
+                         .arg(requiredClearanceMm,0,'g',10);
+            if(std::isfinite(smallestPositiveGap))
+                lines << QString("Minimum separated-pair gap: %1 mm")
+                             .arg(smallestPositiveGap,0,'g',10);
+            // Preserve numeric evidence when a required-clearance threshold
+            // is exactly met by one pair while another pair falls short.
+            // The summary must count only genuinely below-limit nominal pairs.
+            for(const auto& pair:fitPairs)
+                lines << QString("PAIR: %1 / %2 | nominal gap %3 mm | %4")
+                    .arg(pair.firstName,pair.secondName)
+                    .arg(pair.distanceMm,0,'g',12)
+                    .arg(QString::fromLatin1(fit::statusName(pair.status)));
+            for(const auto& row:overlappingNames)lines << QString("OVERLAP: %1").arg(row);
+            if(overlaps>overlappingNames.size())
+                lines << QString("Additional overlap pairs: %1").arg(overlaps-overlappingNames.size());
+        }else{
+            lines << QString("NOMINAL FIT PREVIEW SKIPPED: %1 bodies exceed the 12-body exact-pair preview budget.")
+                         .arg(ids.size());
+        }
+    }catch(const Standard_Failure& e){
+        setError(error,QStringLiteral("Predicted geometry preflight failed in OCCT: %1").arg(e.what()));return false;
+    }catch(const std::exception& e){
+        setError(error,QString("Predicted geometry preflight failed: %1").arg(QString::fromUtf8(e.what())));return false;
+    }
+    lines << "Nominal overlap may be intentional; no automatic interference veto is applied."
+          << "The committed pose will repeat B-rep validation. This does not certify swept motion, manufacturing tolerances, or future geometry.";
+    *report=lines.join('\n');
+    return true;
+}
+
+bool SceneDocument::replaceLiveRigidMateConnection(int index,
+        const AssemblyNetworkMate& newWorldConnection,QString* error){
+    if(!hasLiveRigidMateNetwork()||index<0||index>=liveRigidMates_.size()){
+        setError(error,"Choose an existing saved rigid mate connection to edit.");return false;
+    }
+    const auto& original=liveRigidMates_.at(index);
+    if(newWorldConnection.parentBodyId!=original.parentBodyId||
+       newWorldConnection.childBodyId!=original.childBodyId){
+        setError(error,"Mate editing must retain the original occurrence pair; rebind separately.");
+        return false;
+    }
+    if(newWorldConnection.constraints.empty()||newWorldConnection.constraints.size()>32){
+        setError(error,"An edited mate must have 1-32 constraints.");return false;
+    }
+    QVector<AssemblyNetworkMate> world;
+    if(!liveRigidMateWorldDefinitions(&world,error))return false;
+    // Re-opening the editor and accepting without changing any observation
+    // must not create a new revision, B-rep token or undo entry.
+    if(mateObservationsExactlyEqual(world.at(index),newWorldConnection))return true;
+    world[index]=newWorldConnection;
+    // Existing network solver checks closure, conflicting constraints and
+    // placement representability before a single atomic document commit.
+    // It also recaptures every constraint in its own component-local frame.
+    return setLiveRigidMateNetwork(liveRigidMateFixed_,world,error);
+}
+
+bool SceneDocument::appendLiveRigidMateConnection(const AssemblyNetworkMate& connection,QString* error){
+    if(!hasLiveRigidMateNetwork()){
+        setError(error,"Save an initial rigid mate with a fixed component before adding connections.");return false;
+    }
+    if(liveRigidMates_.size()>=128||connection.parentBodyId==connection.childBodyId||
+       connection.parentBodyId.isEmpty()||connection.childBodyId.isEmpty()){
+        setError(error,"A mate network supports up to 128 valid non-self connections.");return false;
+    }
+    for(const auto& existing:liveRigidMates_){
+        if((existing.parentBodyId==connection.parentBodyId&&existing.childBodyId==connection.childBodyId)||
+           (existing.parentBodyId==connection.childBodyId&&existing.childBodyId==connection.parentBodyId)){
+            setError(error,"This component pair already has a saved connection. Remove it before reauthoring.");return false;
+        }
+    }
+    QVector<AssemblyNetworkMate> world;
+    if(!liveMateWorldObservations(parts_,liveRigidMates_,&world,error))return false;
+    world.append(connection);
+    // setLiveRigidMateNetwork captures ALL observations into local frames,
+    // validates the entire closed-loop graph, and commits in one transaction.
+    return setLiveRigidMateNetwork(liveRigidMateFixed_,world,error);
+}
+
+bool SceneDocument::removeLiveRigidMateConnection(int index,QString* error){
+    if(!hasLiveRigidMateNetwork()||index<0||index>=liveRigidMates_.size()){
+        setError(error,"Choose an existing saved rigid mate connection.");return false;
+    }
+    if(liveRigidMates_.size()==1)return removeLiveRigidMateNetwork();
+    QVector<AssemblyNetworkMate> world;
+    if(!liveMateWorldObservations(parts_,liveRigidMates_,&world,error))return false;
+    world.removeAt(index);
+    QStringList ids{liveRigidMateFixed_};
+    std::vector<mates::NetworkConnection> graph;
+    for(const auto& link:world){
+        if(!ids.contains(link.parentBodyId))ids.append(link.parentBodyId);
+        if(!ids.contains(link.childBodyId))ids.append(link.childBodyId);
+    }
+    // Do not silently drop a formerly constrained occurrence when its only
+    // connecting edge is removed. Explicitly remove the entire network first.
+    QSet<QString> previouslyConstrained{liveRigidMateFixed_};
+    for(const auto& link:liveRigidMates_){
+        previouslyConstrained.insert(link.parentBodyId);
+        previouslyConstrained.insert(link.childBodyId);
+    }
+    if(ids.size()!=previouslyConstrained.size()||ids.size()>32){
+        setError(error,"Removing this connection would detach a saved component or exceed graph limits.");return false;
+    }
+    for(const auto& link:world){
+        graph.push_back({static_cast<std::size_t>(ids.indexOf(link.parentBodyId)),
+                         static_cast<std::size_t>(ids.indexOf(link.childBodyId)),link.constraints});
+    }
+    mates::NetworkSolution checked;std::string issue;
+    if(!mates::solveRigidNetwork(static_cast<std::size_t>(ids.size()),0,graph,&checked,&issue)){
+        setError(error,QStringLiteral("Removing this connection would leave an invalid network: ")+
+                       QString::fromStdString(issue));return false;
+    }
+    checkpoint();liveRigidMates_.removeAt(index);
+    if(error)error->clear();return true;
+}
+
+bool SceneDocument::refreshLiveRigidMateNetwork(QString* error){
+    if(liveRigidMateFixed_.isEmpty()||liveRigidMates_.isEmpty()){
+        setError(error,"This document has no saved live rigid mate network.");return false;
+    }
+    QVector<AssemblyNetworkMate> world;
+    if(!liveMateWorldObservations(parts_,liveRigidMates_,&world,error))return false;
+    return solveAssemblyMateNetwork(liveRigidMateFixed_,world,error);
+}
+
+bool SceneDocument::removeLiveRigidMateNetwork(){
+    if(liveRigidMateFixed_.isEmpty())return false;
+    checkpoint();liveRigidMateFixed_.clear();liveRigidMates_.clear();return true;
+}
+
+bool SceneDocument::solveArticulatedAssemblyNetwork(const QString& fixedBodyId,
+        const QVector<ArticulatedNetworkJoint>& joints,QVector<double>* coordinates,QString* error){
+    if(fixedBodyId.isEmpty()||joints.isEmpty()||joints.size()>64){
+        setError(error,"Provide a fixed occurrence and 1-64 articulated joint definitions.");return false;
+    }
+    QStringList ids{fixedBodyId};
+    for(const auto& joint:joints){
+        if(joint.parentBodyId.isEmpty()||joint.childBodyId.isEmpty()||
+           joint.parentBodyId==joint.childBodyId){
+            setError(error,"Articulated joint has missing or self-linked occurrences.");return false;
+        }
+        if(!ids.contains(joint.parentBodyId))ids.append(joint.parentBodyId);
+        if(!ids.contains(joint.childBodyId))ids.append(joint.childBodyId);
+    }
+    if(ids.size()>24){setError(error,"Articulated networks support at most 24 occurrences.");return false;}
+    std::vector<articulated::Joint> model;model.reserve(static_cast<std::size_t>(joints.size()));
+    for(const auto& joint:joints){
+        articulated::Joint link;
+        link.parent=static_cast<std::size_t>(ids.indexOf(joint.parentBodyId));
+        link.child=static_cast<std::size_t>(ids.indexOf(joint.childBodyId));
+        link.kind=joint.kind;link.childAtZero=joint.childAtZero;link.axis=joint.axis;
+        link.initial=joint.initial;link.minimum=joint.minimum;
+        link.maximum=joint.maximum;link.driven=joint.driven;
+        model.push_back(link);
+    }
+    for(const auto& id:ids){
+        const Part* part=find(id);
+        if(!part||part->componentDefinitionId.isEmpty()||
+           !part->assemblyJointType.isEmpty()||hasDrivenRevoluteAncestor(*part,parts_)||
+           std::any_of(parts_.cbegin(),parts_.cend(),[&](const Part& candidate){
+               return candidate.assemblyJointParentBodyId==id;
+           })){
+            setError(error,"Articulated networks require independent free component occurrences.");return false;
+        }
+    }
+    articulated::Solution solution;std::string detail;
+    if(!articulated::solveNetwork(static_cast<std::size_t>(ids.size()),0,model,&solution,&detail)){
+        setError(error,QString::fromStdString(detail));return false;
+    }
+    try{
+        QVector<Part> candidate=parts_;
+        const double degrees=180.0/std::numbers::pi;
+        for(int index=1;index<ids.size();++index){
+            const QString& id=ids[index];
+            auto at=std::find_if(candidate.begin(),candidate.end(),[&](const Part& p){return p.id==id;});
+            if(at==candidate.end()){setError(error,"Component disappeared during articulated solve.");return false;}
+            const auto& correction=solution.poses[static_cast<std::size_t>(index)];
+            const auto& r=correction.rotation;
+            gp_Trsf delta;
+            delta.SetValues(r[0],r[1],r[2],correction.translation.x,
+                            r[3],r[4],r[5],correction.translation.y,
+                            r[6],r[7],r[8],correction.translation.z);
+            const gp_Trsf pose=delta.Multiplied(freeOccurrencePlacement(*at));
+            const gp_XYZ translation=pose.TranslationPart();
+            const double r11=pose.Value(1,1),r21=pose.Value(2,1),r31=pose.Value(3,1);
+            const double r12=pose.Value(1,2),r22=pose.Value(2,2);
+            const double r32=pose.Value(3,2),r33=pose.Value(3,3);
+            const double pitch=std::asin(std::clamp(-r31,-1.0,1.0));
+            const double cp=std::cos(pitch);
+            const double yaw=std::abs(cp)>1e-8?std::atan2(r21,r11):std::atan2(-r12,r22);
+            const double roll=std::abs(cp)>1e-8?std::atan2(r32,r33):0.0;
+            if(!finiteOffset(translation.X())||!finiteOffset(translation.Y())||
+               !finiteOffset(translation.Z())||!std::isfinite(pitch)||
+               !std::isfinite(roll)||!std::isfinite(yaw)){
+                setError(error,"Articulated result exceeds supported pose coordinates.");return false;
+            }
+            TopoDS_Shape moved=BRepBuilderAPI_Transform(at->shape,delta,true).Shape();
+            if(!validShape(moved,error))return false;
+            at->shape=moved;at->placementX=translation.X();at->placementY=translation.Y();
+            at->placementZ=translation.Z();at->placementYawDegrees=yaw*degrees;
+            at->placementPitchDegrees=pitch*degrees;at->placementRollDegrees=roll*degrees;
+            const gp_Trsf reconstructed=freeOccurrencePlacement(*at);
+            for(int row=1;row<=3;++row)for(int col=1;col<=4;++col)
+                if(std::abs(reconstructed.Value(row,col)-pose.Value(row,col))>1e-5){
+                    setError(error,"Articulated pose cannot be stored in persistent Euler coordinates.");return false;
+                }
+            at->geometryToken=generatedId();
+        }
+        // Output arguments and the live scene change only after all geometries
+        // and round-trip persistence checks have passed.
+        QVector<double> solved;
+        solved.reserve(static_cast<qsizetype>(solution.coordinates.size()));
+        for(double q:solution.coordinates)solved.append(q);
+        checkpoint();parts_=std::move(candidate);
+        if(coordinates)*coordinates=std::move(solved);
+        return true;
+    }catch(const Standard_Failure& failure){
+        setError(error,QStringLiteral("Articulated OCCT placement failed: %1").arg(failure.what()));
+    }catch(const std::exception& failure){setError(error,QString::fromUtf8(failure.what()));}
+    return false;
+}
+
+// Persist the ORIGINAL reference poses before applying the first articulated
+// solution. A later refresh solves absolute target poses from those references
+// and the current fixed-occurrence frame; it never reapplies a stale delta.
+bool SceneDocument::setLiveArticulatedNetwork(const QString& fixedId,
+        const QVector<ArticulatedNetworkJoint>& joints,QString* error){
+    if(fixedId.isEmpty()||joints.isEmpty()||joints.size()>64){
+        setError(error,"An articulated network needs a fixed component and 1-64 joints.");return false;
+    }
+    if(hasLiveRigidMateNetwork()){
+        setError(error,"Remove the existing live rigid network before saving an articulated one.");return false;
+    }
+    QStringList ids{fixedId};
+    for(const auto& joint:joints){
+        if(joint.parentBodyId.isEmpty()||joint.childBodyId.isEmpty()||
+           joint.parentBodyId==joint.childBodyId){
+            setError(error,"Articulated joint references are invalid.");return false;
+        }
+        if(!ids.contains(joint.parentBodyId))ids.append(joint.parentBodyId);
+        if(!ids.contains(joint.childBodyId))ids.append(joint.childBodyId);
+    }
+    if(ids.size()<2||ids.size()>24){
+        setError(error,"A saved articulated network supports 2-24 component occurrences.");return false;
+    }
+    QMap<QString,mates::Transform> reference;
+    for(const auto& id:ids){
+        const Part* part=find(id);
+        if(!part||part->componentDefinitionId.isEmpty()||!part->assemblyJointType.isEmpty()){
+            setError(error,"Articulated reference pose requires independent component occurrences.");return false;
+        }
+        reference.insert(id,toMateFrame(freeOccurrencePlacement(*part)));
+    }
+    // Existing native solver checks rank, loops, limits, OCCT placements and
+    // commits every moved occurrence as one undo transaction or none.
+    QVector<double> solved;
+    if(!solveArticulatedAssemblyNetwork(fixedId,joints,&solved,error))return false;
+    // The solve created a checkpoint. Definitions are attached to that exact
+    // transaction and restored together with placements by undo/redo.
+    liveArticulatedFixed_=fixedId;
+    liveArticulatedJoints_=joints;
+    liveArticulatedReferencePoses_=std::move(reference);
+    if(error)error->clear();
+    return true;
+}
+
+bool SceneDocument::stageLiveArticulatedRegeneration(
+        const QVector<ArticulatedNetworkJoint>& definitions,QVector<Part>* stagedResult,
+        bool* geometryChanged,QString* error) const{
+    if(!stagedResult||!geometryChanged||!hasLiveArticulatedNetwork()||definitions.isEmpty()){
+        setError(error,"There are no saved live articulated joints to refresh.");return false;
+    }
+    QStringList ids{liveArticulatedFixed_};
+    std::vector<articulated::Joint> joints;
+    joints.reserve(static_cast<size_t>(definitions.size()));
+    for(const auto& j:definitions){
+        if(!ids.contains(j.parentBodyId))ids.append(j.parentBodyId);
+        if(!ids.contains(j.childBodyId))ids.append(j.childBodyId);
+    }
+    if(ids.size()!=liveArticulatedReferencePoses_.size()||ids.size()<2||ids.size()>24){
+        setError(error,"Saved articulated reference poses do not match the joint graph.");return false;
+    }
+    for(const auto& j:definitions){
+        joints.push_back({static_cast<size_t>(ids.indexOf(j.parentBodyId)),
+                          static_cast<size_t>(ids.indexOf(j.childBodyId)),j.kind,j.childAtZero,
+                          j.axis,j.initial,j.minimum,j.maximum,j.driven});
+    }
+    articulated::Solution solved;std::string detail;
+    if(!articulated::solveNetwork(static_cast<size_t>(ids.size()),0,joints,&solved,&detail)){
+        setError(error,QStringLiteral("Saved articulated joint network cannot be solved: ")+
+                       QString::fromStdString(detail));return false;
+    }
+    const Part* fixed=find(liveArticulatedFixed_);
+    if(!fixed||!liveArticulatedReferencePoses_.contains(liveArticulatedFixed_)){
+        setError(error,"The fixed articulated occurrence or its reference pose is missing.");return false;
+    }
+    QVector<Part> staged=parts_;
+    bool changed=false;
+    const double degrees=180.0/std::numbers::pi;
+    try{
+        const auto anchor=mates::multiply(toMateFrame(freeOccurrencePlacement(*fixed)),
+            mates::inverseRigid(liveArticulatedReferencePoses_.value(liveArticulatedFixed_)));
+        for(int i=1;i<ids.size();++i){
+            const QString id=ids[i];
+            if(!liveArticulatedReferencePoses_.contains(id)){
+                setError(error,"An articulated occurrence has no original reference pose.");return false;
+            }
+            const auto present=std::find_if(staged.begin(),staged.end(),[&](const Part& p){return p.id==id;});
+            if(present==staged.end()||present->componentDefinitionId.isEmpty()||
+               !present->assemblyJointType.isEmpty()){
+                setError(error,"An articulated occurrence is missing or no longer free.");return false;
+            }
+            const auto desired=mates::multiply(anchor,mates::multiply(
+                solved.poses[static_cast<size_t>(i)],liveArticulatedReferencePoses_.value(id)));
+            const auto current=toMateFrame(freeOccurrencePlacement(*present));
+            const auto correction=mates::multiply(desired,mates::inverseRigid(current));
+            bool moved=std::abs(correction.translation.x)>1e-5||
+                       std::abs(correction.translation.y)>1e-5||
+                       std::abs(correction.translation.z)>1e-5;
+            for(int r=0;r<3;++r)for(int c=0;c<3;++c)
+                if(std::abs(correction.rotation[3*r+c]-(r==c?1.0:0.0))>1e-7)moved=true;
+            if(!moved)continue;
+            const auto& r=correction.rotation;
+            gp_Trsf delta;
+            delta.SetValues(r[0],r[1],r[2],correction.translation.x,
+                            r[3],r[4],r[5],correction.translation.y,
+                            r[6],r[7],r[8],correction.translation.z);
+            const auto& target=desired.rotation;
+            gp_Trsf world;
+            world.SetValues(target[0],target[1],target[2],desired.translation.x,
+                            target[3],target[4],target[5],desired.translation.y,
+                            target[6],target[7],target[8],desired.translation.z);
+            const double r11=world.Value(1,1),r21=world.Value(2,1),r31=world.Value(3,1);
+            const double r12=world.Value(1,2),r22=world.Value(2,2);
+            const double r32=world.Value(3,2),r33=world.Value(3,3);
+            const double pitch=std::asin(std::clamp(-r31,-1.0,1.0));
+            const double cp=std::cos(pitch);
+            const double yaw=std::abs(cp)>1e-8?std::atan2(r21,r11):std::atan2(-r12,r22);
+            const double roll=std::abs(cp)>1e-8?std::atan2(r32,r33):0.0;
+            if(!std::isfinite(pitch)||!std::isfinite(yaw)||!std::isfinite(roll)||
+               !finiteOffset(desired.translation.x)||!finiteOffset(desired.translation.y)||
+               !finiteOffset(desired.translation.z)){
+                setError(error,"Articulated refresh produced an unrepresentable placement.");return false;
+            }
+            const TopoDS_Shape movedShape=BRepBuilderAPI_Transform(present->shape,delta,true).Shape();
+            if(!validShape(movedShape,error))return false;
+            present->shape=movedShape;
+            present->placementX=desired.translation.x;
+            present->placementY=desired.translation.y;
+            present->placementZ=desired.translation.z;
+            present->placementYawDegrees=yaw*degrees;
+            present->placementPitchDegrees=pitch*degrees;
+            present->placementRollDegrees=roll*degrees;
+            const gp_Trsf roundTrip=freeOccurrencePlacement(*present);
+            for(int row=1;row<=3;++row)for(int col=1;col<=4;++col)
+                if(std::abs(roundTrip.Value(row,col)-world.Value(row,col))>1e-5){
+                    setError(error,"Articulated refresh placement cannot round-trip project persistence.");return false;
+                }
+            present->geometryToken=generatedId();
+            changed=true;
+        }
+        *geometryChanged=changed;
+        *stagedResult=std::move(staged);
+        if(error)error->clear();return true;
+    }catch(const Standard_Failure& e){
+        setError(error,QStringLiteral("Articulated refresh failed in OpenCascade: %1").arg(e.what()));
+    }catch(const std::exception& e){setError(error,QString::fromUtf8(e.what()));}
+    return false;
+}
+
+bool SceneDocument::refreshLiveArticulatedNetwork(QString* error){
+    QVector<Part> staged;bool changed=false;
+    if(!stageLiveArticulatedRegeneration(liveArticulatedJoints_,&staged,&changed,error))return false;
+    if(changed){checkpoint();parts_=std::move(staged);}
+    if(error)error->clear();
+    return true;
+}
+
+bool SceneDocument::previewLiveArticulatedJointCoordinate(int jointIndex,
+        double requestedCoordinate,QString* report,QString* error,
+        double requiredClearanceMm) const{
+    if(!report||!fit::validThreshold(requiredClearanceMm)){
+        setError(error,"Provide a preview report and a valid nonnegative clearance threshold.");return false;
+    }
+    if(!hasLiveArticulatedNetwork()||jointIndex<0||
+       jointIndex>=liveArticulatedJoints_.size()||!std::isfinite(requestedCoordinate)){
+        setError(error,"Choose a saved articulated joint and a finite target coordinate.");return false;
+    }
+    const auto& current=liveArticulatedJoints_[jointIndex];
+    if(!current.driven||current.kind==articulated::JointKind::Fixed){
+        setError(error,"Only driven revolute and prismatic joints can be previewed.");return false;
+    }
+    const double bound=current.kind==articulated::JointKind::Revolute?
+        2.0*std::numbers::pi:1000.0;
+    if(std::abs(requestedCoordinate)>bound){
+        setError(error,"Joint coordinate is outside supported authoring bounds.");return false;
+    }
+    QVector<ArticulatedNetworkJoint> proposed=liveArticulatedJoints_;
+    proposed[jointIndex].initial=requestedCoordinate;
+    proposed[jointIndex].minimum=requestedCoordinate;
+    proposed[jointIndex].maximum=requestedCoordinate;
+    QVector<Part> stagedParts;bool geometryChanged=false;
+    if(!stageLiveArticulatedRegeneration(proposed,&stagedParts,&geometryChanged,error))return false;
+    QStringList ids{liveArticulatedFixed_};
+    for(const auto& joint:proposed){
+        if(!ids.contains(joint.parentBodyId))ids.append(joint.parentBodyId);
+        if(!ids.contains(joint.childBodyId))ids.append(joint.childBodyId);
+    }
+    QStringList lines{
+        "READ-ONLY ARTICULATED POSE PREVIEW: nominal solids only; NOT swept collision certification",
+        QString("Driven joint %1 (%2): %3 -> %4")
+            .arg(jointIndex+1)
+            .arg(current.kind==articulated::JointKind::Revolute?"revolute (radians)":"prismatic (mm)")
+            .arg(current.initial,0,'g',12).arg(requestedCoordinate,0,'g',12),
+        QString("Regeneration: %1; network occurrences: %2")
+            .arg(geometryChanged?"changed predicted solids":"no geometry change")
+            .arg(ids.size()),
+        "OCCT geometry preflight: proposed changed solids passed B-rep validity checks."
+    };
+    if(ids.size()<=12){
+        SceneDocument staged;
+        staged.parts_=std::move(stagedParts);
+        QVector<AssemblyFitPair> pairs;
+        if(!inspectAssemblyFit(staged,ids,requiredClearanceMm,&pairs,error))return false;
+        int interferences=0,contacts=0,insufficient=0;
+        double smallestGap=std::numeric_limits<double>::infinity();
+        QStringList overlapLines;
+        for(const auto& pair:pairs){
+            if(pair.status==fit::Status::Interference){
+                ++interferences;
+                if(overlapLines.size()<5)overlapLines.append(
+                    QString("INTERFERENCE %1 / %2: %3 mm^3")
+                        .arg(pair.firstName,pair.secondName)
+                        .arg(pair.overlapVolumeMm3,0,'g',10));
+            }else if(pair.status==fit::Status::Contact){
+                ++contacts;
+                if(requiredClearanceMm>0)++insufficient;
+            }else if(pair.status==fit::Status::InsufficientClearance){
+                ++insufficient;
+                smallestGap=std::min(smallestGap,pair.distanceMm);
+            }else{
+                smallestGap=std::min(smallestGap,pair.distanceMm);
+            }
+        }
+        lines << QString("NOMINAL FIT: %1 exact pairs; %2 interferences; %3 contacts; %4 below required clearance (%5 mm).")
+                  .arg(pairs.size()).arg(interferences).arg(contacts).arg(insufficient)
+                  .arg(requiredClearanceMm,0,'g',10);
+        if(std::isfinite(smallestGap))lines << QString("Minimum separated pair gap: %1 mm")
+            .arg(smallestGap,0,'g',10);
+        lines << overlapLines;
+        if(interferences>overlapLines.size())lines << QString("Additional interferences: %1")
+            .arg(interferences-overlapLines.size());
+    }else{
+        lines << QString("Exact pairwise fit NOT CHECKED: %1 occurrences exceed the 12-body preview budget.")
+                    .arg(ids.size());
+    }
+    // Commit only after the entire preview succeeds. In particular, failures
+    // from the solver or OCCT fit audit must preserve an older caller report.
+    *report=lines.join('\n');
+    if(error)error->clear();
+    return true;
+}
+
+bool SceneDocument::updateLiveArticulatedJointCoordinate(int jointIndex,
+        double requestedCoordinate,QString* error){
+    if(!hasLiveArticulatedNetwork()||jointIndex<0||
+       jointIndex>=liveArticulatedJoints_.size()||!std::isfinite(requestedCoordinate)){
+        setError(error,"Choose a saved articulated joint and a finite target coordinate.");return false;
+    }
+    const auto& current=liveArticulatedJoints_[jointIndex];
+    if(!current.driven||current.kind==articulated::JointKind::Fixed){
+        setError(error,"Only driven revolute and prismatic joint coordinates are editable.");return false;
+    }
+    // Hard authoring bounds avoid nonsensical mechanisms. Revolute units here
+    // are radians, prismatic units millimetres; UI converts degrees to radians.
+    const double bound=current.kind==articulated::JointKind::Revolute?
+        2.0*std::numbers::pi:1000.0;
+    if(std::abs(requestedCoordinate)>bound){
+        setError(error,"Joint coordinate is outside supported authoring bounds.");return false;
+    }
+    if(std::abs(current.initial-requestedCoordinate)<=1e-12){
+        if(error)error->clear();return true;
+    }
+    QVector<ArticulatedNetworkJoint> candidate=liveArticulatedJoints_;
+    auto& edited=candidate[jointIndex];
+    edited.initial=requestedCoordinate;
+    // A driven coordinate is a prescribed value. Moving it must not silently
+    // retain yesterday's fixed minimum/maximum as an impossible constraint.
+    edited.minimum=requestedCoordinate;edited.maximum=requestedCoordinate;
+    QVector<Part> staged;bool changed=false;
+    if(!stageLiveArticulatedRegeneration(candidate,&staged,&changed,error))return false;
+    // One undo entry captures BOTH old part placements and old joint values.
+    // A failed rebuild never reaches this commit; a geometry no-op still
+    // changes the design definition, and must therefore be undoable.
+    checkpoint();
+    if(changed)parts_=std::move(staged);
+    liveArticulatedJoints_=std::move(candidate);
+    if(error)error->clear();return true;
+}
+
+// Multi-drive editing is one scene transaction. All targets are validated,
+// solved against the same original reference frames, and committed together.
+// In particular a closed loop must never pass by changing its joints one by
+// one, because an intermediate pose may be inconsistent or unattainable.
+namespace {
+bool applyArticulatedTargets(const QVector<SceneDocument::ArticulatedNetworkJoint>& original,
+                             const QMap<int,double>& targets,
+                             QVector<SceneDocument::ArticulatedNetworkJoint>* proposed,
+                             bool* changed,QString* error){
+    if(!proposed||!changed||targets.isEmpty()||targets.size()>64){
+        if(error)*error="Select between 1 and 64 articulated drive coordinates.";return false;
+    }
+    auto next=original;bool any=false;
+    for(auto it=targets.cbegin();it!=targets.cend();++it){
+        if(it.key()<0||it.key()>=next.size()||!std::isfinite(it.value())){
+            if(error)*error="Joint batch contains an invalid index or coordinate.";return false;
+        }
+        auto& joint=next[it.key()];
+        if(!joint.driven||joint.kind==articulated::JointKind::Fixed){
+            if(error)*error="Only driven revolute and prismatic joints support batch editing.";return false;
+        }
+        const double limit=joint.kind==articulated::JointKind::Revolute?
+            2.0*std::numbers::pi:1000.0;
+        if(std::abs(it.value())>limit){
+            if(error)*error="Joint batch contains a coordinate outside supported authoring bounds.";return false;
+        }
+        if(joint.maximum-joint.minimum>1e-10){
+            if(it.value()<joint.minimum-1e-12||it.value()>joint.maximum+1e-12){
+                if(error)*error="Driven target lies outside the saved joint's explicit travel limits.";
+                return false;
+            }
+        }else{
+            // Legacy saved drives pin min/max to the previous target; allow
+            // moving those drives, preserving their historic behavior.
+            joint.minimum=it.value();joint.maximum=it.value();
+        }
+        any|=std::abs(joint.initial-it.value())>1e-12;
+        joint.initial=it.value();
+    }
+    *proposed=std::move(next);*changed=any;return true;
+}
+}
+
+bool SceneDocument::previewLiveArticulatedCoordinates(const QMap<int,double>& targets,
+        QString* report,QString* error,double requiredClearanceMm,
+        bool* hasUnsafeNominalPairs) const{
+    if(!report||!fit::validThreshold(requiredClearanceMm)||!hasLiveArticulatedNetwork()){
+        setError(error,"A saved mechanism, output report and valid clearance are required.");return false;
+    }
+    QVector<ArticulatedNetworkJoint> candidate;bool definitionsChanged=false;
+    if(!applyArticulatedTargets(liveArticulatedJoints_,targets,&candidate,
+                                &definitionsChanged,error))return false;
+    QVector<Part> staged;bool changed=false;
+    if(!stageLiveArticulatedRegeneration(candidate,&staged,&changed,error))return false;
+    QStringList ids{liveArticulatedFixed_};
+    for(const auto& joint:candidate){
+        if(!ids.contains(joint.parentBodyId))ids.append(joint.parentBodyId);
+        if(!ids.contains(joint.childBodyId))ids.append(joint.childBodyId);
+    }
+    QStringList lines{
+        "READ-ONLY MULTI-DRIVE PREVIEW: all coordinates solved together; no document mutation",
+        QString("Saved joints: %1; selected drives: %2; occurrences: %3")
+            .arg(candidate.size()).arg(targets.size()).arg(ids.size()),
+        QString("Proposed changes: %1; B-rep rebuild: %2")
+            .arg(definitionsChanged?"yes":"none")
+            .arg(changed?"changed valid solid placements":"no placement change")};
+    for(auto it=targets.cbegin();it!=targets.cend();++it){
+        const auto& current=liveArticulatedJoints_[it.key()];
+        lines.append(QString("Joint %1 (%2): %3 -> %4")
+            .arg(it.key()+1)
+            .arg(current.kind==articulated::JointKind::Revolute?"rad":"mm")
+            .arg(current.initial,0,'g',14).arg(it.value(),0,'g',14));
+    }
+    bool unsafeNominalPairs=ids.size()>12; // An unchecked mechanism cannot pass a strict policy.
+    if(ids.size()<=12){
+        SceneDocument scene;scene.parts_=std::move(staged);
+        QVector<AssemblyFitPair> pairs;
+        if(!inspectAssemblyFit(scene,ids,requiredClearanceMm,&pairs,error))return false;
+        int overlaps=0,contacts=0,insufficient=0;
+        double smallest=std::numeric_limits<double>::infinity();
+        for(const auto& pair:pairs){
+            if(pair.status==fit::Status::Interference){++overlaps;unsafeNominalPairs=true;
+                lines.append(QString("OVERLAP %1 / %2: %3 mm^3")
+                    .arg(pair.firstName,pair.secondName)
+                    .arg(pair.overlapVolumeMm3,0,'g',12));
+            }else if(pair.status==fit::Status::Contact){++contacts;
+                if(requiredClearanceMm>0){++insufficient;unsafeNominalPairs=true;}
+            }else if(pair.status==fit::Status::InsufficientClearance){
+                ++insufficient;unsafeNominalPairs=true;smallest=std::min(smallest,pair.distanceMm);
+            }else smallest=std::min(smallest,pair.distanceMm);
+        }
+        lines.append(QString("Exact nominal pairs: %1; overlaps: %2; contacts: %3; inadequate gaps: %4")
+             .arg(pairs.size()).arg(overlaps).arg(contacts).arg(insufficient));
+        if(std::isfinite(smallest))lines.append(QString("Minimum separated gap: %1 mm")
+            .arg(smallest,0,'g',12));
+    }else lines.append("Pairwise solid interference NOT CHECKED above 12 occurrences.");
+    lines.append("Static pose and clearance only; no continuous collision certification.");
+    *report=lines.join('\n');
+    if(hasUnsafeNominalPairs)*hasUnsafeNominalPairs=unsafeNominalPairs;
+    if(error)error->clear();return true;
+}
+
+bool SceneDocument::previewLiveArticulatedTrajectory(const QMap<int,double>& targets,
+        int sampleCount,QString* report,QString* error,double requiredClearanceMm,
+        bool rejectUnsafeSamples,int refinementsPerInterval,bool easeInOut) const{
+    if(!report||!hasLiveArticulatedNetwork()||!fit::validThreshold(requiredClearanceMm)||
+       targets.isEmpty()||sampleCount<2||sampleCount>12||
+       refinementsPerInterval<1||refinementsPerInterval>4){
+        setError(error,"A saved mechanism, driven targets, 2-12 base intervals, 1-4 refinements, valid clearance and a report are required.");
+        return false;
+    }
+    // Validate all targets against the original joint graph before doing any
+    // B-rep work. The staged final pose must also be reachable.
+    QVector<ArticulatedNetworkJoint> finalDefinitions;
+    bool anyChanged=false;
+    if(!applyArticulatedTargets(liveArticulatedJoints_,targets,
+        &finalDefinitions,&anyChanged,error))return false;
+    if(!anyChanged){
+        setError(error,"Select at least one changed driven coordinate to preview a trajectory.");
+        return false;
+    }
+    const int totalIntervals=sampleCount*refinementsPerInterval;
+    QStringList lines{
+        "SAMPLED ARTICULATED MULTI-DRIVE MOTION PREVIEW (READ ONLY)",
+        QString("Intervals: %1; sampled poses: %2; driven coordinates: %3")
+            .arg(totalIntervals).arg(totalIntervals+1).arg(targets.size()),
+        QString("Base intervals: %1; refinement factor: %2")
+            .arg(sampleCount).arg(refinementsPerInterval),
+        QString("Progression: %1 (not a dynamic simulation)")
+            .arg(easeInOut?"ease in/out":"linear"),
+        QString("Required nominal clearance: %1 mm").arg(requiredClearanceMm,0,'g',12),
+        "Each sample independently uses the complete kinematic and solid-rebuild preflight.",
+        "These are discrete static poses, NOT continuous collision certification.",
+        "A passing sample does not establish safety between adjacent poses."
+    };
+    std::vector<joint_motion::Drive> drivePlan;
+    drivePlan.reserve(static_cast<std::size_t>(targets.size()));
+    for(auto it=targets.cbegin();it!=targets.cend();++it){
+        const auto& joint=liveArticulatedJoints_.at(it.key());
+        // Legacy saved driven joints pin min/max to the old target. Keep
+        // their existing movable behavior; explicit nonzero travel ranges
+        // remain mandatory constraints on every interpolated sample.
+        const bool explicitTravel=joint.maximum-joint.minimum>1e-10;
+        const double minimum=explicitTravel?joint.minimum:std::min(joint.initial,it.value());
+        const double maximum=explicitTravel?joint.maximum:std::max(joint.initial,it.value());
+        drivePlan.push_back({it.key(),joint.initial,it.value(),minimum,maximum});
+    }
+    for(int i=0;i<=totalIntervals;++i){
+        const double fraction=static_cast<double>(i)/static_cast<double>(totalIntervals);
+        std::vector<std::pair<int,double>> frameCoordinates;
+        std::string interpolationIssue;
+        if(!joint_motion::interpolate(drivePlan,fraction,
+             easeInOut?joint_motion::Progression::Smoothstep:joint_motion::Progression::Linear,
+             &frameCoordinates,&interpolationIssue)){
+            setError(error,QString::fromStdString(interpolationIssue));return false;
+        }
+        QMap<int,double> frame;
+        for(const auto& coordinate:frameCoordinates)
+            frame.insert(coordinate.first,coordinate.second);
+        QString frameReport,issue;
+        bool unsafeFrame=false;
+        if(!previewLiveArticulatedCoordinates(frame,&frameReport,&issue,requiredClearanceMm,&unsafeFrame)){
+            setError(error,QString("Motion sample %1/%2 (fraction %3) failed: %4")
+                .arg(i).arg(totalIntervals).arg(fraction,0,'g',8).arg(issue));
+            return false; // The original document and the caller's report stay intact.
+        }
+        if(rejectUnsafeSamples&&unsafeFrame){
+            setError(error,QString("Sampled motion pose %1/%2 has overlap, inadequate clearance, "
+                "or exceeds the 12-body fit-audit limit. No change was committed.")
+                .arg(i).arg(totalIntervals));
+            return false;
+        }
+        lines<<QString("FRAME %1/%2, fraction %3")
+                   .arg(i).arg(totalIntervals).arg(fraction,0,'g',8)
+             <<frameReport<<QString();
+    }
+    *report=lines.join('\n');
+    if(error)error->clear();
+    return true;
+}
+
+bool SceneDocument::buildLiveArticulatedMotionCsv(const QMap<int,double>& targets,
+        int baseIntervals,int refinement,bool easeInOut,double requiredClearanceMm,
+        bool rejectUnsafe,QByteArray* csv,QString* error) const{
+    if(!csv||!hasLiveArticulatedNetwork()||targets.isEmpty()||
+       baseIntervals<2||baseIntervals>12||refinement<1||refinement>4||
+       !fit::validThreshold(requiredClearanceMm)){
+        setError(error,"Choose a saved mechanism, targets, 2-12 base intervals, 1-4 refinements and a valid clearance.");
+        return false;
+    }
+    QVector<ArticulatedNetworkJoint> proposed;bool changes=false;
+    if(!applyArticulatedTargets(liveArticulatedJoints_,targets,&proposed,&changes,error))return false;
+    if(!changes){setError(error,"At least one drive must change for a motion export.");return false;}
+    std::vector<joint_motion::Drive> drives;drives.reserve(static_cast<std::size_t>(targets.size()));
+    for(auto it=targets.cbegin();it!=targets.cend();++it){
+        const auto& joint=liveArticulatedJoints_.at(it.key());
+        const bool explicitTravel=joint.maximum-joint.minimum>1e-10;
+        drives.push_back({it.key(),joint.initial,it.value(),
+            explicitTravel?joint.minimum:std::min(joint.initial,it.value()),
+            explicitTravel?joint.maximum:std::max(joint.initial,it.value())});
+    }
+    QByteArray generated("sample,fraction,progression,unsafe_nominal_fit,required_clearance_mm");
+    for(auto it=targets.cbegin();it!=targets.cend();++it)
+        generated+=QString(",joint_%1_%2").arg(it.key()+1)
+            .arg(liveArticulatedJoints_.at(it.key()).kind==articulated::JointKind::Revolute?
+                "radians":"mm").toUtf8();
+    generated+=",pose_review\n";
+    const int intervals=baseIntervals*refinement;
+    for(int i=0;i<=intervals;++i){
+        const double fraction=static_cast<double>(i)/intervals;
+        std::vector<std::pair<int,double>> coordinates;
+        std::string interpolationIssue;
+        if(!joint_motion::interpolate(drives,fraction,
+           easeInOut?joint_motion::Progression::Smoothstep:joint_motion::Progression::Linear,
+           &coordinates,&interpolationIssue)){
+            setError(error,QString::fromStdString(interpolationIssue));return false;
+        }
+        QMap<int,double> frame;
+        for(const auto& coordinate:coordinates)frame.insert(coordinate.first,coordinate.second);
+        QString pose,issue;bool unsafe=false;
+        if(!previewLiveArticulatedCoordinates(frame,&pose,&issue,requiredClearanceMm,&unsafe)){
+            setError(error,QString("Motion CSV sample %1/%2 failed: %3")
+                .arg(i).arg(intervals).arg(issue));return false;
+        }
+        if(rejectUnsafe&&unsafe){
+            setError(error,QString("Motion CSV sample %1/%2 violates the requested nominal fit policy.")
+                .arg(i).arg(intervals));return false;
+        }
+        generated+=QString("%1,%2,%3,%4,%5")
+            .arg(i).arg(fraction,0,'g',16).arg(easeInOut?"smoothstep":"linear")
+            .arg(unsafe?"YES":"NO").arg(requiredClearanceMm,0,'g',16).toUtf8();
+        for(const auto& coordinate:coordinates)
+            generated+=QString(",%1").arg(coordinate.second,0,'g',16).toUtf8();
+        // Encode full pose diagnostics as one escaped CSV cell, not additional
+        // records. JSON and scene state are never modified by this read-only run.
+        pose.replace('"',"\"\"");pose.replace('\n'," \\n ");
+        generated+=",\""+pose.toUtf8()+"\"\n";
+    }
+    *csv=std::move(generated);
+    if(error)error->clear();return true;
+}
+
+bool SceneDocument::buildLiveArticulatedEnvelopeCsv(const QMap<int,double>& targets,
+        int baseIntervals,int refinement,bool easeInOut,QByteArray* csv,QString* error,
+        bool* translationSweepSupported,double* closestSweptBoxGapMm) const{
+    if(!csv||!hasLiveArticulatedNetwork()||targets.isEmpty()||
+       baseIntervals<2||baseIntervals>12||refinement<1||refinement>4){
+        setError(error,"Saved articulated network, targets and 2-12 intervals / 1-4 refinements required.");
+        return false;
+    }
+    QVector<ArticulatedNetworkJoint> finalDefinitions;bool changed=false;
+    if(!applyArticulatedTargets(liveArticulatedJoints_,targets,&finalDefinitions,&changed,error))return false;
+    if(!changed){setError(error,"The envelope requires at least one changed drive.");return false;}
+    QStringList moving;
+    for(const auto& joint:liveArticulatedJoints_)
+        if(!moving.contains(joint.childBodyId))moving.append(joint.childBodyId);
+    // Include the fixed reference in pair checks: otherwise a moving slider
+    // can approach the fixture without appearing in a pairwise result.
+    if(moving.size()>19){setError(error,"Workspace report supports 19 moving bodies plus the fixed reference.");return false;}
+    QStringList tracked=moving;
+    if(!tracked.contains(liveArticulatedFixed_))tracked.append(liveArticulatedFixed_);
+    // An endpoint AABB cannot be swept linearly for a rotating mechanism.
+    // Any revolute joint, even if not driven in this request, conservatively
+    // disables the continuous translation evidence.
+    const bool translationOnly=std::all_of(liveArticulatedJoints_.cbegin(),liveArticulatedJoints_.cend(),
+        [](const ArticulatedNetworkJoint& joint){return joint.kind!=articulated::JointKind::Revolute;});
+    std::vector<joint_motion::Drive> drives;
+    for(auto it=targets.cbegin();it!=targets.cend();++it){
+        const auto& joint=liveArticulatedJoints_.at(it.key());
+        const bool hasTravel=joint.maximum-joint.minimum>1e-10;
+        drives.push_back({it.key(),joint.initial,it.value(),
+            hasTravel?joint.minimum:std::min(joint.initial,it.value()),
+            hasTravel?joint.maximum:std::max(joint.initial,it.value())});
+    }
+    QMap<QString,Bnd_Box> envelopes;
+    proximity::OrderInvariantTracker sameTime;
+    proximity::OrderInvariantSweptTracker betweenPoses(0.0);
+    bool sweepAvailable=translationOnly;
+    const int intervals=baseIntervals*refinement;
+    for(int sample=0;sample<=intervals;++sample){
+        const double fraction=static_cast<double>(sample)/intervals;
+        std::vector<std::pair<int,double>> coordinates;
+        std::string interpolationError;
+        if(!joint_motion::interpolate(drives,fraction,
+                easeInOut?joint_motion::Progression::Smoothstep:joint_motion::Progression::Linear,
+                &coordinates,&interpolationError)){
+            setError(error,QString::fromStdString(interpolationError));return false;
+        }
+        QMap<int,double> requested;
+        for(const auto& coordinate:coordinates)requested.insert(coordinate.first,coordinate.second);
+        QVector<ArticulatedNetworkJoint> frameJoints;bool frameChanged=false;
+        if(!applyArticulatedTargets(liveArticulatedJoints_,requested,&frameJoints,&frameChanged,error))return false;
+        QVector<Part> frameParts;bool geometryChanged=false;
+        if(!stageLiveArticulatedRegeneration(frameJoints,&frameParts,&geometryChanged,error)){
+            if(error)*error=QString("Envelope sample %1/%2: %3").arg(sample).arg(intervals).arg(*error);
+            return false;
+        }
+        std::vector<proximity::BodyBox> simultaneous;
+        simultaneous.reserve(static_cast<std::size_t>(tracked.size()));
+        for(const QString& id:tracked){
+            const auto found=std::find_if(frameParts.cbegin(),frameParts.cend(),
+                [&](const Part& body){return body.id==id;});
+            if(found==frameParts.cend()||found->shape.IsNull()||
+               !validShape(found->shape,error)){
+                setError(error,"A sampled moving body has missing or invalid geometry.");return false;
+            }
+            try{
+                Bnd_Box current;
+                BRepBndLib::Add(found->shape,current);
+                if(current.IsVoid()){
+                    setError(error,"Sampled moving-body geometry has no bounds.");return false;
+                }
+                proximity::Bounds b{};
+                current.Get(b.x0,b.y0,b.z0,b.x1,b.y1,b.z1);
+                simultaneous.push_back({id.toStdString(),b});
+                BRepBndLib::Add(found->shape,envelopes[id]);
+            }catch(const Standard_Failure& exception){
+                setError(error,QString("Sampled body bounding geometry failed: %1").arg(exception.what()));
+                return false;
+            }
+        }
+        std::string proximityIssue;
+        if(!sameTime.observe(simultaneous,&proximityIssue)){
+            setError(error,QString("Simultaneous sampled-body bounds failed at pose %1: %2")
+                .arg(sample).arg(QString::fromStdString(proximityIssue)));return false;
+        }
+        if(sweepAvailable){
+            // A shape with changing world-axis extents (or invalid numeric
+            // bounds) cannot truthfully use the translational AABB solver.
+            // Keep sampled evidence, but mark the sweep unsupported.
+            std::string sweepIssue;
+            if(!betweenPoses.observe(fraction,simultaneous,&sweepIssue))
+                sweepAvailable=false;
+        }
+    }
+    // Compare unions of sampled body-space AABBs. A zero gap signals
+    // potential shared workspace, NOT a same-time solid interference.
+    struct Bounds{double x0,y0,z0,x1,y1,z1;};
+    QMap<QString,Bounds> boxes;
+    for(const QString& id:tracked){
+        if(!envelopes.contains(id)||envelopes[id].IsVoid()){
+            setError(error,"A moving body has no sampled workspace envelope.");return false;
+        }
+        Bounds b{};envelopes[id].Get(b.x0,b.y0,b.z0,b.x1,b.y1,b.z1);
+        boxes.insert(id,b);
+    }
+    const auto aabbGap=[](const Bounds& a,const Bounds& b){
+        const double dx=std::max({0.0,b.x0-a.x1,a.x0-b.x1});
+        const double dy=std::max({0.0,b.y0-a.y1,a.y0-b.y1});
+        const double dz=std::max({0.0,b.z0-a.z1,a.z0-b.z1});
+        return std::hypot(dx,dy,dz);
+    };
+    QByteArray generated("body_id,body_name,samples,x_min_mm,y_min_mm,z_min_mm,x_max_mm,y_max_mm,z_max_mm,box_volume_mm3,possible_workspace_overlap_count,nearest_other_body_id,nearest_workspace_box_gap_mm,same_time_aabb_overlap_samples,closest_same_time_aabb_gap_mm,closest_same_time_sample,continuous_translation_sweep_status,swept_aabb_contact_segments,swept_aabb_minimum_gap_mm,swept_aabb_closest_segment,coverage_note\n");
+    for(const QString& id:moving){
+        const Part* part=find(id);
+        if(!part||!boxes.contains(id)){
+            setError(error,"A sampled moving body has an empty bounding envelope.");return false;
+        }
+        const Bounds b=boxes.value(id);
+        const double volume=(b.x1-b.x0)*(b.y1-b.y0)*(b.z1-b.z0);
+        if(!std::isfinite(volume)||volume<0){
+            setError(error,"A sampled moving-body envelope is nonfinite.");return false;
+        }
+        int possibleOverlaps=0;QString nearestId;
+        double closest=std::numeric_limits<double>::infinity();
+        for(const QString& other:tracked){
+            if(other==id)continue;
+            const double gap=aabbGap(b,boxes.value(other));
+            if(!std::isfinite(gap)){
+                setError(error,"Nonfinite moving-body workspace separation.");return false;
+            }
+            if(gap<=1e-9)++possibleOverlaps;
+            if(gap<closest){closest=gap;nearestId=other;}
+        }
+        // Pairwise broad-phase distances use the SAME sampled pose.
+        std::size_t sameTimeOverlaps=0,closestSample=0;
+        double nearestSimultaneous=std::numeric_limits<double>::infinity();
+        for(const auto& pair:sameTime.pairs()){
+            if(pair.firstId!=id.toStdString()&&pair.secondId!=id.toStdString())continue;
+            sameTimeOverlaps+=pair.simultaneousOverlapSamples;
+            if(pair.minimumAabbGapMm<nearestSimultaneous){
+                nearestSimultaneous=pair.minimumAabbGapMm;
+                closestSample=pair.closestSample;
+            }
+        }
+        std::size_t sweptContacts=0,sweptSegment=0;
+        double sweptGap=std::numeric_limits<double>::infinity();
+        if(sweepAvailable){
+            for(const auto& pair:betweenPoses.pairs()){
+                if(pair.firstId!=id.toStdString()&&pair.secondId!=id.toStdString())continue;
+                sweptContacts+=pair.contactSegments;
+                if(pair.minimumGapMm<sweptGap){
+                    sweptGap=pair.minimumGapMm;
+                    sweptSegment=pair.closestSegment;
+                }
+            }
+        }
+        auto quote=[](QString value){value.replace('"',QStringLiteral("\"\""));return QStringLiteral("\"")+value+QStringLiteral("\"");};
+        generated+=QString("%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21\n")
+            .arg(quote(id),quote(part->name)).arg(intervals+1)
+            .arg(b.x0,0,'g',16).arg(b.y0,0,'g',16).arg(b.z0,0,'g',16)
+            .arg(b.x1,0,'g',16).arg(b.y1,0,'g',16).arg(b.z1,0,'g',16)
+            .arg(volume,0,'g',16).arg(possibleOverlaps)
+            .arg(quote(nearestId))
+            .arg(std::isfinite(closest)?QString::number(closest,'g',16):QStringLiteral("N/A"))
+            .arg(static_cast<qulonglong>(sameTimeOverlaps))
+            .arg(std::isfinite(nearestSimultaneous)?QString::number(nearestSimultaneous,'g',16):QStringLiteral("N/A"))
+            .arg(std::isfinite(nearestSimultaneous)?QString::number(static_cast<qulonglong>(closestSample)):QStringLiteral("N/A"))
+            .arg(sweepAvailable?"SUPPORTED_TRANSLATION":translationOnly?"UNAVAILABLE_NUMERICS":"UNSUPPORTED_ROTATION")
+            .arg(sweepAvailable?QString::number(static_cast<qulonglong>(sweptContacts)):QStringLiteral("N/A"))
+            .arg(sweepAvailable&&std::isfinite(sweptGap)?QString::number(sweptGap,'g',16):QStringLiteral("N/A"))
+            .arg(sweepAvailable&&std::isfinite(sweptGap)?QString::number(static_cast<qulonglong>(sweptSegment)):QStringLiteral("N/A"))
+            .arg(quote(sweepAvailable?
+                "sampled pose AABB and translational inter-pose AABB are broad-phase only; neither box overlap proves solid collision":
+                "sampled pose AABB is broad-phase only; neither box overlap proves solid collision; inter-pose sweep unavailable")) .toUtf8();
+    }
+    // A strict caller uses the aggregated minimum to reject potential
+    // collisions between recorded samples. No outputs change on failure.
+    double globallyClosest=std::numeric_limits<double>::infinity();
+    if(sweepAvailable)for(const auto& pair:betweenPoses.pairs())
+        globallyClosest=std::min(globallyClosest,pair.minimumGapMm);
+    *csv=std::move(generated);
+    if(translationSweepSupported)*translationSweepSupported=sweepAvailable;
+    if(closestSweptBoxGapMm)*closestSweptBoxGapMm=globallyClosest;
+    if(error)error->clear();return true;
+}
+
+bool SceneDocument::updateLiveArticulatedCoordinates(const QMap<int,double>& targets,
+        QString* error){
+    if(!hasLiveArticulatedNetwork()){
+        setError(error,"There is no saved articulated network.");return false;
+    }
+    QVector<ArticulatedNetworkJoint> proposed;bool definitionsChanged=false;
+    if(!applyArticulatedTargets(liveArticulatedJoints_,targets,&proposed,
+                                &definitionsChanged,error))return false;
+    if(!definitionsChanged){if(error)error->clear();return true;}
+    QVector<Part> staged;bool geometryChanged=false;
+    if(!stageLiveArticulatedRegeneration(proposed,&staged,&geometryChanged,error))return false;
+    checkpoint();
+    if(geometryChanged)parts_=std::move(staged);
+    liveArticulatedJoints_=std::move(proposed);
+    if(error)error->clear();return true;
+}
+
+bool SceneDocument::commitLiveArticulatedCoordinatesChecked(
+        const QMap<int,double>& targets,double requiredClearanceMm,
+        bool rejectUnsafe,int baseIntervals,int refinement,bool smoothstep,
+        QString* error){
+    if(!fit::validThreshold(requiredClearanceMm)||baseIntervals<0||baseIntervals>12||
+       refinement<1||refinement>4||!hasLiveArticulatedNetwork()){
+        setError(error,"Saved mechanism, nonnegative clearance, 0-12 base intervals and 1-4 refinements are required.");
+        return false;
+    }
+    QString preview,issue;
+    bool unsafe=false;
+    // Re-run the policy at the commit boundary. A previous GUI preview is
+    // not evidence that a later direct API call is safe.
+    if(!previewLiveArticulatedCoordinates(targets,&preview,&issue,
+            requiredClearanceMm,&unsafe)){
+        setError(error,issue);return false;
+    }
+    if(rejectUnsafe&&unsafe){
+        setError(error,"The committed pose violates the requested clearance policy or exceeds the fit-audit limit.");
+        return false;
+    }
+    bool changed=false;
+    for(auto it=targets.cbegin();it!=targets.cend();++it){
+        if(std::abs(liveArticulatedJoints_.at(it.key()).initial-it.value())>1e-12){changed=true;break;}
+    }
+    // A true no-op consumes no undo checkpoint and requires no trajectory.
+    if(!changed){if(error)error->clear();return true;}
+    if(baseIntervals>0){
+        QString trajectory;
+        if(!previewLiveArticulatedTrajectory(targets,baseIntervals,&trajectory,&issue,
+                requiredClearanceMm,rejectUnsafe,refinement,smoothstep)){
+            setError(error,issue);return false;
+        }
+        if(rejectUnsafe&&std::all_of(liveArticulatedJoints_.cbegin(),liveArticulatedJoints_.cend(),
+                [](const ArticulatedNetworkJoint& joint){return joint.kind!=articulated::JointKind::Revolute;})){
+            // The old policy examined discrete poses and could accept a slider
+            // that passes THROUGH a fixture between two safe keyframes. For
+            // translation-only mechanisms, enforce the additional continuous
+            // broad-phase check at the atomic commit boundary. Rotation still
+            // requires an independent rotational/narrow-phase solution.
+            QByteArray evidence;
+            bool supported=false;
+            double sweptMinimum=std::numeric_limits<double>::infinity();
+            if(!buildLiveArticulatedEnvelopeCsv(targets,baseIntervals,refinement,smoothstep,
+                    &evidence,&issue,&supported,&sweptMinimum)){
+                setError(error,issue);return false;
+            }
+            if(!supported||!std::isfinite(sweptMinimum)||sweptMinimum<=requiredClearanceMm){
+                setError(error,"Potential between-pose fixture contact, inadequate swept AABB clearance, "
+                    "or unsupported translation data. Strict move not committed.");
+                return false;
+            }
+        }
+    }
+    return updateLiveArticulatedCoordinates(targets,error);
+}
+
+namespace {
+// An edited joint stays the same saved graph edge. Reparenting/retyping a
+// connection is a separate topology-changing operation, not a harmless edit.
+bool sameArticulatedConnection(const SceneDocument::ArticulatedNetworkJoint& a,
+                               const SceneDocument::ArticulatedNetworkJoint& b){
+    return a.parentBodyId==b.parentBodyId&&a.childBodyId==b.childBodyId&&
+           a.kind==b.kind;
+}
+bool sameArticulatedDefinition(const SceneDocument::ArticulatedNetworkJoint& a,
+                               const SceneDocument::ArticulatedNetworkJoint& b){
+    if(!sameArticulatedConnection(a,b)||a.driven!=b.driven||
+       a.initial!=b.initial||a.minimum!=b.minimum||a.maximum!=b.maximum||
+       a.axis.x!=b.axis.x||a.axis.y!=b.axis.y||a.axis.z!=b.axis.z||
+       a.childAtZero.translation.x!=b.childAtZero.translation.x||
+       a.childAtZero.translation.y!=b.childAtZero.translation.y||
+       a.childAtZero.translation.z!=b.childAtZero.translation.z)return false;
+    for(int i=0;i<9;++i)if(a.childAtZero.rotation[i]!=b.childAtZero.rotation[i])return false;
+    return true;
+}
+}
+
+bool SceneDocument::previewLiveArticulatedJointDefinitionEdit(int index,
+        const ArticulatedNetworkJoint& proposed,QString* report,QString* error,
+        double requiredClearanceMm) const{
+    if(!report||!fit::validThreshold(requiredClearanceMm)||
+       !hasLiveArticulatedNetwork()||index<0||index>=liveArticulatedJoints_.size()){
+        setError(error,"A saved joint, output report and nonnegative clearance are required.");return false;
+    }
+    const auto& existing=liveArticulatedJoints_[index];
+    if(!sameArticulatedConnection(existing,proposed)){
+        setError(error,"Joint definition edit cannot change its endpoints or joint kind.");return false;
+    }
+    QVector<ArticulatedNetworkJoint> definitions=liveArticulatedJoints_;
+    definitions[index]=proposed;
+    QVector<Part> staged;bool moved=false;
+    if(!stageLiveArticulatedRegeneration(definitions,&staged,&moved,error))return false;
+    QStringList ids{liveArticulatedFixed_};
+    for(const auto& joint:definitions){
+        if(!ids.contains(joint.parentBodyId))ids.append(joint.parentBodyId);
+        if(!ids.contains(joint.childBodyId))ids.append(joint.childBodyId);
+    }
+    QStringList lines{"READ-ONLY ARTICULATED JOINT-DEFINITION PREVIEW",
+        QString("Joint %1: %2 -> %3; unchanged graph connection")
+            .arg(index+1).arg(existing.parentBodyId,existing.childBodyId),
+        QString("Definition changed: %1; geometry changed: %2")
+            .arg(sameArticulatedDefinition(existing,proposed)?"no":"yes")
+            .arg(moved?"yes":"no"),
+        QString("Coordinate: %1; limits: [%2, %3]")
+            .arg(proposed.initial,0,'g',15).arg(proposed.minimum,0,'g',15)
+            .arg(proposed.maximum,0,'g',15)};
+    if(ids.size()<=12){
+        SceneDocument detached;detached.parts_=std::move(staged);
+        QVector<AssemblyFitPair> pairs;
+        if(!inspectAssemblyFit(detached,ids,requiredClearanceMm,&pairs,error))return false;
+        int overlaps=0,contacts=0,insufficient=0;
+        for(const auto& pair:pairs){
+            if(pair.status==fit::Status::Interference)++overlaps;
+            else if(pair.status==fit::Status::Contact)++contacts;
+            else if(pair.status==fit::Status::InsufficientClearance)++insufficient;
+        }
+        lines<<QString("Static nominal fit: %1 pairs, %2 interferences, %3 contacts, %4 inadequate clearances")
+            .arg(pairs.size()).arg(overlaps).arg(contacts).arg(insufficient);
+    }else lines<<"Static nominal fit skipped above 12 component occurrences.";
+    lines<<"The preview does not certify clearance during continuous motion.";
+    *report=lines.join('\n');if(error)error->clear();return true;
+}
+
+bool SceneDocument::replaceLiveArticulatedJointDefinition(int index,
+        const ArticulatedNetworkJoint& proposed,QString* error){
+    if(!hasLiveArticulatedNetwork()||index<0||index>=liveArticulatedJoints_.size()){
+        setError(error,"No valid saved articulated joint was selected.");return false;
+    }
+    const auto& existing=liveArticulatedJoints_[index];
+    if(!sameArticulatedConnection(existing,proposed)){
+        setError(error,"A saved joint's endpoints and kind cannot be changed in place.");return false;
+    }
+    if(sameArticulatedDefinition(existing,proposed)){
+        if(error)error->clear();return true; // no checkpoint for no-op
+    }
+    QVector<ArticulatedNetworkJoint> definitions=liveArticulatedJoints_;
+    definitions[index]=proposed;
+    QVector<Part> staged;bool changed=false;
+    if(!stageLiveArticulatedRegeneration(definitions,&staged,&changed,error))return false;
+    checkpoint();
+    if(changed)parts_=std::move(staged);
+    liveArticulatedJoints_=std::move(definitions);
+    if(error)error->clear();return true;
+}
+
+namespace {
+// Saved network member identities are a contract: a reference edit may
+// change edges but must not quietly introduce/remove component occurrences.
+bool validArticulatedRebind(const QString& fixed,
+        const QMap<QString,mates::Transform>& reference,
+        const QVector<SceneDocument::ArticulatedNetworkJoint>& joints,
+        int index,const QString& parent,const QString& child,QString* error){
+    if(fixed.isEmpty()||index<0||index>=joints.size()||
+       parent.isEmpty()||child.isEmpty()||parent==child||
+       !reference.contains(parent)||!reference.contains(child)){
+        if(error)*error="Choose two distinct EXISTING articulated-network occurrences.";
+        return false;
+    }
+    return true;
+}
+}
+
+bool SceneDocument::previewLiveArticulatedJointRebind(int index,
+        const QString& newParentBodyId,const QString& newChildBodyId,
+        QString* report,QString* error,double requiredClearanceMm) const{
+    if(!report||!fit::validThreshold(requiredClearanceMm)){
+        setError(error,"A preview report and nonnegative clearance are required.");
+        return false;
+    }
+    if(!validArticulatedRebind(liveArticulatedFixed_,liveArticulatedReferencePoses_,
+           liveArticulatedJoints_,index,newParentBodyId,newChildBodyId,error))return false;
+    QVector<ArticulatedNetworkJoint> proposed=liveArticulatedJoints_;
+    const ArticulatedNetworkJoint original=proposed[index];
+    proposed[index].parentBodyId=newParentBodyId;
+    proposed[index].childBodyId=newChildBodyId;
+    QVector<Part> staged;bool changed=false;
+    if(!stageLiveArticulatedRegeneration(proposed,&staged,&changed,error))return false;
+    QStringList participating{liveArticulatedFixed_};
+    for(const auto& joint:proposed){
+        if(!participating.contains(joint.parentBodyId))participating<<joint.parentBodyId;
+        if(!participating.contains(joint.childBodyId))participating<<joint.childBodyId;
+    }
+    QStringList result{
+        "READ-ONLY ARTICULATED JOINT REBIND PREVIEW",
+        QString("Joint index: %1; type and drive parameters retained").arg(index+1),
+        QString("Old connection: %1 -> %2").arg(original.parentBodyId,original.childBodyId),
+        QString("New connection: %1 -> %2").arg(newParentBodyId,newChildBodyId),
+        QString("Changed: %1; staged geometry changed: %2")
+            .arg(original.parentBodyId!=newParentBodyId||original.childBodyId!=newChildBodyId?"yes":"no")
+            .arg(changed?"yes":"no")};
+    if(participating.size()<=12){
+        SceneDocument detached;
+        detached.parts_=std::move(staged);
+        QVector<AssemblyFitPair> pairs;
+        if(!inspectAssemblyFit(detached,participating,requiredClearanceMm,&pairs,error))return false;
+        int overlaps=0,contacts=0,insufficient=0;
+        for(const auto& pair:pairs){
+            if(pair.status==fit::Status::Interference)++overlaps;
+            else if(pair.status==fit::Status::Contact)++contacts;
+            else if(pair.status==fit::Status::InsufficientClearance)++insufficient;
+        }
+        result<<QString("Static nominal fit: %1 pairs, %2 overlaps, %3 contacts, %4 inadequate clearances")
+            .arg(pairs.size()).arg(overlaps).arg(contacts).arg(insufficient);
+    }else result<<"Static fit skipped above 12 component occurrences.";
+    result<<"No model, saved joint, revision, or undo state was modified."
+          <<"A static fit is not a continuous motion collision guarantee.";
+    *report=result.join('\n');
+    if(error)error->clear();
+    return true;
+}
+
+bool SceneDocument::rebindLiveArticulatedJoint(int index,
+        const QString& newParentBodyId,const QString& newChildBodyId,
+        QString* error){
+    if(!validArticulatedRebind(liveArticulatedFixed_,liveArticulatedReferencePoses_,
+            liveArticulatedJoints_,index,newParentBodyId,newChildBodyId,error))return false;
+    const auto& original=liveArticulatedJoints_[index];
+    if(original.parentBodyId==newParentBodyId&&original.childBodyId==newChildBodyId){
+        if(error)error->clear();return true; // no-op does not checkpoint
+    }
+    QVector<ArticulatedNetworkJoint> proposed=liveArticulatedJoints_;
+    proposed[index].parentBodyId=newParentBodyId;
+    proposed[index].childBodyId=newChildBodyId;
+    QVector<Part> staged;bool geometryChanged=false;
+    if(!stageLiveArticulatedRegeneration(proposed,&staged,&geometryChanged,error))return false;
+    checkpoint();
+    if(geometryChanged)parts_=std::move(staged);
+    liveArticulatedJoints_=std::move(proposed);
+    if(error)error->clear();
+    return true;
+}
+
+bool SceneDocument::removeLiveArticulatedNetwork(){
+    if(!hasLiveArticulatedNetwork())return false;
+    checkpoint();liveArticulatedFixed_.clear();liveArticulatedJoints_.clear();
+    liveArticulatedReferencePoses_.clear();return true;
+}
+
 bool SceneDocument::setJointMotionKeyframes(const QString& childBodyId,const QVector<JointMotionKeyframe>& keyframes,QString* error) {
     Part* child=nullptr;for(Part& part:parts_)if(part.id==childBodyId){child=&part;break;}
     if(!child||(child->assemblyJointType!="Revolute"&&child->assemblyJointType!="Prismatic")){
@@ -2238,6 +4667,26 @@ bool SceneDocument::evaluateAssemblyMotionStudy(double timeSeconds,QString* erro
     return solveAssemblyPose(targets,error);
 }
 
+static bool motionSampleTimes(const QVector<Part>& parts,double startSeconds,double endSeconds,
+                              int sampleCount,QVector<double>* times,QString* error) {
+    if(!times)return false;
+    QVector<double> candidate;candidate.reserve(sampleCount);
+    for(int index=0;index<sampleCount;++index)
+        candidate.append(startSeconds+(endSeconds-startSeconds)*index/(sampleCount-1));
+    for(const Part& part:parts)for(const JointMotionKeyframe& key:part.jointMotionKeyframes)
+        if(key.timeSeconds>startSeconds&&key.timeSeconds<endSeconds)candidate.append(key.timeSeconds);
+    std::sort(candidate.begin(),candidate.end());
+    // Keep distinct requested positions even for a sub-nanosecond interval.
+    // Approximate equality is not transitive and can erase a valid endpoint.
+    const auto last=std::unique(candidate.begin(),candidate.end());
+    candidate.erase(last,candidate.end());
+    if(candidate.size()>256){
+        if(error)*error=QStringLiteral("Motion scan has more than 256 uniform/keyframe positions; choose a shorter time interval.");
+        return false;
+    }
+    *times=std::move(candidate);return true;
+}
+
 bool SceneDocument::scanAssemblyMotionInterference(const QString& firstId,const QString& secondId,
                                                     double startSeconds,double endSeconds,int sampleCount,
                                                     QVector<MotionInterferenceSample>* samples,QString* error) const {
@@ -2249,9 +4698,10 @@ bool SceneDocument::scanAssemblyMotionInterference(const QString& firstId,const 
        endSeconds<=startSeconds||sampleCount<2||sampleCount>51){
         setError(error,"Motion scan needs increasing times within 0-3,600 seconds and 2-51 samples.");return false;
     }
-    QVector<MotionInterferenceSample> candidate;candidate.reserve(sampleCount);
-    for(int index=0;index<sampleCount;++index){
-        const double time=startSeconds+(endSeconds-startSeconds)*index/(sampleCount-1);
+    QVector<double> times;
+    if(!motionSampleTimes(parts_,startSeconds,endSeconds,sampleCount,&times,error))return false;
+    QVector<MotionInterferenceSample> candidate;candidate.reserve(times.size());
+    for(double time:times){
         SceneDocument frame;frame.parts_=parts_;
         QString frameError;
         if(!frame.evaluateAssemblyMotionStudy(time,&frameError)){
@@ -2261,9 +4711,166 @@ bool SceneDocument::scanAssemblyMotionInterference(const QString& firstId,const 
         if(!frame.measureInterference(firstId,secondId,&interference,&frameError)){
             setError(error,QStringLiteral("Interference scan failed at %1 s: %2").arg(time,0,'f',3).arg(frameError));return false;
         }
-        candidate.append({time,interference.volume,interference.volume>1e-7});
+        MinimumDistanceResult clearance;
+        if(!frame.measureMinimumDistance(firstId,secondId,&clearance,&frameError)){
+            setError(error,QStringLiteral("Clearance scan failed at %1 s: %2").arg(time,0,'f',3).arg(frameError));return false;
+        }
+        candidate.append({time,interference.volume,interference.volume>1e-7,
+                          std::max(0.0,clearance.distance),
+                          clearance.firstX,clearance.firstY,clearance.firstZ,
+                          clearance.secondX,clearance.secondY,clearance.secondZ});
     }
     *samples=std::move(candidate);return true;
+}
+
+bool SceneDocument::scanAssemblyMotionAdaptive(const QString& firstId,const QString& secondId,
+                                               double startSeconds,double endSeconds,int maximumSamples,
+                                               double safetyClearanceMm,double coarseStepSeconds,
+                                               double fineStepSeconds,
+                                               QVector<MotionInterferenceSample>* samples,
+                                               bool* unresolvedIntervals,QString* error,
+                                               double provenRelativeSpeedBoundMmPerSecond,
+                                               bool* clearanceBoundSatisfied,
+                                               double* conservativeClearanceLowerBoundMm,
+                                               QVector<MotionClearanceInterval>* intervalAudit) const {
+    if(!samples||!unresolvedIntervals||firstId==secondId||!find(firstId)||!find(secondId)){
+        setError(error,"Adaptive motion scan requires two existing distinct bodies and output destinations.");
+        return false;
+    }
+    const Part* first=find(firstId);
+    const Part* second=find(secondId);
+    if(first->isSurfaceBody||second->isSurfaceBody||first->shape.IsNull()||second->shape.IsNull()){
+        setError(error,"Adaptive motion scanning requires two nonempty solid bodies.");return false;
+    }
+    if(!std::isfinite(startSeconds)||!std::isfinite(endSeconds)||startSeconds<0||
+       endSeconds>3600||endSeconds<=startSeconds||maximumSamples<2||maximumSamples>256){
+        setError(error,"Adaptive motion scan needs increasing times within 0-3,600 s and a 2-256 sample budget.");
+        return false;
+    }
+    QVector<double> times;
+    if(!motionSampleTimes(parts_,startSeconds,endSeconds,2,&times,error))return false;
+    std::vector<double> initial;
+    initial.reserve(static_cast<std::size_t>(times.size()));
+    for(double time:times)initial.push_back(time);
+    cad::motion::Settings settings;
+    settings.maximumSamples=maximumSamples;
+    settings.safetyClearanceMm=safetyClearanceMm;
+    settings.coarseStepSeconds=coarseStepSeconds;
+    settings.fineStepSeconds=fineStepSeconds;
+    settings.provenRelativeSpeedBoundMmPerSecond=provenRelativeSpeedBoundMmPerSecond;
+    QMap<double,MotionInterferenceSample> evaluated;
+    const cad::motion::Evaluate measure=[&](double time,cad::motion::Observation* observation,
+                                              std::string* reason)->bool {
+        SceneDocument frame;
+        frame.parts_=parts_;
+        QString failure;
+        if(!frame.evaluateAssemblyMotionStudy(time,&failure)){
+            if(reason)*reason=QStringLiteral("Motion solve failed at %1 s: %2")
+                .arg(time,0,'g',15).arg(failure).toStdString();
+            return false;
+        }
+        InterferenceResult overlap;
+        MinimumDistanceResult clearance;
+        if(!frame.measureInterference(firstId,secondId,&overlap,&failure)||
+           !frame.measureMinimumDistance(firstId,secondId,&clearance,&failure)){
+            if(reason)*reason=QStringLiteral("Geometry evaluation failed at %1 s: %2")
+                .arg(time,0,'g',15).arg(failure).toStdString();
+            return false;
+        }
+        if(!std::isfinite(overlap.volume)||overlap.volume<0||
+           !std::isfinite(clearance.distance)||clearance.distance<0){
+            if(reason)*reason="CAD kernel reported invalid overlap or clearance.";
+            return false;
+        }
+        observation->clearanceMm=clearance.distance;
+        observation->overlapVolumeMm3=overlap.volume;
+        evaluated.insert(time,{time,overlap.volume,overlap.volume>1e-7,
+                               clearance.distance,clearance.firstX,clearance.firstY,clearance.firstZ,
+                               clearance.secondX,clearance.secondY,clearance.secondZ});
+        return true;
+    };
+    cad::motion::Result result;
+    std::string reason;
+    if(!cad::motion::scanAdaptive(initial,settings,measure,&result,&reason)){
+        setError(error,QString::fromStdString(reason));return false;
+    }
+    QVector<MotionInterferenceSample> candidate;
+    candidate.reserve(static_cast<qsizetype>(result.observations.size()));
+    for(const auto& observation:result.observations)
+        candidate.append(evaluated.value(observation.timeSeconds));
+    QVector<MotionClearanceInterval> intervalCandidate;
+    if(intervalAudit){
+        intervalCandidate.reserve(static_cast<qsizetype>(result.intervals.size()));
+        for(const auto& item:result.intervals)
+            intervalCandidate.append({item.startSeconds,item.endSeconds,
+                item.minimumEndpointClearanceMm,item.clearanceLowerBoundMm,
+                item.speedBoundAvailable,item.sampledOverlap,item.provenAboveMargin,
+                item.refinementNeeded});
+    }
+    *samples=std::move(candidate);
+    *unresolvedIntervals=result.budgetExhausted;
+    if(intervalAudit)*intervalAudit=std::move(intervalCandidate);
+    if(clearanceBoundSatisfied)*clearanceBoundSatisfied=result.clearanceBoundSatisfied;
+    if(conservativeClearanceLowerBoundMm)
+        *conservativeClearanceLowerBoundMm=result.conservativeClearanceLowerBoundMm;
+    if(error)error->clear();
+    return true;
+}
+
+bool SceneDocument::scanAssemblyMotionAllPairs(double startSeconds,double endSeconds,int sampleCount,
+                                                QVector<MotionInterferenceContact>* contacts,QString* error) const {
+    if(!contacts){setError(error,"Provide an output list for assembly motion contacts.");return false;}
+    if(!std::isfinite(startSeconds)||!std::isfinite(endSeconds)||startSeconds<0||endSeconds>3600||
+       endSeconds<=startSeconds||sampleCount<2||sampleCount>51){
+        setError(error,"Motion scan needs increasing times within 0-3,600 seconds and 2-51 samples.");return false;
+    }
+    QVector<int> solidIndexes;
+    for(int index=0;index<parts_.size();++index){
+        if(parts_[index].isSurfaceBody)continue;
+        if(parts_[index].shape.IsNull()){
+            setError(error,"Assembly motion scan found a solid body without geometry.");return false;
+        }
+        solidIndexes.append(index);
+    }
+    if(solidIndexes.size()<2||solidIndexes.size()>20){
+        setError(error,"All-pairs motion scanning needs 2 to 20 solid bodies.");return false;
+    }
+    QVector<double> times;
+    if(!motionSampleTimes(parts_,startSeconds,endSeconds,sampleCount,&times,error))return false;
+    QVector<MotionInterferenceContact> candidate;
+    for(double time:times){
+        SceneDocument frame;frame.parts_=parts_;
+        QString frameError;
+        if(!frame.evaluateAssemblyMotionStudy(time,&frameError)){
+            setError(error,QStringLiteral("All-pairs motion scan failed at %1 s: %2")
+                .arg(time,0,'f',3).arg(frameError));return false;
+        }
+        QVector<Bnd_Box> bounds;bounds.reserve(solidIndexes.size());
+        try{
+            for(int index:solidIndexes){
+                Bnd_Box box;BRepBndLib::Add(frame.parts_[index].shape,box);
+                if(box.IsVoid()){setError(error,"Assembly motion scan could not bound a solid body.");return false;}
+                bounds.append(box);
+            }
+        }catch(const Standard_Failure& failure){
+            setError(error,QStringLiteral("Could not prepare motion-scan bounds: %1").arg(failure.what()));return false;
+        }
+        for(int first=0;first<solidIndexes.size();++first){
+            for(int second=first+1;second<solidIndexes.size();++second){
+                if(bounds[first].IsOut(bounds[second]))continue;
+                const QString& firstId=frame.parts_[solidIndexes[first]].id;
+                const QString& secondId=frame.parts_[solidIndexes[second]].id;
+                InterferenceResult interference;
+                if(!frame.measureInterference(firstId,secondId,&interference,&frameError)){
+                    setError(error,QStringLiteral("Pairwise motion scan failed at %1 s: %2")
+                        .arg(time,0,'f',3).arg(frameError));return false;
+                }
+                if(interference.volume>1e-7)
+                    candidate.append({time,firstId,secondId,interference.volume});
+            }
+        }
+    }
+    *contacts=std::move(candidate);return true;
 }
 
 bool SceneDocument::setDrawingSheetSettings(const QString& partId,const DrawingSheetSettings& settings,QString* error) {
@@ -2373,6 +4980,31 @@ bool SceneDocument::prepareDrawingSheetSettings(const QString& partId,const Draw
     for(DrawingSectionAnnotation& section:persisted.sectionAnnotations)
         if(section.id.isEmpty())section.id=QUuid::createUuid().toString(QUuid::WithoutBraces);
     if(!validDrawingSettings(persisted,error))return false;
+    // A generic annotation edit must not "approve" an old witnessed edge by
+    // overwriting only its source revision. Require a current, unique OCCT
+    // match before accepting any changed token. The strict review API above
+    // additionally re-measures the drawing and repairs the current edge index.
+    if(part->hasDrawingSettings){
+        for(const auto& dimension:persisted.edgeDimensionAnnotations){
+            const auto& previous=part->drawingSettings.edgeDimensionAnnotations;
+            const auto old=std::find_if(previous.cbegin(),previous.cend(),
+                [&](const DrawingEdgeDimensionAnnotation& d){return d.id==dimension.id;});
+            if(old==previous.cend()||old->sourceGeometryToken==dimension.sourceGeometryToken||
+               dimension.edgeAnchor.isEmpty())continue;
+            const Part* source=find(dimension.sourceBodyId);
+            int uniqueIndex=0;
+            QString why;
+            if(!source||dimension.sourceGeometryToken!=source->geometryToken||
+               (!resolveStableEdgeAnchor(source->shape,dimension.edgeAnchor,&uniqueIndex,&why)&&
+                (dimension.kind==QStringLiteral("LENGTH")||
+                 !resolveResizedFullCircleForDrawing(source->shape,dimension.edgeAnchor,
+                                                     &uniqueIndex,&why)))){
+                setError(error,QStringLiteral("Drawing edge review rejected: %1. Re-select the source edge.")
+                    .arg(why.isEmpty()?QStringLiteral("source revision is not current"):why));
+                return false;
+            }
+        }
+    }
     // A persistent sheet is a document-level identity, not merely a per-body
     // label. Duplicate IDs make saved view/annotation links ambiguous.
     for(const Part& other:parts_){
@@ -2407,7 +5039,24 @@ DrawingSheetSourceStatus SceneDocument::drawingSheetSourceStatus(const QString& 
     const bool matchesAggregate=report.storedGeometryToken==report.currentGeometryToken;
     const bool matchesSingleBody=sources.size()==1&&report.storedGeometryToken==sources.first()->geometryToken;
     const bool metadataMatches=report.storedDataToken==report.currentDataToken;
-    report.state=((matchesAggregate||matchesSingleBody)&&metadataMatches)?DrawingSourceState::Current:DrawingSourceState::Stale;
+    // Sheet-level acknowledgement is separate from per-annotation approval.
+    // A stale edge measurement or GD&T frame stays stale even after a user
+    // refreshes the aggregate source fingerprint. This protects references
+    // that may have been trimmed, split, merged or deleted in a Boolean edit.
+    for(const DrawingEdgeDimensionAnnotation& annotation:master->drawingSettings.edgeDimensionAnnotations){
+        const Part* source=find(annotation.sourceBodyId);
+        if(!source||source->geometryToken!=annotation.sourceGeometryToken)
+            report.staleAnnotationIds.append(annotation.id);
+    }
+    for(const DrawingGdtFrameAnnotation& annotation:master->drawingSettings.gdtFrames){
+        const Part* source=find(annotation.sourceBodyId);
+        if(!source||source->geometryToken!=annotation.sourceGeometryToken)
+            report.staleAnnotationIds.append(annotation.id);
+    }
+    report.staleAnnotationIds.removeDuplicates();report.staleAnnotationIds.sort();
+    report.state=((matchesAggregate||matchesSingleBody)&&metadataMatches&&
+                  report.staleAnnotationIds.isEmpty())?
+                 DrawingSourceState::Current:DrawingSourceState::Stale;
     return report;
 }
 
@@ -2440,6 +5089,1550 @@ bool SceneDocument::refreshDrawingSheetSource(const QString& partId,QString* err
     checkpoint();master->drawingSettings.sourceGeometryToken=current;master->drawingSettings.sourceDataToken=currentData;return true;
 }
 
+bool SceneDocument::reviewDrawingEdgeDimension(const QString& sheetOwnerId,
+        const QString& annotationId,QString* error){
+    const Part* owner=find(sheetOwnerId);
+    if(!owner||!owner->hasDrawingSettings||annotationId.trimmed().isEmpty()){
+        setError(error,"Select a saved drawing and a nonempty selected-edge annotation ID.");
+        return false;
+    }
+    const auto& saved=owner->drawingSettings.edgeDimensionAnnotations;
+    int annotationIndex=-1;
+    for(int i=0;i<saved.size();++i){
+        if(saved[i].id==annotationId){annotationIndex=i;break;}
+    }
+    if(annotationIndex<0){setError(error,"The selected drawing edge annotation no longer exists.");return false;}
+    const DrawingEdgeDimensionAnnotation& original=saved[annotationIndex];
+    const Part* source=find(original.sourceBodyId);
+    if(!source||source->shape.IsNull()||source->geometryToken.isEmpty()){
+        setError(error,"The drawing edge source is missing or invalid.");return false;
+    }
+    const bool alreadyCurrent=original.sourceGeometryToken==source->geometryToken;
+    if(original.edgeAnchor.isEmpty()&&!alreadyCurrent){
+        setError(error,"A legacy index-only edge has changed revision; reselect and capture its witness before review.");
+        return false;
+    }
+    // Even when the revision token matches, explicit review must still
+    // verify that a purported current reference can be measured now.
+    if(alreadyCurrent){
+        QString previewError;
+        if(!validateDrawingEdgeDimensionPreview(*source,original,&previewError)){
+            setError(error,QStringLiteral("Stored drawing measurement is broken: %1").arg(previewError));
+            return false;
+        }
+        if(error)error->clear();
+        return true; // A geometry-validated no-op must not consume undo history.
+    }
+    int resolved=0;
+    QString witnessError;
+    if(!resolveStableEdgeAnchor(source->shape,original.edgeAnchor,&resolved,&witnessError)&&
+       (original.kind==QStringLiteral("LENGTH")||
+        !resolveResizedFullCircleForDrawing(source->shape,original.edgeAnchor,
+                                            &resolved,&witnessError))){
+        setError(error,QStringLiteral("Cannot approve drawing edge ancestry: %1").arg(witnessError));
+        return false;
+    }
+    DrawingEdgeDimensionAnnotation reviewed=original;
+    reviewed.edgeIndex=resolved;
+    reviewed.sourceGeometryToken=source->geometryToken;
+    // A pair measurement must independently reattach BOTH circles and prove
+    // that the second still exists. The expensive preview is deliberately
+    // performed only during an explicit review, not in every status query.
+    QString previewError;
+    if(!validateDrawingEdgeDimensionPreview(*source,reviewed,&previewError)){
+        setError(error,QStringLiteral("Cannot approve drawing measurement: %1").arg(previewError));
+        return false;
+    }
+    QVector<Part> staged=parts_;
+    auto at=std::find_if(staged.begin(),staged.end(),[&](const Part& p){return p.id==sheetOwnerId;});
+    if(at==staged.end()){setError(error,"The drawing sheet disappeared during review.");return false;}
+    at->drawingSettings.edgeDimensionAnnotations[annotationIndex]=std::move(reviewed);
+    checkpoint();
+    parts_=std::move(staged);
+    if(error)error->clear();
+    return true;
+}
+
+bool SceneDocument::setInterleavedFeatureHistory(const QString& id,
+                  const QVector<InterleavedHistoryStep>& steps,QString* error){
+    const Part* original=find(id);
+    if(!original||original->isSurfaceBody||original->hasConstrainedPolygonDefinition||
+       original->hasLinkedBoolean||original->hasLinkedSketchExtrusion||
+       !original->linkedFoldedFlatSourceId.isEmpty()||
+       original->hasInPlaceSketchFeature||original->hasShapeFeatureTree||
+       original->hasParametricDefinition||original->hasFoldedSheetMetalDefinition||
+       !original->componentDefinitionId.isEmpty()||
+       !original->assemblyJointType.isEmpty()||steps.isEmpty()||steps.size()>40){
+        setError(error,"Use 1-40 interleaved operations on an ordinary solid without a competing feature definition.");
+        return false;
+    }
+    // A shape-only sequence belongs in the ordinary feature tree.  The
+    // interleaved mode must actually depend on an external sketch: otherwise
+    // it would have no dependency-graph edge and would not be regenerated.
+    if(std::none_of(steps.cbegin(),steps.cend(),[](const InterleavedHistoryStep& step){
+            return step.kind==QStringLiteral("SketchFuse")||
+                   step.kind==QStringLiteral("SketchCut");})){
+        setError(error,"An interleaved history requires at least one external sketch stage. Use the ordinary feature tree for shape-only histories.");
+        return false;
+    }
+    // A fresh history stores the unmodified body; an edited history replays
+    // from its original frozen base, never from the previous final output.
+    QVector<Part> candidate=parts_;
+    for(Part& part:candidate)if(part.id==id){
+        if(!part.hasInterleavedHistory){
+            part.hasInterleavedHistory=true;part.interleavedBase=part.shape;
+        }
+        part.interleavedSteps=steps;
+        part.interleavedSourceTokens.clear();
+        part.interleavedGeometryToken.clear();
+        break;
+    }
+    if(!propagateLinkedBodies(&candidate,error))return false;
+    checkpoint();parts_=std::move(candidate);return true;
+}
+bool SceneDocument::previewInterleavedHistoryWithDependents(const QString& id,
+        const QVector<InterleavedHistoryStep>& steps,QString* report,QString* error) const{
+    if(!report){setError(error,"Provide an output report for the dependent-history preflight.");return false;}
+    // The normal commit path has the authoritative dependency planner and
+    // geometry validator. Replay it in a disposable document rather than
+    // maintaining a second, inevitably divergent preview algorithm.
+    SceneDocument staged;
+    staged.parts_=parts_;
+    QString issue;
+    if(!staged.setInterleavedFeatureHistory(id,steps,&issue)){
+        setError(error,QString("Full linked history rebuild rejected: %1").arg(issue));
+        return false; // The caller's previous report and this document are untouched.
+    }
+    QStringList lines{
+        "READ-ONLY FULL PARAMETRIC DEPENDENCY PREFLIGHT",
+        QString("Target: %1; staged steps: %2").arg(id).arg(steps.size()),
+        "The complete linked-body dependency graph was rebuilt in a detached scene."};
+    int changed=0;
+    for(const Part& after:staged.parts_){
+        const Part* before=find(after.id);
+        if(!before){setError(error,"A staged dependency unexpectedly introduced a body.");return false;}
+        if(before->geometryToken==after.geometryToken)continue;
+        ++changed;
+        GProp_GProps properties;
+        if(after.shape.IsNull()||!BRepCheck_Analyzer(after.shape).IsValid()){
+            setError(error,QString("An invalid staged descendant was found: %1").arg(after.id));return false;
+        }
+        BRepGProp::VolumeProperties(after.shape,properties);
+        if(!std::isfinite(properties.Mass())||properties.Mass()<=0){
+            setError(error,QString("Staged descendant has invalid volume: %1").arg(after.id));return false;
+        }
+        lines.append(QString("REBUILT %1: valid solid, volume %2 mm^3")
+            .arg(after.id).arg(properties.Mass(),0,'g',14));
+    }
+    lines.append(QString("Changed solid bodies: %1; no live document changes committed.").arg(changed));
+    *report=lines.join('\n');
+    if(error)error->clear();
+    return true;
+}
+
+bool SceneDocument::interleavedFeatureHistoryCurrent(const QString& id) const{
+    const Part* part=find(id);
+    if(!part||!part->hasInterleavedHistory||part->interleavedGeometryToken!=part->geometryToken||
+       part->interleavedSourceTokens.size()!=part->interleavedSteps.size())return false;
+    for(int i=0;i<part->interleavedSteps.size();++i){
+        const auto& step=part->interleavedSteps[i];
+        if(step.kind==QStringLiteral("Shape"))continue;
+        const Part* source=find(step.sketchSourceId);
+        if(!source||!source->hasConstrainedPolygonDefinition||
+           source->geometryToken!=part->interleavedSourceTokens[i]||
+           source->constrainedPolygonGeometryToken!=source->geometryToken)return false;
+    }
+    return true;
+}
+
+bool SceneDocument::shapeFeatureTreeCurrent(const QString& partId) const {
+    const Part* part=find(partId);
+    return part&&part->hasShapeFeatureTree&&part->shapeFeatureGeometryToken==part->geometryToken;
+}
+
+bool SceneDocument::setShapeFeatureTree(const QString& partId,const QVector<ShapeFeatureNode>& nodes,QString* error){
+    int index=-1;
+    for(int i=0;i<parts_.size();++i)if(parts_[i].id==partId){index=i;break;}
+    if(index<0){setError(error,"Select an existing body.");return false;}
+    const Part& part=parts_[index];
+    if(part.hasLinkedBoolean||part.hasLinkedSketchExtrusion||!part.linkedFoldedFlatSourceId.isEmpty()){
+        setError(error,"Linked derived bodies are read-only; edit their source bodies instead.");return false;
+    }
+    // Component occurrence geometry is managed by placement and joint machinery.
+    // Editing it here would desynchronize assembly placement frames.
+    if(!part.componentDefinitionId.isEmpty()||!part.assemblyJointType.isEmpty()){
+        setError(error,"Feature stacks cannot directly modify component occurrences. Edit the source part before making an assembly occurrence.");return false;
+    }
+    if(part.hasShapeFeatureTree&&!shapeFeatureTreeCurrent(partId)){
+        setError(error,"This feature tree is stale after a direct model edit. Rebase explicitly before editing its nodes.");return false;
+    }
+    if(!validateShapeFeatureNodes(nodes,error))return false;
+    // Same nodes are a true no-op: no costly geometry build, no undo entry.
+    if(part.hasShapeFeatureTree&&nodes.size()==part.shapeFeatureNodes.size()){
+        bool identical=true;
+        for(int i=0;i<nodes.size();++i){
+            const auto& a=nodes[i];const auto& b=part.shapeFeatureNodes[i];
+            if(a.id!=b.id||a.type!=b.type||a.parameters!=b.parameters||
+               a.suppressed!=b.suppressed||a.inputs!=b.inputs){identical=false;break;}
+        }
+        if(identical)return true;
+    }
+    const TopoDS_Shape source=part.hasShapeFeatureTree?part.shapeFeatureBase:part.shape;
+    // The last committed feature stack is the authority for cache identity.
+    // Reuse the contiguous unchanged prefix directly; the DAG planner below
+    // may reuse additional independent branches beyond the first edit.
+    // A failed rebuild must not alter the document or its saved cache.
+    QVector<TopoDS_Shape> prefix;
+    if(part.hasShapeFeatureTree&&shapeFeatureTreeCurrent(partId)&&
+       part.shapeFeatureCachedOutputs.size()==part.shapeFeatureNodes.size()){
+        for(int i=0;i<std::min(nodes.size(),part.shapeFeatureNodes.size());++i){
+            const auto& a=nodes[i];const auto& b=part.shapeFeatureNodes[i];
+            if(a.id!=b.id||a.type!=b.type||a.parameters!=b.parameters||
+               a.suppressed!=b.suppressed||a.inputs!=b.inputs)break;
+            prefix.append(part.shapeFeatureCachedOutputs[i]);
+        }
+    }
+    // The cache belongs to the current committed geometry and has one output
+    // per old feature. Beyond the unchanged prefix, reusable branches are
+    // identified by stable IDs and their actual dependency chains. A changed
+    // independent branch does not invalidate an unrelated parallel branch.
+    QMap<QString,TopoDS_Shape> reusable;
+    if(part.hasShapeFeatureTree&&shapeFeatureTreeCurrent(partId)&&
+       part.shapeFeatureCachedOutputs.size()==part.shapeFeatureNodes.size()){
+        QVector<bool> available;
+        available.reserve(part.shapeFeatureCachedOutputs.size());
+        for(const auto& shape:part.shapeFeatureCachedOutputs)available.append(!shape.IsNull());
+        QVector<int> oldPositions;
+        if(!planShapeFeatureReuse(part.shapeFeatureNodes,nodes,available,&oldPositions,error))return false;
+        for(int i=prefix.size();i<nodes.size();++i){
+            const int old=oldPositions[i];
+            if(old>=0)reusable.insert(nodes[i].id,part.shapeFeatureCachedOutputs[old]);
+        }
+    }
+    TopoDS_Shape rebuilt;
+    QVector<TopoDS_Shape> intermediate;
+    if(!rebuildShapeFeatureTree(source,part.isSurfaceBody,nodes,&rebuilt,error,
+                                 &prefix,&intermediate,&reusable))return false;
+    QVector<Part> candidate=parts_;
+    Part& target=candidate[index];
+    if(!target.hasShapeFeatureTree){
+        target.shapeFeatureBase=source;
+        target.hasShapeFeatureTree=true;
+    }
+    target.shape=rebuilt;
+    target.shapeFeatureNodes=nodes;
+    target.shapeFeatureCachedOutputs=std::move(intermediate);
+    // A general tree may now consume an ordered external-sketch stack.
+    // Unsupported direct geometry edits still invalidate upstream history.
+    target.geometryToken=generatedId();
+    target.shapeFeatureGeometryToken=target.geometryToken;
+    if(target.hasConstrainedPolygonDefinition&&part.constrainedPolygonGeometryToken==part.geometryToken)
+        target.constrainedPolygonGeometryToken=target.geometryToken;
+    if(!propagateLinkedBodies(&candidate,error))return false;
+    checkpoint();parts_=std::move(candidate);
+    return true;
+}
+
+bool SceneDocument::stageShapeFeatureTreesBatch(
+        const QMap<QString,QVector<ShapeFeatureNode>>& proposals,
+        SceneDocument* staged,bool* changed,QStringList* changedBodyIds,QString* error) const{
+    if(!staged||!changed||!changedBodyIds||proposals.size()<2||proposals.size()>16){
+        setError(error,"Batch feature staging requires 2-16 roots and valid destinations.");return false;
+    }
+    // Snapshot EVERYTHING needed by parametric and assembly dependency rebuild.
+    // Do not copy undo/redo history or save a checkpoint into the live scene.
+    staged->parts_=parts_;
+    staged->liveRigidMateFixed_=liveRigidMateFixed_;
+    staged->liveRigidMates_=liveRigidMates_;
+    staged->liveArticulatedFixed_=liveArticulatedFixed_;
+    staged->liveArticulatedJoints_=liveArticulatedJoints_;
+    staged->liveArticulatedReferencePoses_=liveArticulatedReferencePoses_;
+    *changed=false;
+    changedBodyIds->clear();
+    for(auto it=proposals.cbegin();it!=proposals.cend();++it){
+        const Part* original=find(it.key());
+        if(!original){setError(error,QStringLiteral("Batch feature source is missing: %1").arg(it.key()));return false;}
+        QString issue;
+        if(!staged->setShapeFeatureTree(it.key(),it.value(),&issue)){
+            setError(error,QStringLiteral("Batch feature edit failed on %1: %2").arg(it.key(),issue));return false;
+        }
+        const Part* result=staged->find(it.key());
+        if(!result){setError(error,"Batch feature staging lost a target body.");return false;}
+        *changed=*changed||(result->geometryToken!=original->geometryToken);
+    }
+    // Postcondition: independently validate the staged revision journal.
+    // No persisted scene member or undo checkpoint is changed on failure.
+    std::vector<transaction::BodyRevisionEvidence> previous,proposed;
+    previous.reserve(parts_.size());proposed.reserve(staged->parts_.size());
+    std::vector<std::string> rootIds;
+    for(auto it=proposals.cbegin();it!=proposals.cend();++it)
+        rootIds.push_back(it.key().toStdString());
+    for(const Part& part:parts_)
+        previous.push_back({part.id.toStdString(),part.geometryToken.toStdString(),true});
+    for(const Part& part:staged->parts_){
+        const Part* original=find(part.id);
+        proposed.push_back({part.id.toStdString(),part.geometryToken.toStdString(),
+                            original&&!original->shape.IsNull()&&
+                            !part.shape.IsNull()&&original->shape.IsSame(part.shape)});
+    }
+    std::vector<std::string> changedStamps;
+    std::string invariantError;
+    if(!transaction::validateRebuildCommit(previous,proposed,rootIds,
+                                            &changedStamps,&invariantError)){
+        setError(error,QStringLiteral("Atomic feature rebuild invariant: %1")
+                            .arg(QString::fromStdString(invariantError)));
+        return false;
+    }
+    for(const auto& id:changedStamps)
+        changedBodyIds->append(QString::fromStdString(id));
+    if(error)error->clear();
+    return true;
+}
+
+bool SceneDocument::previewShapeFeatureTreesBatch(
+        const QMap<QString,QVector<ShapeFeatureNode>>& proposals,
+        QString* report,QString* error) const{
+    if(!report){setError(error,"A destination is required for the detached feature preview.");return false;}
+    SceneDocument staged;
+    bool changed=false;QStringList changedIds;
+    if(!stageShapeFeatureTreesBatch(proposals,&staged,&changed,&changedIds,error))return false;
+    // This review is computed from the DETACHED document's real saved sheet
+    // links. It detects downstream annotations made stale by the proposed
+    // geometry revision, without acknowledging or changing any live drawing.
+    QStringList newlyStaleSheets;
+    QStringList newlyStaleAnnotations;
+    for(const Part& item:staged.parts_){
+        if(!item.hasDrawingSettings)continue;
+        const DrawingSheetSourceStatus before=drawingSheetSourceStatus(item.id);
+        const DrawingSheetSourceStatus after=staged.drawingSheetSourceStatus(item.id);
+        if(before.state==DrawingSourceState::Current &&
+           after.state!=DrawingSourceState::Current){
+            newlyStaleSheets.append(item.id);
+        }
+        for(const QString& annotation:after.staleAnnotationIds){
+            if(!before.staleAnnotationIds.contains(annotation))
+                newlyStaleAnnotations.append(item.id+QStringLiteral(":")+annotation);
+        }
+    }
+    newlyStaleSheets.sort();newlyStaleAnnotations.sort();
+    const QString preview=QStringLiteral(
+        "ATOMIC_FEATURE_PREVIEW\nroots=%1\nchanged=%2\nbody_ids=%3"
+        "\nnewly_stale_sheets=%4\nnewly_stale_annotations=%5"
+        "\nreview_sheet_ids=%6\nreview_annotation_ids=%7\nstatus=READ_ONLY")
+        .arg(proposals.size()).arg(changedIds.size()).arg(changedIds.join(','))
+        .arg(newlyStaleSheets.size()).arg(newlyStaleAnnotations.size())
+        .arg(newlyStaleSheets.join(',')).arg(newlyStaleAnnotations.join(','));
+    *report=preview;
+    if(error)error->clear();
+    return true;
+}
+
+bool SceneDocument::setShapeFeatureTreesBatch(
+        const QMap<QString,QVector<ShapeFeatureNode>>& proposals,QString* error){
+    SceneDocument staged;
+    bool changed=false;QStringList changedIds;
+    if(!stageShapeFeatureTreesBatch(proposals,&staged,&changed,&changedIds,error))return false;
+    if(!changed){if(error)error->clear();return true;}
+    checkpoint(); // Exactly one undo record after every root and descendant succeeds.
+    parts_=std::move(staged.parts_);
+    if(error)error->clear();
+    return true;
+}
+
+namespace {
+// Recreate a dependent extrusion from the CURRENT saved source sketch. Never
+// use the source body's finished B-rep as a proxy for its sketch geometry.
+bool rebuildLinkedSketchSolid(const Part& source,double depth,double offset,
+                              TopoDS_Shape* output,QString* error){
+    if(!output){if(error)*error="Missing linked-sketch output.";return false;}
+    if(!source.hasConstrainedPolygonDefinition||source.isSurfaceBody||
+       source.constrainedPolygonGeometryToken!=source.geometryToken){
+        if(error)*error="Linked sketch source is missing or its stored sketch is stale.";
+        return false;
+    }
+    if(!std::isfinite(depth)||depth<=1e-5||depth>1000000||
+       !std::isfinite(offset)||std::abs(offset)>1000000){
+        if(error)*error="Linked extrusion depth/offset must be finite, with positive depth and bounded offset.";
+        return false;
+    }
+    SketchPlane plane=source.constrainedPolygonPlane;
+    if(!validSketchPlane(plane,error))return false;
+    const double normalLength=std::hypot(plane.normalX,std::hypot(plane.normalY,plane.normalZ));
+    // Offset is a physical distance in mm, even for a non-unit saved normal.
+    plane.originX+=(plane.normalX/normalLength)*offset;
+    plane.originY+=(plane.normalY/normalLength)*offset;
+    plane.originZ+=(plane.normalZ/normalLength)*offset;
+    if(!validSketchPlane(plane,error))return false;
+    return buildSketchExtrusion(source.constrainedPolygonSketch,
+                                source.constrainedPolygonBoundary,depth,plane,output,error);
+}
+}
+
+namespace {
+// This helper is called from a non-member replay function. Mirror the
+// SceneDocument solid validation without accessing its private static API.
+bool validReplayShape(const TopoDS_Shape& shape,QString* error){
+    if(shape.IsNull()){if(error)*error="The kernel returned a null shape.";return false;}
+    if(!hasSolid(shape)){if(error)*error="A modeling operation must produce at least one solid.";return false;}
+    if(!BRepCheck_Analyzer(shape).IsValid()){
+        if(error)*error="Geometry failed OCCT topology validation.";return false;
+    }
+    GProp_GProps props;
+    BRepGProp::VolumeProperties(shape,props);
+    if(!std::isfinite(props.Mass())||props.Mass()<=1e-12){
+        if(error)*error="Solid has zero or invalid volume.";return false;
+    }
+    return true;
+}
+bool replayInterleavedHistory(const Part& part,const QVector<Part>& scene,
+                              const QMap<QString,int>& indices,TopoDS_Shape* finalShape,
+                              QStringList* sourceTokens,QString* error,
+                              QMap<QString,TopoDS_Shape>* stageOutputs=nullptr){
+    if(!finalShape||!part.hasInterleavedHistory||part.interleavedBase.IsNull()||
+       part.isSurfaceBody||part.interleavedSteps.isEmpty()||part.interleavedSteps.size()>40){
+        if(error)*error="Invalid interleaved history base or node count.";return false;
+    }
+    TopoDS_Shape previous=part.interleavedBase;
+    if(!validReplayShape(previous,error))return false;
+    QStringList tokens;
+    QMap<QString,TopoDS_Shape> evaluated;
+    evaluated.insert(QStringLiteral("@base"),previous);
+    // Kernel builders are retained only for this rebuild. Their provenance
+    // maps are invalid as persistent identifiers across source geometry edits.
+    QMap<QString,std::shared_ptr<BRepAlgoAPI_BooleanOperation>> booleanHistory;
+    QMap<QString,std::shared_ptr<BRepBuilderAPI_MakeShape>> modifierHistory;
+    QMap<QString,QStringList> modifierSources;
+    QMap<QString,QStringList> booleanSources;
+    QMap<QString,QStringList> rigidSources;
+    QMap<QString,ShapeFeatureNode> rigidOperations;
+    QMap<QString,QStringList> patternSources;
+    QMap<QString,ShapeFeatureNode> patternOperations;
+    QMap<QString,QStringList> survivingModifierSources;
+    QString previousStepId=QStringLiteral("@base");
+    for(const auto& step:part.interleavedSteps){
+        if(step.id.isEmpty()||step.id.size()>64||step.id==QStringLiteral("@base")||
+           evaluated.contains(step.id)){
+            if(error)*error="History step IDs must be nonempty, unique, and not @base.";return false;
+        }
+        const bool shape=step.kind==QStringLiteral("Shape");
+        const bool combine=shape&&(step.feature.type==QStringLiteral("Fuse branches")||
+                                   step.feature.type==QStringLiteral("Subtract branches")||
+                                   step.feature.type==QStringLiteral("Intersect branches"));
+        if(step.inputs.size()>(combine?2:1)||(combine&&step.inputs.size()!=2)||
+           (!shape&&step.inputs.size()>1)||
+           (shape&&(!step.sketchSourceId.isEmpty()||!step.feature.inputs.isEmpty()||step.feature.id!=step.id))){
+            if(error)*error="Invalid mixed feature dependencies or shape step definition.";return false;
+        }
+        QSet<QString> distinct;
+        for(const QString& inputId:step.inputs){
+            if(!evaluated.contains(inputId)||distinct.contains(inputId)){
+                if(error)*error="Mixed history has a missing, duplicate, or forward feature input.";return false;
+            }
+            distinct.insert(inputId);
+        }
+        const TopoDS_Shape input=step.inputs.isEmpty()?previous:evaluated.value(step.inputs.first());
+        if(step.referencePatternOccurrence<0||step.referencePatternOccurrence>23||
+           (step.referenceSourceId.isEmpty()&&
+               (step.referencePatternOccurrence!=0||!step.referencePatternOccurrences.isEmpty()))||
+           (step.referencePatternOccurrence!=0&&!step.referencePatternOccurrences.isEmpty())||
+           step.referencePatternOccurrences.size()>40){
+            if(error)*error="Invalid legacy or per-stage pattern occurrence selections.";
+            return false;
+        }
+        for(auto it=step.referencePatternOccurrences.cbegin();
+            it!=step.referencePatternOccurrences.cend();++it){
+            if(it.key().isEmpty()||it.key().size()>64||it.value()<1||it.value()>23||
+               !patternOperations.contains(it.key())){
+                if(error)*error="Pattern occurrence must name an earlier pattern and a non-seed index [1,23].";
+                return false;
+            }
+        }
+        if(!shape&&!step.referenceSourceId.isEmpty()){
+            if(error)*error="Only shape modifiers may carry a tracked reference source.";return false;
+        }
+        TopoDS_Shape next;
+        if(shape){
+            if(combine){
+                const QString op=step.feature.type==QStringLiteral("Fuse branches")?QStringLiteral("Fuse"):
+                    step.feature.type==QStringLiteral("Subtract branches")?QStringLiteral("Cut"):
+                    QStringLiteral("Common");
+                // Two-input combiners have no numeric parameters or suppression.
+                if(!step.feature.parameters.isEmpty()||step.feature.suppressed){
+                    if(error)*error="Mixed Boolean combines cannot have parameters or suppression.";
+                    return false;
+                }
+                if(!step.referenceSourceId.isEmpty()){
+                    if(error)*error="Boolean combines cannot carry feature-selection ancestry.";return false;
+                }
+                std::shared_ptr<BRepAlgoAPI_BooleanOperation> history;
+                if(!linkedBooleanResult(input,evaluated.value(step.inputs[1]),op,&next,error,&history))return false;
+                if(op==QStringLiteral("Cut")&&!linkedSketchCutEffective(input,next,error))return false;
+                booleanHistory.insert(step.id,std::move(history));
+                booleanSources.insert(step.id,step.inputs);
+            }else{
+                ShapeFeatureNode resolved=step.feature;
+                if(!step.referenceSourceId.isEmpty()){
+                    if(step.inputs.size()!=1||!evaluated.contains(step.referenceSourceId)){
+                        if(error)*error="A referenced modifier requires an existing source and an explicit tracked parent.";
+                        return false;
+                    }
+                    // Follow every supported ancestry route using current
+                    // kernel Booleans, rigid transforms, selected pattern copies,
+                    // or exact unchanged subshape identity through edge finishing.
+                    // Unsupported affine/procedural topology replacements remain boundaries;
+                    // a merge is accepted only when all routes agree.
+                    std::map<std::string,std::vector<std::string>> ancestry;
+                    const auto addParents=[&](const QMap<QString,QStringList>& paths){
+                        for(auto it=paths.cbegin();it!=paths.cend();++it){
+                            std::vector<std::string> sources;
+                            for(const QString& parentId:it.value())sources.push_back(parentId.toStdString());
+                            ancestry.emplace(it.key().toStdString(),std::move(sources));
+                        }
+                    };
+                    addParents(booleanSources);
+                    addParents(rigidSources);
+                    addParents(patternSources);
+                    addParents(survivingModifierSources);
+                    addParents(modifierSources);
+                    std::vector<std::vector<std::string>> routes;
+                    std::string why;
+                    const bool directStage=step.referenceSourceId==step.inputs.first();
+                    if(directStage){
+                        // A reference captured on an intermediate result is
+                        // witnessed against that result on EVERY fresh rebuild.
+                        // There is no earlier source and no invented ancestry.
+                        routes.emplace_back();
+                    }else if(!lineage::allTrackedPaths(ancestry,
+                        step.referenceSourceId.toStdString(),step.inputs.first().toStdString(),
+                        &routes,&why)){
+                        if(error)*error=QString::fromStdString(why);return false;
+                    }
+                    // A Boolean merge may turn two DIFFERENT design points into
+                    // the same final edge descriptor. Keep the original point
+                    // independently of every re-captured topology anchor.
+                    gp_Pnt originalWitness;
+                    const auto& saved=step.feature.parameters;
+                    const auto getWitness=[&](const QString& prefix){
+                        if(!saved.contains(prefix+"x")||!saved.contains(prefix+"y")||
+                           !saved.contains(prefix+"z"))return false;
+                        originalWitness=gp_Pnt(saved.value(prefix+"x"),
+                                               saved.value(prefix+"y"),
+                                               saved.value(prefix+"z"));
+                        return std::isfinite(originalWitness.X())&&
+                               std::isfinite(originalWitness.Y())&&
+                               std::isfinite(originalWitness.Z());
+                    };
+                    const bool hasWitness=getWitness(QStringLiteral("edge_witness_"))||
+                                          getWitness(QStringLiteral("face_anchor_witness_"))||
+                                          getWitness(QStringLiteral("curved_witness_"));
+                    if(routes.size()>1&&!hasWitness){
+                        if(error)*error="Merged ancestry requires a saved physical design witness on every route.";
+                        return false;
+                    }
+                    ShapeFeatureNode referenceResult;
+                    bool haveResult=false;
+                    std::vector<lineage::ReferenceRouteEvidence> routeEvidence;
+                    routeEvidence.reserve(routes.size());
+                    int routeNumber=0;
+                    for(const auto& chain:routes){
+                        ++routeNumber;
+                        gp_Pnt pathWitness=originalWitness;
+                        QString ancestor=step.referenceSourceId;
+                        ShapeFeatureNode candidate=resolved;
+                        if(directStage){
+                            ShapeFeatureNode refreshed;
+                            if(!rebaseFeatureOnCurrentStage(evaluated.value(ancestor),
+                                candidate,&refreshed,error))return false;
+                            candidate=std::move(refreshed);
+                        }
+                        int patternHops=0;
+                        QSet<QString> selectedPatternStages;
+                        for(const std::string& stage:chain){
+                            const QString descendant=QString::fromStdString(stage);
+                            if(!evaluated.contains(ancestor)||!evaluated.contains(descendant)){
+                                if(error)*error="Reference lineage contains an unavailable rebuild stage.";
+                                return false;
+                            }
+                            ShapeFeatureNode rebound;
+                            if(booleanHistory.contains(descendant)){
+                                if(!rebaseFeatureThroughBoolean(evaluated.value(ancestor),evaluated.value(descendant),
+                                    *booleanHistory.value(descendant),candidate,&rebound,error))return false;
+                            }else if(rigidOperations.contains(descendant)){
+                                if(hasWitness&&!transportDesignPointThroughSimilarity(
+                                    rigidOperations.value(descendant),&pathWitness,error))return false;
+                                if(!rebaseFeatureThroughSimilarity(evaluated.value(ancestor),evaluated.value(descendant),
+                                    rigidOperations.value(descendant),candidate,&rebound,error))return false;
+                            }else if(patternOperations.contains(descendant)){
+                                ++patternHops;
+                                selectedPatternStages.insert(descendant);
+                                if(step.referencePatternOccurrence!=0&&patternHops>1){
+                                    if(error)*error="Legacy v4 occurrence cannot cross nested patterns; edit and save using v5 per-stage selections.";
+                                    return false;
+                                }
+                                const int occurrence=step.referencePatternOccurrences.isEmpty()?
+                                    step.referencePatternOccurrence:
+                                    step.referencePatternOccurrences.value(descendant,0);
+                                if(hasWitness&&!transportDesignPointThroughPattern(
+                                    patternOperations.value(descendant),occurrence,
+                                    &pathWitness,error))return false;
+                                if(!rebaseFeatureThroughPattern(evaluated.value(ancestor),evaluated.value(descendant),
+                                    patternOperations.value(descendant),occurrence,
+                                    candidate,&rebound,error))return false;
+                            }else if(modifierHistory.contains(descendant)){
+                                // Fillets/chamfers can retain an EXACT original
+                                // subshape even when the OCCT builder's history
+                                // reports IsDeleted() or non-unique Modified().
+                                // Prefer that proven identity before consulting
+                                // generated/modified successors. Both paths
+                                // enforce the saved geometric witness; neither
+                                // guesses a new reference by edge number.
+                                QString exactError;
+                                const bool exactSurvivor=
+                                    survivingModifierSources.contains(descendant)&&
+                                    rebaseFeatureThroughSurvivingModifier(
+                                        evaluated.value(ancestor),evaluated.value(descendant),
+                                        candidate,&rebound,&exactError);
+                                if(!exactSurvivor){
+                                    QString kernelError;
+                                    if(!rebaseFeatureThroughBoolean(evaluated.value(ancestor),
+                                        evaluated.value(descendant),*modifierHistory.value(descendant),
+                                        candidate,&rebound,&kernelError)){
+                                        if(error)*error=exactError.isEmpty()?kernelError:
+                                            QStringLiteral("Exact modifier lineage: %1; kernel lineage: %2")
+                                                .arg(exactError,kernelError);
+                                        return false;
+                                    }
+                                }
+                            }else if(survivingModifierSources.contains(descendant)){
+                                if(!rebaseFeatureThroughSurvivingModifier(evaluated.value(ancestor),
+                                    evaluated.value(descendant),candidate,&rebound,error))return false;
+                            }else{
+                                if(error)*error="Reference path passes through an unsupported feature operation.";
+                                return false;
+                            }
+                            candidate=std::move(rebound);
+                            ancestor=descendant;
+                        }
+                        if(step.referencePatternOccurrence!=0&&patternHops!=1){
+                            if(error)*error="Legacy selected occurrence requires exactly one tracked pattern stage.";
+                            return false;
+                        }
+                        for(auto it=step.referencePatternOccurrences.cbegin();
+                            it!=step.referencePatternOccurrences.cend();++it){
+                            if(!selectedPatternStages.contains(it.key())){
+                                if(error)*error="A selected pattern occurrence is absent from an ancestry route.";
+                                return false;
+                            }
+                        }
+                        lineage::ReferenceRouteEvidence evidence;
+                        evidence.witness={pathWitness.X(),pathWitness.Y(),pathWitness.Z()};
+                        for(auto it=candidate.parameters.cbegin();it!=candidate.parameters.cend();++it)
+                            evidence.descriptor.emplace(it.key().toStdString(),it.value());
+                        routeEvidence.push_back(std::move(evidence));
+                        // Fail on the first disagreement, BEFORE any shape
+                        // operation uses the unresolved edge or face. The
+                        // complete saved design witness remains immutable.
+                        std::string disagreement;
+                        if(!lineage::agreeReferenceRoutes(routeEvidence,&disagreement)){
+                            if(error)*error=QStringLiteral("Persistent Boolean ancestry conflict at '%1' (route %2): %3")
+                                .arg(step.inputs.first()).arg(routeNumber)
+                                .arg(QString::fromStdString(disagreement));
+                            return false;
+                        }
+                        if(!haveResult){
+                            referenceResult=candidate;
+                            haveResult=true;
+                        }
+                    }
+                    resolved=std::move(referenceResult);
+                }
+                // `resolved` is a temporary, CURRENT-rebuild descriptor. A tracked
+                // edge has already crossed every ancestry route, with its source
+                // witness checked and its successor converted to a unique edge
+                // index in `input`. Do not run a SECOND geometric witness search
+                // inside the one-node feature builder: a fillet may change the
+                // body's mass centre and cause anchor compensation to reject an
+                // otherwise exact, current TShape (or select a different edge).
+                //
+                // Drop the witness only from the ephemeral execution copy. Keep
+                // the original witnessed feature in `part.interleavedSteps` for
+                // persistence, source edits, and subsequent full rebuilds.
+                ShapeFeatureNode executable=resolved;
+                const bool trackedEdge=!step.referenceSourceId.isEmpty()&&
+                    (resolved.type==QStringLiteral("Fillet selected edge")||
+                     resolved.type==QStringLiteral("Chamfer selected edge"));
+                if(trackedEdge){
+                    if(!resolved.parameters.contains(QStringLiteral("edge_anchor_version"))||
+                       !resolved.parameters.contains(QStringLiteral("edge_index"))){
+                        if(error)*error="Tracked edge is missing its verified current-stage identity.";
+                        return false;
+                    }
+                    NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> inputEdges;
+                    TopExp::MapShapes(input,TopAbs_EDGE,inputEdges);
+                    const double indexValue=resolved.parameters.value(QStringLiteral("edge_index"));
+                    if(!std::isfinite(indexValue)||std::floor(indexValue)!=indexValue||
+                       indexValue<1||indexValue>inputEdges.Extent()){
+                        if(error)*error="Tracked edge index is outside the current stage.";
+                        return false;
+                    }
+                    for(auto it=executable.parameters.begin();it!=executable.parameters.end();){
+                        if(it.key().startsWith(QStringLiteral("edge_"))&&
+                           it.key()!=QStringLiteral("edge_index"))
+                            it=executable.parameters.erase(it);
+                        else ++it;
+                    }
+                }
+                std::shared_ptr<BRepBuilderAPI_MakeShape> recordedModifier;
+                if(!rebuildShapeFeatureTree(input,false,{executable},&next,error,
+                    nullptr,nullptr,nullptr,&recordedModifier)){
+                    if(error)*error=QStringLiteral("Interleaved operation '%1' (%2) failed: %3")
+                        .arg(step.id).arg(step.feature.type).arg(*error);
+                    return false;
+                }
+                if(supportsRecordedModifierLineage(step.feature)&&recordedModifier){
+                    modifierHistory.insert(step.id,std::move(recordedModifier));
+                    modifierSources.insert(step.id,
+                        {step.inputs.isEmpty()?previousStepId:step.inputs.first()});
+                }
+                // Rigid and positive uniform scale stages preserve a one-to-one image of all original
+                // subshapes; save the exact operation and its actual source for
+                // later feature reference walks. Modifiers and patterns cannot
+                // be treated as implicit rigid ancestry.
+                if(step.referenceSourceId.isEmpty()&&supportsSimilarityReferenceLineage(step.feature)){
+                    rigidOperations.insert(step.id,step.feature);
+                    rigidSources.insert(step.id,{step.inputs.isEmpty()?previousStepId:step.inputs.first()});
+                }
+                if(step.referenceSourceId.isEmpty()&&supportsPatternReferenceLineage(step.feature)){
+                    patternOperations.insert(step.id,step.feature);
+                    patternSources.insert(step.id,{step.inputs.isEmpty()?previousStepId:step.inputs.first()});
+                }
+                // Register exact-identity ancestry for *all* fillets/chamfers,
+                // including ones with recorded kernel history. The two
+                // resolvers are complementary: exact survivors first, then
+                // valid kernel-confirmed descendants where appropriate.
+                if(supportsSurvivingModifierLineage(step.feature)){
+                    survivingModifierSources.insert(step.id,
+                        {step.inputs.isEmpty()?previousStepId:step.inputs.first()});
+                }
+            }
+            tokens.append(QString());
+        }else if(step.kind==QStringLiteral("SketchFuse")||step.kind==QStringLiteral("SketchCut")){
+            const int sourceIndex=indices.value(step.sketchSourceId,-1);
+            if(sourceIndex<0||scene[sourceIndex].id==part.id||
+               !std::isfinite(step.depthMm)||step.depthMm<=1e-5||step.depthMm>1e6||
+               !std::isfinite(step.offsetMm)||std::abs(step.offsetMm)>1e6){
+                if(error)*error="Interleaved sketch source or its dimensions are invalid.";return false;
+            }
+            const Part& source=scene[sourceIndex];
+            TopoDS_Shape cutter;
+            const QString op=step.kind==QStringLiteral("SketchFuse")?
+                QStringLiteral("Fuse"):QStringLiteral("Cut");
+            std::shared_ptr<BRepAlgoAPI_BooleanOperation> history;
+            if(!rebuildLinkedSketchSolid(source,step.depthMm,step.offsetMm,&cutter,error)||
+               !linkedBooleanResult(input,cutter,op,&next,error,&history))return false;
+            const QString parent=step.inputs.isEmpty()?previousStepId:step.inputs.first();
+            booleanSources.insert(step.id,{parent});
+            booleanHistory.insert(step.id,std::move(history));
+            if(op==QStringLiteral("Fuse")&&!linkedSketchFuseEffective(input,next,error))return false;
+            if(op==QStringLiteral("Cut")&&!linkedSketchCutEffective(input,next,error))return false;
+            tokens.append(source.geometryToken);
+        }else{
+            if(error)*error="Unknown interleaved feature history step.";return false;
+        }
+        if(!validReplayShape(next,error))return false;
+        evaluated.insert(step.id,next);
+        previous=next;
+        previousStepId=step.id;
+    }
+    *finalShape=previous;
+    if(sourceTokens)*sourceTokens=std::move(tokens);
+    if(stageOutputs)*stageOutputs=std::move(evaluated);
+    return true;
+}
+}
+
+
+// Evaluate a staged prefix for authoring. This is intentionally read-only:
+// it neither checkpoints nor mutates the displayed geometry or source tokens.
+bool SceneDocument::previewInterleavedFeatureHistory(const QString& id,
+        const QVector<InterleavedHistoryStep>& steps,
+        QMap<QString,TopoDS_Shape>* stageShapes,QString* error) const{
+    const Part* original=find(id);
+    if(!stageShapes||!original||original->isSurfaceBody||steps.isEmpty()||steps.size()>40||
+       (original->hasInterleavedHistory&&original->interleavedBase.IsNull())){
+        setError(error,"Preview requires a solid with a valid frozen base and 1-40 staged steps.");
+        return false;
+    }
+    Part staged=*original;
+    if(!staged.hasInterleavedHistory)staged.interleavedBase=original->shape;
+    staged.hasInterleavedHistory=true;
+    staged.interleavedSteps=steps;
+    QMap<QString,int> indices;
+    for(int i=0;i<parts_.size();++i)indices.insert(parts_[i].id,i);
+    QMap<QString,TopoDS_Shape> preview;
+    TopoDS_Shape result;
+    if(!replayInterleavedHistory(staged,parts_,indices,&result,nullptr,error,&preview))return false;
+    *stageShapes=std::move(preview);
+    return true;
+}
+
+// Apply a persisted sketch-derived modifier to the SAME target body's base B-rep.
+// First stage of a bounded, ordered in-place sketch stack. Later stages are
+// persisted and regenerated through the same multi-source dependency DAG.
+bool SceneDocument::setInPlaceSketchFeature(const QString& targetId,const QString& sourceId,
+                                            BooleanOp op,double depth,double offset,QString* error){
+    const Part* original=find(targetId);
+    const Part* source=find(sourceId);
+    if(!original||!source||targetId==sourceId||original->isSurfaceBody||
+       original->hasLinkedBoolean||original->hasLinkedSketchExtrusion||
+       !original->linkedFoldedFlatSourceId.isEmpty()||
+       (original->hasShapeFeatureTree&&!original->hasInPlaceSketchFeature)||
+       original->hasConstrainedPolygonDefinition||
+       !original->componentDefinitionId.isEmpty()||!original->assemblyJointType.isEmpty()||
+       !source->hasConstrainedPolygonDefinition||source->constrainedPolygonGeometryToken!=source->geometryToken){
+        setError(error,"Select a separate current sketch source and an ordinary, solid target without an existing feature stack.");return false;
+    }
+    if((original->hasInPlaceSketchFollowUp&&original->inPlaceFollowSourceId==sourceId)||
+       std::any_of(original->extraInPlaceSketchStages.begin(),original->extraInPlaceSketchStages.end(),
+                   [&](const auto& stage){return stage.sourceId==sourceId;})){
+        setError(error,"A sketch source cannot appear twice in the same in-place stack.");return false;
+    }
+    if(op!=BooleanOp::Fuse&&op!=BooleanOp::Cut){
+        setError(error,"In-place sketch operation must be additive or subtractive.");return false;
+    }
+    if(!std::isfinite(depth)||depth<=1e-5||depth>1e6||!std::isfinite(offset)||std::abs(offset)>1e6){
+        setError(error,"In-place sketch depth/offset is invalid.");return false;
+    }
+    QVector<Part> candidate=parts_;
+    for(Part& part:candidate)if(part.id==targetId){
+        if(!part.hasInPlaceSketchFeature){part.inPlaceSketchBase=part.shape;part.hasInPlaceSketchFeature=true;}
+        part.inPlaceSketchSourceId=sourceId;
+        part.inPlaceSketchSourceToken.clear(); // Force rebuild even on parameter-only edits.
+        part.inPlaceSketchOperation=op==BooleanOp::Fuse?QStringLiteral("Fuse"):QStringLiteral("Cut");
+        part.inPlaceSketchDepthMm=depth;part.inPlaceSketchOffsetMm=offset;
+        break;
+    }
+    if(!propagateLinkedBodies(&candidate,error))return false;
+    checkpoint();parts_=std::move(candidate);return true;
+}
+bool SceneDocument::appendInPlaceSketchFeature(const QString& targetId,const QString& sourceId,
+                                               BooleanOp op,double depth,double offset,QString* error){
+    const Part* previous=find(targetId);
+    const Part* source=find(sourceId);
+    if(!previous||!previous->hasInPlaceSketchFeature||previous->hasInPlaceSketchFollowUp||
+       !source||sourceId==targetId||sourceId==previous->inPlaceSketchSourceId||
+       !source->hasConstrainedPolygonDefinition||
+       source->constrainedPolygonGeometryToken!=source->geometryToken){
+        setError(error,"Select an existing one-stage in-place target and a different current sketch source.");return false;
+    }
+    if((op!=BooleanOp::Fuse&&op!=BooleanOp::Cut)||
+       !std::isfinite(depth)||depth<=1e-5||depth>1e6||
+       !std::isfinite(offset)||std::abs(offset)>1e6){
+        setError(error,"Invalid follow-up in-place sketch operation or dimensions.");return false;
+    }
+    QVector<Part> candidate=parts_;
+    for(Part& part:candidate)if(part.id==targetId){
+        part.hasInPlaceSketchFollowUp=true;
+        part.inPlaceFollowSourceId=sourceId;
+        part.inPlaceFollowSourceToken.clear();
+        part.inPlaceFollowOperation=op==BooleanOp::Fuse?QStringLiteral("Fuse"):QStringLiteral("Cut");
+        part.inPlaceFollowDepthMm=depth;
+        part.inPlaceFollowOffsetMm=offset;
+        break;
+    }
+    if(!propagateLinkedBodies(&candidate,error))return false;
+    checkpoint();parts_=std::move(candidate);return true;
+}
+bool SceneDocument::updateInPlaceSketchFollowUp(const QString& targetId,const QString& sourceId,
+                                                BooleanOp op,double depth,double offset,QString* error){
+    const Part* previous=find(targetId);
+    const Part* source=find(sourceId);
+    if(!previous||!previous->hasInPlaceSketchFollowUp||!source||
+       sourceId==targetId||sourceId==previous->inPlaceSketchSourceId||
+       std::any_of(previous->extraInPlaceSketchStages.begin(),previous->extraInPlaceSketchStages.end(),
+                   [&](const auto& stage){return stage.sourceId==sourceId;})||
+       !source->hasConstrainedPolygonDefinition||
+       source->constrainedPolygonGeometryToken!=source->geometryToken){
+        setError(error,"Select a two-stage target and a distinct current sketch source.");return false;
+    }
+    if((op!=BooleanOp::Fuse&&op!=BooleanOp::Cut)||
+       !std::isfinite(depth)||depth<=1e-5||depth>1e6||
+       !std::isfinite(offset)||std::abs(offset)>1e6){
+        setError(error,"Invalid second-stage operation or dimensions.");return false;
+    }
+    QVector<Part> candidate=parts_;
+    for(Part& part:candidate)if(part.id==targetId){
+        part.inPlaceFollowSourceId=sourceId;
+        part.inPlaceFollowSourceToken.clear();
+        part.inPlaceFollowOperation=op==BooleanOp::Fuse?QStringLiteral("Fuse"):QStringLiteral("Cut");
+        part.inPlaceFollowDepthMm=depth;part.inPlaceFollowOffsetMm=offset;
+        break;
+    }
+    if(!propagateLinkedBodies(&candidate,error))return false;
+    checkpoint();parts_=std::move(candidate);return true;
+}
+bool SceneDocument::removeInPlaceSketchFollowUp(const QString& targetId,QString* error){
+    const Part* existing=find(targetId);
+    if(!existing||!existing->hasInPlaceSketchFollowUp||!existing->extraInPlaceSketchStages.isEmpty()){
+        setError(error,"Remove additional stages in reverse order before deleting stage two.");return false;
+    }
+    QVector<Part> candidate=parts_;
+    for(Part& part:candidate)if(part.id==targetId){
+        part.hasInPlaceSketchFollowUp=false;
+        part.inPlaceFollowSourceId.clear();part.inPlaceFollowSourceToken.clear();
+        part.inPlaceFollowOperation.clear();
+        part.inPlaceFollowDepthMm=0;part.inPlaceFollowOffsetMm=0;
+        part.inPlaceSketchSourceToken.clear(); // Rebuild first stage, then descendants.
+        break;
+    }
+    if(!propagateLinkedBodies(&candidate,error))return false;
+    checkpoint();parts_=std::move(candidate);return true;
+}
+bool SceneDocument::appendInPlaceSketchStage(const QString& targetId,const QString& sourceId,
+                                               BooleanOp op,double depth,double offset,QString* error){
+    const Part* previous=find(targetId);
+    const Part* source=find(sourceId);
+    if(!previous||!previous->hasInPlaceSketchFollowUp||
+       previous->extraInPlaceSketchStages.size()>=kMaxInPlaceSketchStages-2||
+       !source||!source->hasConstrainedPolygonDefinition||
+       source->constrainedPolygonGeometryToken!=source->geometryToken||
+       sourceId==targetId||sourceId==previous->inPlaceSketchSourceId||
+       sourceId==previous->inPlaceFollowSourceId||
+       std::any_of(previous->extraInPlaceSketchStages.begin(),previous->extraInPlaceSketchStages.end(),
+                   [&](const auto& stage){return stage.sourceId==sourceId;})){
+        setError(error,"Requires two stages, a new current sketch source, and a maximum of eight stages.");return false;
+    }
+    if((op!=BooleanOp::Fuse&&op!=BooleanOp::Cut)||!std::isfinite(depth)||
+       depth<=1e-5||depth>1e6||!std::isfinite(offset)||std::abs(offset)>1e6){
+        setError(error,"Invalid additional in-place sketch operation or dimensions.");return false;
+    }
+    QVector<Part> candidate=parts_;
+    for(Part& part:candidate)if(part.id==targetId){
+        Part::AdditionalInPlaceSketchStage stage;
+        stage.sourceId=sourceId;
+        stage.operation=op==BooleanOp::Fuse?QStringLiteral("Fuse"):QStringLiteral("Cut");
+        stage.depthMm=depth;stage.offsetMm=offset;
+        part.extraInPlaceSketchStages.append(std::move(stage));
+        break;
+    }
+    if(!propagateLinkedBodies(&candidate,error))return false;
+    checkpoint();parts_=std::move(candidate);return true;
+}
+bool SceneDocument::updateInPlaceSketchStage(const QString& targetId,int additionalIndex,
+                                               const QString& sourceId,BooleanOp op,
+                                               double depth,double offset,QString* error){
+    const Part* previous=find(targetId);
+    const Part* source=find(sourceId);
+    if(!previous||additionalIndex<0||additionalIndex>=previous->extraInPlaceSketchStages.size()||
+       !source||sourceId==targetId||!source->hasConstrainedPolygonDefinition||
+       source->constrainedPolygonGeometryToken!=source->geometryToken||
+       sourceId==previous->inPlaceSketchSourceId||sourceId==previous->inPlaceFollowSourceId){
+        setError(error,"Invalid additional modifier index or sketch source.");return false;
+    }
+    for(int i=0;i<previous->extraInPlaceSketchStages.size();++i)
+        if(i!=additionalIndex&&previous->extraInPlaceSketchStages[i].sourceId==sourceId){
+            setError(error,"Duplicate sketch source in ordered stack.");return false;
+        }
+    if((op!=BooleanOp::Fuse&&op!=BooleanOp::Cut)||!std::isfinite(depth)||
+       depth<=1e-5||depth>1e6||!std::isfinite(offset)||std::abs(offset)>1e6){
+        setError(error,"Invalid edited modifier dimensions.");return false;
+    }
+    QVector<Part> candidate=parts_;
+    for(Part& part:candidate)if(part.id==targetId){
+        auto& stage=part.extraInPlaceSketchStages[additionalIndex];
+        stage.sourceId=sourceId;stage.sourceToken.clear();
+        stage.operation=op==BooleanOp::Fuse?QStringLiteral("Fuse"):QStringLiteral("Cut");
+        stage.depthMm=depth;stage.offsetMm=offset;
+        break;
+    }
+    if(!propagateLinkedBodies(&candidate,error))return false;
+    checkpoint();parts_=std::move(candidate);return true;
+}
+bool SceneDocument::removeLastInPlaceSketchStage(const QString& targetId,QString* error){
+    const Part* previous=find(targetId);
+    if(!previous||previous->extraInPlaceSketchStages.isEmpty()){
+        setError(error,"No additional sketch modifier remains to remove.");return false;
+    }
+    QVector<Part> candidate=parts_;
+    for(Part& part:candidate)if(part.id==targetId){
+        part.extraInPlaceSketchStages.removeLast();
+        part.inPlaceSketchSourceToken.clear(); // Force recomputation from frozen base.
+        break;
+    }
+    if(!propagateLinkedBodies(&candidate,error))return false;
+    checkpoint();parts_=std::move(candidate);return true;
+}
+bool SceneDocument::removeInPlaceSketchFeature(const QString& targetId,QString* error){
+    const Part* previous=find(targetId);
+    if(!previous||!previous->hasInPlaceSketchFeature){
+        setError(error,"Selected body has no in-place sketch feature.");return false;
+    }
+    QVector<Part> candidate=parts_;
+    for(Part& part:candidate)if(part.id==targetId){
+        const TopoDS_Shape original=part.inPlaceSketchBase;
+        if(part.hasShapeFeatureTree){
+            TopoDS_Shape rebuilt;QVector<TopoDS_Shape> outputs;
+            if(!rebuildShapeFeatureTree(original,part.isSurfaceBody,
+                part.shapeFeatureNodes,&rebuilt,error,nullptr,&outputs))return false;
+            part.shapeFeatureBase=original;
+            part.shapeFeatureCachedOutputs=std::move(outputs);
+            part.shape=rebuilt;
+        }else part.shape=original;
+        part.geometryToken=generatedId();
+        if(part.hasShapeFeatureTree)part.shapeFeatureGeometryToken=part.geometryToken;
+        part.hasInPlaceSketchFeature=false;
+        part.inPlaceSketchSourceId.clear();part.inPlaceSketchSourceToken.clear();
+        part.inPlaceSketchOperation.clear();part.inPlaceSketchBase.Nullify();
+        part.hasInPlaceSketchFollowUp=false;
+        part.inPlaceFollowSourceId.clear();part.inPlaceFollowSourceToken.clear();
+        part.inPlaceFollowOperation.clear();
+        part.inPlaceFollowDepthMm=0;part.inPlaceFollowOffsetMm=0;
+        part.inPlaceSketchDepthMm=0.0;part.inPlaceSketchOffsetMm=0.0;
+        part.extraInPlaceSketchStages.clear();
+        break;
+    }
+    if(!propagateLinkedBodies(&candidate,error))return false;
+    checkpoint();parts_=std::move(candidate);return true;
+}
+bool SceneDocument::inPlaceSketchFeatureCurrent(const QString& targetId) const{
+    const Part* body=find(targetId);
+    if(!body||!body->hasInPlaceSketchFeature)return false;
+    const Part* source=find(body->inPlaceSketchSourceId);
+    return source&&source->hasConstrainedPolygonDefinition&&
+           source->constrainedPolygonGeometryToken==source->geometryToken&&
+           body->inPlaceSketchSourceToken==source->geometryToken&&
+           (!body->hasInPlaceSketchFollowUp||([&]{
+               const Part* follow=find(body->inPlaceFollowSourceId);
+               return follow&&follow->hasConstrainedPolygonDefinition&&
+                      follow->constrainedPolygonGeometryToken==follow->geometryToken&&
+                      body->inPlaceFollowSourceToken==follow->geometryToken;
+           })())&&
+           std::all_of(body->extraInPlaceSketchStages.begin(),body->extraInPlaceSketchStages.end(),
+                       [&](const auto& stage){
+                           const Part* sourcePart=find(stage.sourceId);
+                           return sourcePart&&sourcePart->hasConstrainedPolygonDefinition&&
+                                  sourcePart->constrainedPolygonGeometryToken==sourcePart->geometryToken&&
+                                  stage.sourceToken==sourcePart->geometryToken;
+                       });
+}
+
+bool SceneDocument::addLinkedSketchExtrusion(const QString& sourceId,double depth,double offset,QString* error){
+    const Part* source=find(sourceId);
+    if(!source){setError(error,"Select a source body with an editable constrained sketch.");return false;}
+    if(parts_.size()>=kMaxObjects){setError(error,"Scene object limit reached.");return false;}
+    TopoDS_Shape result;
+    if(!rebuildLinkedSketchSolid(*source,depth,offset,&result,error))return false;
+    if(!validShape(result,error))return false;
+    QVector<Part> candidate=parts_;
+    Part dependent{generatedId(),uniqueName(QStringLiteral("Linked Sketch Extrusion")),result};
+    dependent.hasLinkedSketchExtrusion=true;
+    dependent.linkedSketchSourceId=sourceId;
+    dependent.linkedSketchSourceToken=source->geometryToken;
+    dependent.linkedSketchDepthMm=depth;
+    dependent.linkedSketchOffsetMm=offset;
+    candidate.append(std::move(dependent));
+    if(!propagateLinkedBodies(&candidate,error))return false;
+    checkpoint();parts_=std::move(candidate);return true;
+}
+
+bool SceneDocument::updateLinkedSketchExtrusion(const QString& id,double depth,double offset,QString* error){
+    const Part* linked=find(id);
+    if(!linked||!linked->hasLinkedSketchExtrusion){
+        setError(error,"Select a linked sketch extrusion result.");return false;
+    }
+    return retargetLinkedSketchExtrusion(id,linked->linkedSketchSourceId,depth,offset,error);
+}
+
+bool SceneDocument::retargetLinkedSketchExtrusion(const QString& id,const QString& sourceId,
+                                                   double depth,double offset,QString* error){
+    int index=-1;
+    for(int i=0;i<parts_.size();++i)if(parts_[i].id==id){index=i;break;}
+    if(index<0||!parts_[index].hasLinkedSketchExtrusion){
+        setError(error,"Select an existing sketch-derived solid to retarget.");return false;
+    }
+    const Part* source=find(sourceId);
+    if(!source||source->isSurfaceBody||!source->hasConstrainedPolygonDefinition||
+       source->constrainedPolygonGeometryToken!=source->geometryToken){
+        setError(error,"New sketch source must be an existing body with a current constrained sketch.");
+        return false;
+    }
+    // Reject bad parameters even on edits where only the source is changing.
+    if(!std::isfinite(depth)||depth<=1e-5||depth>1000000||
+       !std::isfinite(offset)||std::abs(offset)>1000000){
+        setError(error,"Linked extrusion depth/offset is out of range.");return false;
+    }
+    const Part& current=parts_[index];
+    if(current.linkedSketchSourceId==sourceId&&current.linkedSketchDepthMm==depth&&
+       current.linkedSketchOffsetMm==offset)return true;
+    QVector<Part> candidate=parts_;
+    Part& changed=candidate[index];
+    changed.linkedSketchSourceId=sourceId;
+    changed.linkedSketchDepthMm=depth;
+    changed.linkedSketchOffsetMm=offset;
+    changed.linkedSketchSourceToken.clear(); // forces a new B-rep and descendant rebuild
+    if(!propagateLinkedBodies(&candidate,error))return false;
+    checkpoint();parts_=std::move(candidate);return true;
+}
+
+bool SceneDocument::addLinkedSketchPocket(const QString& sketchId,const QString& targetId,
+                                           double depth,double offset,QString* error){
+    if(parts_.size()>kMaxObjects-2){
+        setError(error,"Two free scene-object slots are required for a linked pocket.");return false;
+    }
+    const Part* source=find(sketchId);
+    const Part* target=find(targetId);
+    if(!source||!target||target->isSurfaceBody){
+        setError(error,"Choose an existing constrained-sketch source and a solid target body.");return false;
+    }
+    if((target->hasLinkedBoolean&&!linkedBooleanCurrent(targetId))||
+       (target->hasLinkedSketchExtrusion&&!linkedSketchExtrusionCurrent(targetId))){
+        setError(error,"Refresh the target body's stale dependencies before making a pocket.");return false;
+    }
+    TopoDS_Shape cutterShape;
+    if(!rebuildLinkedSketchSolid(*source,depth,offset,&cutterShape,error)||
+       !validShape(cutterShape,error))return false;
+    TopoDS_Shape pocketShape;
+    if(!linkedBooleanResult(target->shape,cutterShape,QStringLiteral("Cut"),&pocketShape,error))
+        return false;
+    if(!linkedSketchCutEffective(target->shape,pocketShape,error))return false;
+    QVector<Part> candidate=parts_;
+    Part cutter{generatedId(),uniqueName(QStringLiteral("Linked Sketch Pocket Tool")),cutterShape};
+    cutter.visible=false;
+    cutter.hasLinkedSketchExtrusion=true;
+    cutter.linkedSketchSourceId=sketchId;
+    cutter.linkedSketchSourceToken=source->geometryToken;
+    cutter.linkedSketchDepthMm=depth;
+    cutter.linkedSketchOffsetMm=offset;
+    const QString cutterId=cutter.id;
+    candidate.append(std::move(cutter));
+    Part result{generatedId(),uniqueName(QStringLiteral("Linked Sketch Pocket")),
+                pocketShape,true,target->color};
+    result.hasLinkedBoolean=true;
+    result.linkedOperation=QStringLiteral("Cut");
+    result.linkedPrimaryId=targetId;
+    result.linkedToolId=cutterId;
+    result.linkedPrimaryToken=target->geometryToken;
+    result.linkedToolToken=candidate.last().geometryToken;
+    candidate.append(std::move(result));
+    if(!propagateLinkedBodies(&candidate,error))return false;
+    checkpoint();parts_=std::move(candidate);return true;
+}
+
+bool SceneDocument::addLinkedSketchBoss(const QString& sketchId,const QString& targetId,
+                                         double depth,double offset,QString* error){
+    if(parts_.size()>kMaxObjects-2){
+        setError(error,"Two free scene-object slots are required for an associative boss.");return false;
+    }
+    const Part* source=find(sketchId);
+    const Part* target=find(targetId);
+    if(!source||!target||target->isSurfaceBody){
+        setError(error,"Choose an existing constrained-sketch source and a solid target body.");return false;
+    }
+    if((target->hasLinkedBoolean&&!linkedBooleanCurrent(targetId))||
+       (target->hasLinkedSketchExtrusion&&!linkedSketchExtrusionCurrent(targetId))){
+        setError(error,"Refresh the target body's stale dependencies before making a boss.");return false;
+    }
+    TopoDS_Shape toolShape;
+    if(!rebuildLinkedSketchSolid(*source,depth,offset,&toolShape,error)||
+       !validShape(toolShape,error))return false;
+    TopoDS_Shape fusedShape;
+    if(!linkedBooleanResult(target->shape,toolShape,QStringLiteral("Fuse"),&fusedShape,error)||
+       !linkedSketchFuseEffective(target->shape,fusedShape,error))return false;
+    QVector<Part> candidate=parts_;
+    Part tool{generatedId(),uniqueName(QStringLiteral("Linked Sketch Boss Tool")),toolShape};
+    tool.visible=false;
+    tool.hasLinkedSketchExtrusion=true;
+    tool.linkedSketchSourceId=sketchId;
+    tool.linkedSketchSourceToken=source->geometryToken;
+    tool.linkedSketchDepthMm=depth;
+    tool.linkedSketchOffsetMm=offset;
+    const QString toolId=tool.id;
+    candidate.append(std::move(tool));
+    Part result{generatedId(),uniqueName(QStringLiteral("Linked Sketch Boss")),
+                fusedShape,true,target->color};
+    result.hasLinkedBoolean=true;
+    result.linkedOperation=QStringLiteral("Fuse");
+    result.linkedPrimaryId=targetId;
+    result.linkedToolId=toolId;
+    result.linkedPrimaryToken=target->geometryToken;
+    result.linkedToolToken=candidate.last().geometryToken;
+    candidate.append(std::move(result));
+    if(!propagateLinkedBodies(&candidate,error))return false;
+    checkpoint();parts_=std::move(candidate);return true;
+}
+
+bool SceneDocument::linkedSketchExtrusionCurrent(const QString& id) const{
+    const Part* part=find(id);
+    if(!part||!part->hasLinkedSketchExtrusion)return false;
+    const Part* source=find(part->linkedSketchSourceId);
+    return source&&source->hasConstrainedPolygonDefinition&&
+           source->constrainedPolygonGeometryToken==source->geometryToken&&
+           source->geometryToken==part->linkedSketchSourceToken;
+}
+
+bool SceneDocument::propagateLinkedBodies(QVector<Part>* staged,QString* error) const {
+    if(!staged){setError(error,"Missing staged linked scene.");return false;}
+    QVector<int> order;
+    if(!planLinkedBodyOrder(*staged,&order,error))return false;
+    QMap<QString,int> indices;
+    for(int i=0;i<staged->size();++i)indices.insert(staged->at(i).id,i);
+    // Resolve in dependency order, not browser/creation order. This allows an
+    // existing result to be retargeted to a newer independent body, while
+    // cycle checks prevent an impossible update from entering the document.
+    for(int i:order){
+        Part& linked=(*staged)[i];
+        if(!linked.linkedFoldedFlatSourceId.isEmpty()){
+            const int sourceIndex=indices.value(linked.linkedFoldedFlatSourceId,-1);
+            if(sourceIndex<0||sourceIndex==i){
+                setError(error,"Linked flat blank references a missing or cyclic folded source.");return false;
+            }
+            const Part& source=(*staged)[sourceIndex];
+            if(linked.linkedFoldedFlatSourceToken==source.geometryToken)continue;
+            TopoDS_Shape rebuilt;
+            if(!createLinkedFlatBlank(source,linked.linkedFoldedFlatKFactors,linked.linkedFoldedFlatRelief,&rebuilt,error))return false;
+            linked.shape=rebuilt;
+            linked.geometryToken=generatedId();
+            linked.linkedFoldedFlatSourceToken=source.geometryToken;
+            continue;
+        }
+        if(linked.hasInterleavedHistory){
+            bool upToDate=linked.interleavedGeometryToken==linked.geometryToken&&
+                linked.interleavedSourceTokens.size()==linked.interleavedSteps.size();
+            if(upToDate){
+                for(int j=0;j<linked.interleavedSteps.size();++j){
+                    const auto& step=linked.interleavedSteps[j];
+                    if(step.kind==QStringLiteral("Shape"))continue;
+                    const int sourceIndex=indices.value(step.sketchSourceId,-1);
+                    if(sourceIndex<0||linked.interleavedSourceTokens[j]!=staged->at(sourceIndex).geometryToken){
+                        upToDate=false;break;
+                    }
+                }
+            }
+            if(upToDate)continue;
+            TopoDS_Shape built;QStringList sourceTokens;
+            if(!replayInterleavedHistory(linked,*staged,indices,&built,&sourceTokens,error))return false;
+            linked.shape=built;linked.geometryToken=generatedId();
+            linked.interleavedSourceTokens=std::move(sourceTokens);
+            linked.interleavedGeometryToken=linked.geometryToken;
+            continue;
+        }
+        if(linked.hasInPlaceSketchFeature){
+            const int sourceIndex=indices.value(linked.inPlaceSketchSourceId,-1);
+            if(sourceIndex<0||sourceIndex==i||linked.inPlaceSketchBase.IsNull()){
+                setError(error,"In-place sketch source or frozen target body is missing.");return false;
+            }
+            const Part& source=staged->at(sourceIndex);
+            if(!source.hasConstrainedPolygonDefinition||
+               source.constrainedPolygonGeometryToken!=source.geometryToken){
+                setError(error,"In-place sketch source is stale or no longer editable.");return false;
+            }
+            const Part* followSource=nullptr;
+            if(linked.hasInPlaceSketchFollowUp){
+                const int followIndex=indices.value(linked.inPlaceFollowSourceId,-1);
+                if(followIndex<0||followIndex==i||followIndex==sourceIndex){
+                    setError(error,"Second in-place sketch has a missing, self or duplicate source.");return false;
+                }
+                followSource=&staged->at(followIndex);
+                if(!followSource->hasConstrainedPolygonDefinition||
+                   followSource->constrainedPolygonGeometryToken!=followSource->geometryToken){
+                    setError(error,"Second in-place sketch source is stale.");return false;
+                }
+            }
+            QVector<const Part*> additionalSources;
+            additionalSources.reserve(linked.extraInPlaceSketchStages.size());
+            bool additionalUnchanged=true;
+            for(const auto& stage:linked.extraInPlaceSketchStages){
+                const int extraIndex=indices.value(stage.sourceId,-1);
+                if(extraIndex<0||extraIndex==i){
+                    setError(error,"Additional in-place sketch source is missing or circular.");return false;
+                }
+                const Part& extra=staged->at(extraIndex);
+                if(!extra.hasConstrainedPolygonDefinition||
+                   extra.constrainedPolygonGeometryToken!=extra.geometryToken){
+                    setError(error,"Additional in-place sketch source is stale.");return false;
+                }
+                additionalSources.append(&extra);
+                if(stage.sourceToken!=extra.geometryToken)additionalUnchanged=false;
+            }
+            if(linked.inPlaceSketchSourceToken==source.geometryToken&&
+               (!followSource||linked.inPlaceFollowSourceToken==followSource->geometryToken)&&
+               additionalUnchanged)continue;
+            auto applyModifier=[&](const TopoDS_Shape& input,const Part& sketchPart,
+                                   const QString& operation,double depth,double offset,
+                                   TopoDS_Shape* output)->bool{
+                TopoDS_Shape tool;
+                if(!rebuildLinkedSketchSolid(sketchPart,depth,offset,&tool,error)||
+                   !linkedBooleanResult(input,tool,operation,output,error))return false;
+                if(operation==QStringLiteral("Fuse"))return linkedSketchFuseEffective(input,*output,error);
+                if(operation==QStringLiteral("Cut"))return linkedSketchCutEffective(input,*output,error);
+                setError(error,"Invalid in-place sketch operation.");return false;
+            };
+            TopoDS_Shape first,modified;
+            if(!applyModifier(linked.inPlaceSketchBase,source,linked.inPlaceSketchOperation,
+                              linked.inPlaceSketchDepthMm,linked.inPlaceSketchOffsetMm,&first))return false;
+            if(followSource){
+                if(!applyModifier(first,*followSource,linked.inPlaceFollowOperation,
+                                  linked.inPlaceFollowDepthMm,linked.inPlaceFollowOffsetMm,&modified))return false;
+            }else modified=first;
+            for(int stageIndex=0;stageIndex<additionalSources.size();++stageIndex){
+                const auto& stage=linked.extraInPlaceSketchStages[stageIndex];
+                TopoDS_Shape next;
+                if(!applyModifier(modified,*additionalSources[stageIndex],stage.operation,
+                                  stage.depthMm,stage.offsetMm,&next))return false;
+                modified=next;
+            }
+            // A general, shape-independent feature tree can now follow the
+            // ordered external-sketch stages on the SAME body. Rebuild its
+            // actual committed operations from the new upstream solid before
+            // staging any geometry or token changes. No stale B-rep cache is
+            // allowed to cross this upstream dependency boundary.
+            TopoDS_Shape finalShape=modified;
+            QVector<TopoDS_Shape> featureOutputs;
+            if(linked.hasShapeFeatureTree){
+                if(!rebuildShapeFeatureTree(modified,linked.isSurfaceBody,
+                     linked.shapeFeatureNodes,&finalShape,error,nullptr,&featureOutputs))return false;
+                linked.shapeFeatureBase=modified;
+                linked.shapeFeatureCachedOutputs=std::move(featureOutputs);
+            }
+            linked.shape=finalShape;linked.geometryToken=generatedId();
+            if(linked.hasShapeFeatureTree)
+                linked.shapeFeatureGeometryToken=linked.geometryToken;
+            linked.inPlaceSketchSourceToken=source.geometryToken;
+            if(followSource)linked.inPlaceFollowSourceToken=followSource->geometryToken;
+            for(int stageIndex=0;stageIndex<additionalSources.size();++stageIndex)
+                linked.extraInPlaceSketchStages[stageIndex].sourceToken=additionalSources[stageIndex]->geometryToken;
+            continue;
+        }
+        if(linked.hasLinkedSketchExtrusion){
+            const int sourceIndex=indices.value(linked.linkedSketchSourceId,-1);
+            if(sourceIndex<0||sourceIndex==i){
+                setError(error,"Linked sketch source is missing or circular.");return false;
+            }
+            const Part& source=staged->at(sourceIndex);
+            if(source.geometryToken==linked.linkedSketchSourceToken)continue;
+            TopoDS_Shape newShape;
+            if(!rebuildLinkedSketchSolid(source,linked.linkedSketchDepthMm,
+                                         linked.linkedSketchOffsetMm,&newShape,error)||
+               !validShape(newShape,error))return false;
+            linked.shape=newShape;
+            linked.geometryToken=generatedId();
+            linked.linkedSketchSourceToken=source.geometryToken;
+            continue;
+        }
+        if(!linked.hasLinkedBoolean)continue;
+        const int first=indices.value(linked.linkedPrimaryId,-1);
+        const int second=indices.value(linked.linkedToolId,-1);
+        if(first<0||second<0||first==second){
+            setError(error,"Linked Boolean sources are missing or duplicate.");return false;
+        }
+        // Copy input handles before writing the result. These sources are
+        // distinct bodies but may themselves have just been rebuilt.
+        const Part& primary=staged->at(first);
+        const Part& tool=staged->at(second);
+        if(primary.isSurfaceBody||tool.isSurfaceBody){
+            setError(error,"Linked Boolean dependencies must be solid bodies.");return false;
+        }
+        if(linked.linkedPrimaryToken==primary.geometryToken&&linked.linkedToolToken==tool.geometryToken)continue;
+        TopoDS_Shape result;
+        if(!linkedBooleanResult(primary.shape,tool.shape,linked.linkedOperation,&result,error))return false;
+        if(linked.linkedOperation==QStringLiteral("Cut")&&tool.hasLinkedSketchExtrusion&&
+           !linkedSketchCutEffective(primary.shape,result,error))return false;
+        if(linked.linkedOperation==QStringLiteral("Fuse")&&tool.hasLinkedSketchExtrusion&&
+           !linkedSketchFuseEffective(primary.shape,result,error))return false;
+        linked.shape=result;
+        linked.geometryToken=generatedId();
+        linked.linkedPrimaryToken=primary.geometryToken;
+        linked.linkedToolToken=tool.geometryToken;
+    }
+    return true;
+}
+bool SceneDocument::linkedBooleanCurrent(const QString& id) const{
+    const Part* p=find(id);
+    if(!p||!p->hasLinkedBoolean)return false;
+    const Part* a=find(p->linkedPrimaryId);
+    const Part* b=find(p->linkedToolId);
+    return a&&b&&p->linkedPrimaryToken==a->geometryToken&&p->linkedToolToken==b->geometryToken;
+}
+bool SceneDocument::linkedBodyImpact(const QString& sourceId,QStringList* bodyIds,
+                                      QString* error,QStringList* explanationPaths) const {
+    if(!bodyIds){setError(error,"Missing impact preview output.");return false;}
+    const auto nodes=linkedBodyGraphNodes(parts_);
+    std::vector<std::size_t> impacted;
+    std::string reason;
+    if(!linkedgraph::affected(nodes,sourceId.toStdString(),&impacted,&reason)){
+        setError(error,QStringLiteral("Linked-body impact: %1").arg(QString::fromStdString(reason)));
+        return false;
+    }
+    QStringList result;
+    for(std::size_t index:impacted)result.append(parts_[static_cast<qsizetype>(index)].id);
+    QStringList explanations;
+    if(explanationPaths){
+        std::vector<linkedgraph::ImpactCause> causes;
+        if(!linkedgraph::explainAffectedMany(nodes,{sourceId.toStdString()},&causes,&reason)){
+            setError(error,QStringLiteral("Linked-body impact explanation: %1").arg(QString::fromStdString(reason)));
+            return false;
+        }
+        if(causes.size()!=impacted.size()){
+            setError(error,"Linked-body impact explanation differs from the dependency plan.");return false;
+        }
+        for(std::size_t i=0;i<causes.size();++i){
+            if(causes[i].nodeIndex!=impacted[i]){
+                setError(error,"Linked-body impact explanation order differs from the dependency plan.");return false;
+            }
+            QStringList path;
+            for(const auto& id:causes[i].pathIds)path<<QString::fromStdString(id);
+            explanations<<path.join(QStringLiteral(" -> "));
+        }
+    }
+    *bodyIds=std::move(result);
+    if(explanationPaths)*explanationPaths=std::move(explanations);
+    return true;
+}
+
+bool SceneDocument::refreshLinkedBooleanBodies(QString* error){
+    QVector<Part> candidate=parts_;
+    if(!propagateLinkedBodies(&candidate,error))return false;
+    bool changed=false;
+    for(int i=0;i<candidate.size();++i)
+        if(candidate[i].geometryToken!=parts_[i].geometryToken){changed=true;break;}
+    if(!changed)return true;
+    checkpoint();parts_=std::move(candidate);return true;
+}
+bool SceneDocument::addLinkedBooleanBody(BooleanOp operation,const QString& primaryId,
+                                          const QString& toolId,QString* error){
+    if(primaryId==toolId||parts_.size()>=kMaxObjects){setError(error,"Select two different bodies; scene limit must not be exceeded.");return false;}
+    const Part* primary=find(primaryId);
+    const Part* tool=find(toolId);
+    if(!primary||!tool||primary->isSurfaceBody||tool->isSurfaceBody){
+        setError(error,"Linked Boolean requires two existing solid bodies.");return false;
+    }
+    if((primary->hasLinkedBoolean&&!linkedBooleanCurrent(primaryId))||
+       (tool->hasLinkedBoolean&&!linkedBooleanCurrent(toolId))||
+       (primary->hasLinkedSketchExtrusion&&!linkedSketchExtrusionCurrent(primaryId))||
+       (tool->hasLinkedSketchExtrusion&&!linkedSketchExtrusionCurrent(toolId))){
+        setError(error,"Refresh stale linked source bodies before creating another dependency.");return false;
+    }
+    const QString label=operation==BooleanOp::Fuse?"Fuse":operation==BooleanOp::Cut?"Cut":"Common";
+    TopoDS_Shape result;
+    if(!linkedBooleanResult(primary->shape,tool->shape,label,&result,error))return false;
+    if(operation==BooleanOp::Cut&&tool->hasLinkedSketchExtrusion&&
+       !linkedSketchCutEffective(primary->shape,result,error))return false;
+    if(operation==BooleanOp::Fuse&&tool->hasLinkedSketchExtrusion&&
+       !linkedSketchFuseEffective(primary->shape,result,error))return false;
+    Part derived{generatedId(),uniqueName("Linked "+label),result,true,primary->color};
+    derived.hasLinkedBoolean=true;
+    derived.linkedOperation=label;
+    derived.linkedPrimaryId=primaryId;derived.linkedToolId=toolId;
+    derived.linkedPrimaryToken=primary->geometryToken;derived.linkedToolToken=tool->geometryToken;
+    checkpoint();parts_.append(std::move(derived));return true;
+}
+
+namespace {
+QString labelForLinkedOperation(BooleanOp operation) {
+    switch(operation){
+        case BooleanOp::Fuse:return QStringLiteral("Fuse");
+        case BooleanOp::Cut:return QStringLiteral("Cut");
+        case BooleanOp::Common:return QStringLiteral("Common");
+    }
+    return {};
+}
+
+// Only stages dependency metadata. Geometry is evaluated by the normal
+// transactional topological rebuild after all changes have been collected.
+bool stageLinkedEdits(QVector<Part>* candidate,
+                      const QVector<LinkedBooleanEdit>& edits,
+                      QStringList* changedIds,QString* error) {
+    if(!candidate||!changedIds){if(error)*error=QStringLiteral("Missing batch staging output.");return false;}
+    if(edits.size()>candidate->size()){
+        if(error)*error=QStringLiteral("Too many linked Boolean edits.");return false;
+    }
+    QMap<QString,int> byId;
+    for(int i=0;i<candidate->size();++i)byId.insert(candidate->at(i).id,i);
+    QSet<QString> seen;
+    QStringList changed;
+    for(const LinkedBooleanEdit& edit:edits){
+        if(edit.resultId.isEmpty()||seen.contains(edit.resultId)){
+            if(error)*error=QStringLiteral("Each batch result must be nonempty and unique.");return false;
+        }
+        seen.insert(edit.resultId);
+        const QString operation=labelForLinkedOperation(edit.operation);
+        const int at=byId.value(edit.resultId,-1);
+        const int a=byId.value(edit.primaryId,-1);
+        const int b=byId.value(edit.toolId,-1);
+        if(operation.isEmpty()||at<0||!candidate->at(at).hasLinkedBoolean||
+           a<0||b<0||at==a||at==b||a==b||
+           candidate->at(a).isSurfaceBody||candidate->at(b).isSurfaceBody){
+            if(error)*error=QStringLiteral("Batch edit has an invalid result, operation, or solid source.");return false;
+        }
+        Part& result=(*candidate)[at];
+        if(result.linkedOperation==operation&&result.linkedPrimaryId==edit.primaryId&&
+           result.linkedToolId==edit.toolId)continue;
+        result.linkedOperation=operation;
+        result.linkedPrimaryId=edit.primaryId;
+        result.linkedToolId=edit.toolId;
+        result.linkedPrimaryToken.clear();
+        result.linkedToolToken.clear();
+        changed.append(edit.resultId);
+    }
+    QVector<int> graphOrder;
+    if(!planLinkedBodyOrder(*candidate,&graphOrder,error))return false;
+    *changedIds=std::move(changed);
+    return true;
+}
+} // namespace
+
+bool SceneDocument::previewLinkedBooleanBatch(const QVector<LinkedBooleanEdit>& edits,
+                                               QStringList* affectedIds,QString* error) const {
+    if(!affectedIds){setError(error,"Missing batch impact destination.");return false;}
+    QVector<Part> staged=parts_;
+    QStringList changed;
+    if(!stageLinkedEdits(&staged,edits,&changed,error))return false;
+    const auto nodes=linkedBodyGraphNodes(staged);
+    std::vector<std::string> sources;
+    sources.reserve(static_cast<std::size_t>(changed.size()));
+    for(const QString& id:changed)sources.push_back(id.toStdString());
+    std::vector<std::size_t> affected;
+    std::string reason;
+    if(!linkedgraph::affectedMany(nodes,sources,&affected,&reason)){
+        setError(error,QStringLiteral("Batch impact: %1").arg(QString::fromStdString(reason)));
+        return false;
+    }
+    QStringList result;
+    for(std::size_t index:affected)result.append(staged[static_cast<qsizetype>(index)].id);
+    *affectedIds=std::move(result);
+    return true;
+}
+
+bool SceneDocument::updateLinkedBooleanBatch(const QVector<LinkedBooleanEdit>& edits,
+                                               QString* error) {
+    QVector<Part> candidate=parts_;
+    QStringList changed;
+    if(!stageLinkedEdits(&candidate,edits,&changed,error))return false;
+    if(changed.isEmpty())return true;  // No checkpoint for a no-op.
+    if(!propagateLinkedBodies(&candidate,error))return false;
+    checkpoint();
+    parts_=std::move(candidate);
+    return true;
+}
+
+bool SceneDocument::updateLinkedBooleanBody(const QString& resultId,BooleanOp operation,
+                                             const QString& primaryId,const QString& toolId,
+                                             QString* error) {
+    return updateLinkedBooleanBatch({LinkedBooleanEdit{resultId,operation,primaryId,toolId}},error);
+}
+
+bool SceneDocument::rebaseShapeFeatureTree(const QString& partId,QString* error){
+    Part* target=nullptr;for(Part& part:parts_)if(part.id==partId){target=&part;break;}
+    if(!target||!target->hasShapeFeatureTree){setError(error,"Select a body with an existing feature stack.");return false;}
+    // Explicitly freeze the current direct-modelled result, dropping the old
+    // modifier sequence instead of attempting to infer an unsupported operation.
+    if(target->shapeFeatureNodes.isEmpty()&&shapeFeatureTreeCurrent(partId))return true;
+    checkpoint();target->shapeFeatureBase=target->shape;
+    target->shapeFeatureNodes.clear();target->shapeFeatureCachedOutputs.clear();
+    target->shapeFeatureGeometryToken=target->geometryToken;
+    return true;
+}
+
 bool SceneDocument::addParametricRectangularExtrusion(double width,double height,double depth,QString* error) {
     if(!finitePositive(width)||!finitePositive(height)||!finitePositive(depth)){
         setError(error,"Sketch width, height, and extrusion depth must each be finite and between 0.00001 and 1,000,000 mm.");return false;
@@ -2464,115 +6657,64 @@ bool SceneDocument::addParametricRectangularExtrusion(double width,double height
 }
 
 bool SceneDocument::addConstrainedPolygonExtrusion(const SketchModel& sketch,const QStringList& boundaryPointIds,
-                                                    double depth,QString* error) {
-    if(!finitePositive(depth)||boundaryPointIds.size()<3||boundaryPointIds.size()>64||
-       sketch.points.size()>64||sketch.segments.size()>128||sketch.circles.size()>64||sketch.constraints.size()>128){
-        setError(error,"A constrained polygon needs 3–64 boundary points, finite positive depth, and at most 128 segments or constraints.");return false;
-    }
+                                                    double depth,QString* error,const SketchPlane& plane){
     if(parts_.size()>=kMaxObjects){setError(error,"Scene object limit reached.");return false;}
-    const SketchSolveResult solved=SketchSolver::solve(sketch);
-    if(!solved.success){setError(error,solved.message);return false;}
-    QMap<QString,QPointF> positions;
-    for(int i=0;i<sketch.points.size();++i)positions.insert(sketch.points[i].id,solved.solvedPoints[i]);
-    QSet<QString> unique;
-    QVector<QPointF> boundary;boundary.reserve(boundaryPointIds.size());
-    for(const QString& id:boundaryPointIds){
-        if(unique.contains(id)||!positions.contains(id)){setError(error,"Polygon boundary point IDs must be unique and present in the sketch.");return false;}
-        unique.insert(id);const QPointF point=positions.value(id);
-        if(!std::isfinite(point.x())||!std::isfinite(point.y())||std::abs(point.x())>1e6||std::abs(point.y())>1e6){
-            setError(error,"Solved sketch point exceeds the supported coordinate range.");return false;
-        }
-        boundary.append(point);
-    }
-    const int count=boundary.size();
-    double twiceArea=0.0;
-    for(int i=0;i<count;++i){
-        const QPointF a=boundary[i],b=boundary[(i+1)%count];
-        if(std::hypot(a.x()-b.x(),a.y()-b.y())<1e-5){setError(error,"Polygon has a zero-length boundary edge.");return false;}
-        twiceArea+=a.x()*b.y()-a.y()*b.x();
-    }
-    if(std::abs(twiceArea)<1e-8){setError(error,"Polygon boundary has zero area.");return false;}
-    auto cross=[](const QPointF& a,const QPointF& b,const QPointF& c){
-        return (b.x()-a.x())*(c.y()-a.y())-(b.y()-a.y())*(c.x()-a.x());
-    };
-    for(int i=0;i<count;++i)for(int j=i+1;j<count;++j){
-        if(j==i+1||(i==0&&j==count-1))continue;
-        const QPointF a=boundary[i],b=boundary[(i+1)%count],c=boundary[j],d=boundary[(j+1)%count];
-        const double abC=cross(a,b,c),abD=cross(a,b,d),cdA=cross(c,d,a),cdB=cross(c,d,b);
-        if((abC*abD<=0.0)&&(cdA*cdB<=0.0)){
-            setError(error,"Polygon boundary crosses or touches itself.");return false;
-        }
-    }
-    struct Cutout { QPointF center; double radius; };
-    QVector<Cutout> cutouts;
-    for(int circleIndex=0;circleIndex<sketch.circles.size();++circleIndex){
-        const SketchCircle& circle=sketch.circles[circleIndex];
-        if(!circle.cutout)continue;
-        const QPointF center=positions.value(circle.centerPointId);
-        const double radius=solved.solvedCircleRadii[circleIndex];
-        if(!std::isfinite(center.x())||!std::isfinite(center.y())||
-           std::abs(center.x())>1e6||std::abs(center.y())>1e6||!std::isfinite(radius)||radius<1e-5||radius>1e6){
-            setError(error,"A circular sketch cutout exceeds the supported coordinate or radius range.");return false;
-        }
-        bool inside=false;
-        double nearestEdge=std::numeric_limits<double>::infinity();
-        for(int i=0,j=count-1;i<count;j=i++){
-            const QPointF a=boundary[i],b=boundary[j];
-            if((a.y()>center.y())!=(b.y()>center.y())&&
-               center.x()<(b.x()-a.x())*(center.y()-a.y())/(b.y()-a.y())+a.x())inside=!inside;
-            const double dx=b.x()-a.x(),dy=b.y()-a.y();
-            const double t=std::clamp(((center.x()-a.x())*dx+(center.y()-a.y())*dy)/(dx*dx+dy*dy),0.0,1.0);
-            nearestEdge=std::min(nearestEdge,std::hypot(center.x()-a.x()-t*dx,center.y()-a.y()-t*dy));
-        }
-        if(!inside||nearestEdge<=radius+1e-5){setError(error,"Circular sketch cutouts must lie entirely inside the polygon with clearance from its boundary.");return false;}
-        for(const Cutout& other:cutouts)if(std::hypot(center.x()-other.center.x(),center.y()-other.center.y())<=radius+other.radius+1e-5){
-            setError(error,"Circular sketch cutouts must not overlap or touch.");return false;
-        }
-        cutouts.append({center,radius});
-    }
-    try{
-        BRepBuilderAPI_MakePolygon polygon;
-        for(const QPointF& p:boundary)polygon.Add(gp_Pnt(p.x(),p.y(),0));
-        polygon.Close();
-        if(!polygon.IsDone()){setError(error,"Could not close the constrained polygon.");return false;}
-        BRepBuilderAPI_MakeFace face(polygon.Wire());
-        for(const Cutout& cutout:cutouts){
-            const gp_Circ circle(gp_Ax2(gp_Pnt(cutout.center.x(),cutout.center.y(),0),gp_Dir(0,0,1)),cutout.radius);
-            const TopoDS_Edge edge=BRepBuilderAPI_MakeEdge(circle).Edge();
-            TopoDS_Wire wire=BRepBuilderAPI_MakeWire(edge).Wire();
-            if(twiceArea>0)wire.Reverse();
-            face.Add(wire);
-        }
-        if(!face.IsDone()){setError(error,"Could not build a face from the constrained polygon.");return false;}
-        BRepPrimAPI_MakePrism prism(face.Face(),gp_Vec(0,0,depth));
-        if(!prism.IsDone()||!validShape(prism.Shape(),error))return false;
-        Part part{generatedId(),uniqueName(QStringLiteral("Constrained Polygon Extrusion")),prism.Shape()};
-        part.hasConstrainedPolygonDefinition=true;part.constrainedPolygonSketch=sketch;
-        part.constrainedPolygonBoundary=boundaryPointIds;part.constrainedPolygonDepthMm=depth;
-        part.constrainedPolygonGeometryToken=part.geometryToken;
-        checkpoint();parts_.append(std::move(part));
-        return true;
-    }catch(const Standard_Failure& e){setError(error,QStringLiteral("Constrained sketch kernel error: %1").arg(e.what()));}
-    catch(const std::exception& e){setError(error,QString::fromUtf8(e.what()));}
-    return false;
+    TopoDS_Shape shape;
+    if(!buildSketchExtrusion(sketch,boundaryPointIds,depth,plane,&shape,error))return false;
+    Part part{generatedId(),uniqueName(QStringLiteral("Constrained Sketch Extrusion")),shape};
+    part.hasConstrainedPolygonDefinition=true;
+    part.constrainedPolygonSketch=sketch;
+    part.constrainedPolygonBoundary=boundaryPointIds;
+    part.constrainedPolygonDepthMm=depth;
+    part.constrainedPolygonPlane=plane;
+    part.constrainedPolygonGeometryToken=part.geometryToken;
+    checkpoint();parts_.append(std::move(part));return true;
 }
 
 bool SceneDocument::updateConstrainedPolygonExtrusion(const QString& partId,const SketchModel& sketch,
-                                                       const QStringList& boundaryPointIds,double depth,QString* error) {
-    Part* part=nullptr;for(Part& candidate:parts_)if(candidate.id==partId){part=&candidate;break;}
-    if(!part||!part->hasConstrainedPolygonDefinition){setError(error,"Select a constrained polygon extrusion.");return false;}
-    if(part->geometryToken!=part->constrainedPolygonGeometryToken){
-        setError(error,"The constrained sketch history is stale after a direct geometry edit.");return false;
+                                                       const QStringList& boundaryPointIds,double depth,
+                                                       QString* error,const SketchPlane& plane){
+    int index=-1;
+    for(int i=0;i<parts_.size();++i)if(parts_[i].id==partId){index=i;break;}
+    if(index<0||!parts_[index].hasConstrainedPolygonDefinition){
+        setError(error,"Select an extrusion with a persisted editable sketch.");return false;
     }
-    if(depth==part->constrainedPolygonDepthMm&&boundaryPointIds==part->constrainedPolygonBoundary&&
-       sketchModelToJson(sketch)==sketchModelToJson(part->constrainedPolygonSketch))return true;
-    SceneDocument rebuilt;
-    if(!rebuilt.addConstrainedPolygonExtrusion(sketch,boundaryPointIds,depth,error))return false;
-    const TopoDS_Shape shape=rebuilt.parts().first().shape;
-    checkpoint();part->shape=shape;part->geometryToken=generatedId();
-    part->constrainedPolygonGeometryToken=part->geometryToken;
-    part->constrainedPolygonSketch=sketch;part->constrainedPolygonBoundary=boundaryPointIds;
-    part->constrainedPolygonDepthMm=depth;
+    const Part& old=parts_[index];
+    if(old.geometryToken!=old.constrainedPolygonGeometryToken||
+       (old.hasShapeFeatureTree&&!shapeFeatureTreeCurrent(partId))){
+        setError(error,"The sketch dependency is stale after an unsupported direct geometry edit. The body remains unchanged.");return false;
+    }
+    if(depth==old.constrainedPolygonDepthMm&&boundaryPointIds==old.constrainedPolygonBoundary&&
+       sketchModelToJson(sketch)==sketchModelToJson(old.constrainedPolygonSketch)&&
+       sketchPlaneToJson(plane)==sketchPlaneToJson(old.constrainedPolygonPlane))return true;
+    // Build sketch first, and replay the complete downstream dependency graph.
+    // A single invalid downstream operation aborts before the undo checkpoint.
+    TopoDS_Shape base,finished;
+    QVector<TopoDS_Shape> intermediate;
+    if(!buildSketchExtrusion(sketch,boundaryPointIds,depth,plane,&base,error))return false;
+    if(old.hasShapeFeatureTree){
+        if(!rebuildShapeFeatureTree(base,old.isSurfaceBody,old.shapeFeatureNodes,&finished,error,
+                                    nullptr,&intermediate)){
+            if(error)*error="Downstream feature regeneration failed: "+*error;
+            return false;
+        }
+    }else finished=base;
+    QVector<Part> candidate=parts_;
+    Part& part=candidate[index];
+    part.shape=finished;
+    if(part.hasShapeFeatureTree){
+        part.shapeFeatureBase=base;
+        part.shapeFeatureCachedOutputs=std::move(intermediate);
+    }
+    part.geometryToken=generatedId();
+    part.constrainedPolygonGeometryToken=part.geometryToken;
+    if(part.hasShapeFeatureTree)part.shapeFeatureGeometryToken=part.geometryToken;
+    part.constrainedPolygonSketch=sketch;
+    part.constrainedPolygonBoundary=boundaryPointIds;
+    part.constrainedPolygonDepthMm=depth;
+    part.constrainedPolygonPlane=plane;
+    if(!propagateLinkedBodies(&candidate,error))return false;
+    checkpoint();parts_=std::move(candidate);
     return true;
 }
 
@@ -2862,6 +7004,7 @@ bool SceneDocument::setParameterLink(const QString& partId,const QString& target
         if(!setNamedParametersWithLinks(partId,{},links,true,error))return false;
     }else checkpoint();
     parts_[index].parameterLinks=std::move(links);
+    parts_[index].namedParameterFormulas.remove(target);
     return true;
 }
 
@@ -2881,6 +7024,414 @@ QMap<QString,ParameterLink> SceneDocument::parameterLinks(const QString& partId)
 }
 
 
+namespace {
+// Evaluate saved formula DAGs in base engineering units before touching B-reps.
+// Explicit dimension edits are able to override their own saved formulas; other
+// formulas are reevaluated on every source change. No stale numeric snapshot is
+// accepted when a formula or its referenced source changes.
+bool evaluatePersistentDimensionFormulas(const QMap<QString,double>& values,
+      const QMap<QString,QString>& formulas,QMap<QString,double>* result,QString* error){
+    const auto reject=[&](const QString& message){if(error)*error=message;return false;};
+    if(!result)return reject("Missing dimension-formula output.");
+    if(formulas.size()>64)return reject("Too many persisted dimension formulas.");
+    std::map<std::string,study::Quantity> baseline;
+    std::map<std::string,study::Dimension> dimensions;
+    std::map<std::string,std::string> edits;
+    for(auto it=values.cbegin();it!=values.cend();++it){
+        const bool count=it.key()==QStringLiteral("hole_pattern_count");
+        const auto unit=count?study::scalar:study::length;
+        baseline[it.key().toStdString()]={it.value(),unit};
+        dimensions[it.key().toStdString()]=unit;
+    }
+    for(auto it=formulas.cbegin();it!=formulas.cend();++it){
+        if(!values.contains(it.key())||it.value().trimmed().isEmpty()||it.value().size()>256||
+           it.value().contains(QLatin1Char('\n'))||it.value().contains(QLatin1Char('\r'))){
+            return reject("Dimension formulas must refer to existing parameters and be 1-256 printable characters.");
+        }
+        edits.emplace(it.key().toStdString(),it.value().toStdString());
+    }
+    std::map<std::string,study::Quantity> resolved;
+    std::string problem;
+    if(!study::evaluateParameterExpressions(baseline,edits,dimensions,&resolved,&problem)){
+        return reject(QString::fromStdString(problem));
+    }
+    QMap<QString,double> numeric=values;
+    for(const auto& [name,value]:resolved)numeric[QString::fromStdString(name)]=value.value;
+    *result=std::move(numeric);return true;
+}
+}
+
+// Feature-level notes deliberately use the stable feature node identity,
+// never an OpenCascade face traversal index. Missing nodes stay visible as
+// ORPHANED after edits so an engineer can recover or remove the note.
+static QStringList featureInspectionIds(const Part& part){
+    QStringList result;
+    if(part.hasInterleavedHistory){
+        for(const InterleavedHistoryStep& step:part.interleavedSteps)
+            if(!step.id.isEmpty()&&!result.contains(step.id))result.append(step.id);
+    }else if(part.hasShapeFeatureTree){
+        for(const ShapeFeatureNode& node:part.shapeFeatureNodes)
+            if(!node.id.isEmpty()&&!result.contains(node.id))result.append(node.id);
+    }
+    return result;
+}
+
+static bool validFeatureNotes(const QVector<FeatureInspectionNote>& notes,QString* error){
+    if(notes.size()>100){
+        if(error)*error="At most 100 feature inspection notes per body.";
+        return false;
+    }
+    QSet<QString> seen;
+    for(const auto& note:notes){
+        if(note.id.isEmpty()||note.id.size()>64||seen.contains(note.id)||
+           note.featureId.isEmpty()||note.featureId.size()>100||
+           note.reviewedGeometryToken.isEmpty()||note.reviewedGeometryToken.size()>64||
+           (note.category!="DESIGN"&&note.category!="INSPECTION"&&note.category!="PROCESS")||
+           note.text.trimmed().isEmpty()||note.text.size()>240||
+           note.text.contains('\n')||note.text.contains('\r')||
+           note.featureId.contains('\n')||note.featureId.contains('\r')){
+            if(error)*error="Malformed, duplicated or unsupported feature-level inspection annotation.";
+            return false;
+        }
+        seen.insert(note.id);
+    }
+    return true;
+}
+
+QStringList SceneDocument::inspectionFeatureIds(const QString& id) const{
+    const Part* part=find(id);return part?featureInspectionIds(*part):QStringList{};
+}
+QVector<FeatureInspectionNote> SceneDocument::featureInspectionNotes(const QString& id) const{
+    const Part* part=find(id);return part?part->featureInspectionNotes:QVector<FeatureInspectionNote>{};
+}
+bool SceneDocument::setFeatureInspectionNotes(const QString& id,
+                          const QVector<FeatureInspectionNote>& notes,QString* error){
+    int index=-1;
+    for(int i=0;i<parts_.size();++i)if(parts_[i].id==id){index=i;break;}
+    if(index<0||parts_[index].isSurfaceBody){
+        setError(error,"Choose an existing solid with a feature-history tree.");return false;
+    }
+    if(!validFeatureNotes(notes,error))return false;
+    const QStringList allowed=featureInspectionIds(parts_[index]);
+    const auto& old=parts_[index].featureInspectionNotes;
+    for(const auto& note:notes){
+        const bool previouslyPresent=std::any_of(old.cbegin(),old.cend(),
+            [&](const auto& previous){return previous.id==note.id&&
+                      previous.featureId==note.featureId;});
+        if(!allowed.contains(note.featureId)&&!previouslyPresent){
+            setError(error,"A new inspection annotation must reference an existing stable feature ID.");return false;
+        }
+        if(note.reviewedGeometryToken!=parts_[index].geometryToken){
+            const bool existingStale=std::any_of(old.cbegin(),old.cend(),
+                [&](const auto& previous){return previous.id==note.id&&
+                    previous.featureId==note.featureId&&
+                    previous.reviewedGeometryToken==note.reviewedGeometryToken;});
+            if(!existingStale){
+                setError(error,"New notes cannot claim review of an old geometry revision.");return false;
+            }
+        }
+    }
+    if(old==notes)return true;
+    checkpoint();parts_[index].featureInspectionNotes=notes;return true;
+}
+
+bool SceneDocument::buildFeatureInspectionCsv(const QString& id,QByteArray* csv,QString* error) const{
+    const Part* part=find(id);
+    if(!part||!csv){setError(error,"Select a body and provide a report output buffer.");return false;}
+    if(!validFeatureNotes(part->featureInspectionNotes,error))return false;
+    const QStringList available=featureInspectionIds(*part);
+    auto csvValue=[](QString value){
+        if(!value.trimmed().isEmpty()&&QStringLiteral("=+-@\t\r").contains(value.trimmed().front()))
+            value.prepend(QChar(0x27));
+        value.replace('"',QStringLiteral("\"\""));
+        return QStringLiteral("\"")+value+QStringLiteral("\"");
+    };
+    QString report=QStringLiteral("CADWorkbench feature-linked engineering notes,DESIGN REVIEW ONLY - NOT CERTIFIED INSPECTION\r\n");
+    report+=QStringLiteral("Source body,")+csvValue(id)+QStringLiteral("\r\n");
+    report+=QStringLiteral("Current geometry revision,")+csvValue(part->geometryToken)+QStringLiteral("\r\n");
+    report+=QStringLiteral("Note ID,Feature ID,Category,Note,Reviewed geometry revision,Status\r\n");
+    for(const auto& note:part->featureInspectionNotes){
+        const QString status=!available.contains(note.featureId)?QStringLiteral("MISSING_FEATURE"):
+            note.reviewedGeometryToken==part->geometryToken?QStringLiteral("CURRENT_REVISION"):
+                                                       QStringLiteral("REVIEW_REQUIRED");
+        report+=csvValue(note.id)+','+csvValue(note.featureId)+','+csvValue(note.category)+','+
+                csvValue(note.text)+','+csvValue(note.reviewedGeometryToken)+','+status+QStringLiteral("\r\n");
+    }
+    *csv=report.toUtf8();if(error)error->clear();return true;
+}
+bool SceneDocument::exportFeatureInspectionCsv(const QString& id,const QString& fileName,QString* error) const{
+    if(fileName.trimmed().isEmpty()){
+        setError(error,"Provide a report filename.");return false;
+    }
+    QByteArray contents;
+    if(!buildFeatureInspectionCsv(id,&contents,error))return false;
+    QSaveFile output(fileName);
+    if(!output.open(QIODevice::WriteOnly)){
+        setError(error,output.errorString());return false;
+    }
+    if(output.write(contents)!=contents.size()){
+        setError(error,output.errorString());output.cancelWriting();return false;
+    }
+    if(!output.commit()){
+        setError(error,output.errorString());return false;
+    }
+    if(error)error->clear();return true;
+}
+
+// A stored configuration is engineering intent, not a cached result. Validate
+// the entire catalog before save/load or mutation, and re-evaluate against the
+// *current* dimensional baseline every time a preset is applied.
+static bool validateDesignConfigurations(const Part& part,
+                                         const QVector<SavedDesignConfiguration>& definitions,
+                                         QString* error){
+    if(!part.hasParametricDefinition){
+        if(error)*error="Design configurations require an editable parametric body.";
+        return false;
+    }
+    if(definitions.size()>32){
+        if(error)*error="A body may contain at most 32 stored design configurations.";
+        return false;
+    }
+    std::map<std::string,study::Quantity> baseline;
+    std::map<std::string,study::Dimension> dimensions;
+    for(auto it=part.namedParameters.cbegin();it!=part.namedParameters.cend();++it){
+        const study::Dimension unit=it.key()==QStringLiteral("hole_pattern_count")?
+            study::scalar:study::length;
+        baseline.emplace(it.key().toStdString(),study::Quantity{it.value(),unit});
+        dimensions.emplace(it.key().toStdString(),unit);
+    }
+    QSet<QString> names;
+    std::vector<study::Configuration> cases;
+    for(const SavedDesignConfiguration& definition:definitions){
+        const QString name=definition.name.trimmed();
+        if(name.isEmpty()||name!=definition.name||name.size()>48||
+           name.contains('\n')||name.contains('\r')||name.contains(':')||
+           names.contains(name.toCaseFolded())||
+           definition.expressions.isEmpty()||definition.expressions.size()>16){
+            if(error)*error="Invalid, duplicate or empty design configuration name/parameters.";
+            return false;
+        }
+        names.insert(name.toCaseFolded());
+        study::Configuration candidate;candidate.name=name.toStdString();
+        for(auto it=definition.expressions.cbegin();it!=definition.expressions.cend();++it){
+            if(!part.namedParameters.contains(it.key())||part.parameterLinks.contains(it.key())||
+               it.value().trimmed().isEmpty()||it.value().size()>256||
+               it.value().contains('\n')||it.value().contains('\r')){
+                if(error)*error="A saved configuration has an unknown, linked or invalid dimension expression.";
+                return false;
+            }
+            candidate.parameters.emplace(it.key().toStdString(),it.value().toStdString());
+        }
+        cases.push_back(std::move(candidate));
+    }
+    const auto evaluated=study::evaluateConfigurations(baseline,dimensions,cases);
+    if(evaluated.size()!=cases.size()){
+        if(error)*error="Configuration evaluation returned an incomplete result.";
+        return false;
+    }
+    for(std::size_t i=0;i<evaluated.size();++i){
+        if(!evaluated[i].valid){
+            if(error)*error=QStringLiteral("Configuration %1: %2").arg(definitions[int(i)].name,
+                          QString::fromStdString(evaluated[i].error));
+            return false;
+        }
+        for(const auto& [key,quantity]:evaluated[i].values){
+            const QString name=QString::fromStdString(key);
+            const bool coordinate=name==QStringLiteral("origin_x")||
+                name==QStringLiteral("origin_y")||name==QStringLiteral("hole_x")||
+                name==QStringLiteral("hole_y");
+            const bool count=name==QStringLiteral("hole_pattern_count");
+            if(count?(!std::isfinite(quantity.value)||quantity.value<2.0||
+                      quantity.value>100.0||std::floor(quantity.value)!=quantity.value):
+               coordinate?!finiteOffset(quantity.value):!finitePositive(quantity.value)){
+                if(error)*error=QStringLiteral("Configuration %1 has a dimension outside the valid design range.")
+                                  .arg(definitions[int(i)].name);
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+QVector<SavedDesignConfiguration> SceneDocument::designConfigurations(const QString& id) const{
+    const Part* part=find(id);
+    return part&&part->hasParametricDefinition?part->designConfigurations:
+        QVector<SavedDesignConfiguration>{};
+}
+
+bool SceneDocument::setDesignConfigurations(const QString& id,
+                          const QVector<SavedDesignConfiguration>& configurations,QString* error){
+    int index=-1;
+    for(int i=0;i<parts_.size();++i)if(parts_[i].id==id){index=i;break;}
+    if(index<0||!parts_[index].hasParametricDefinition||!parametricDefinitionCurrent(id)){
+        setError(error,"Choose a body with a current editable parametric definition.");return false;
+    }
+    if(!validateDesignConfigurations(parts_[index],configurations,error))return false;
+    QString active=parts_[index].activeDesignConfiguration;
+    if(!active.isEmpty()&&std::none_of(configurations.cbegin(),configurations.cend(),
+       [&](const SavedDesignConfiguration& candidate){return candidate.name==active;}))active.clear();
+    if(parts_[index].designConfigurations==configurations&&
+       parts_[index].activeDesignConfiguration==active)return true;
+    checkpoint();parts_[index].designConfigurations=configurations;
+    parts_[index].activeDesignConfiguration=active;
+    return true;
+}
+
+bool SceneDocument::applyDesignConfiguration(const QString& id,const QString& name,QString* error){
+    const Part* part=find(id);
+    if(!part||!part->hasParametricDefinition||!parametricDefinitionCurrent(id)){
+        setError(error,"Choose a body with a current editable parametric definition.");return false;
+    }
+    if(!validateDesignConfigurations(*part,part->designConfigurations,error))return false;
+    const auto at=std::find_if(part->designConfigurations.cbegin(),part->designConfigurations.cend(),
+        [&](const SavedDesignConfiguration& candidate){return candidate.name==name;});
+    if(at==part->designConfigurations.cend()){
+        setError(error,"Selected named configuration is not stored in this project.");return false;
+    }
+    std::map<std::string,study::Quantity> baseline;
+    std::map<std::string,study::Dimension> dimensions;
+    std::map<std::string,std::string> edits;
+    for(auto it=part->namedParameters.cbegin();it!=part->namedParameters.cend();++it){
+        const auto dimension=it.key()==QStringLiteral("hole_pattern_count")?study::scalar:study::length;
+        baseline.emplace(it.key().toStdString(),study::Quantity{it.value(),dimension});
+        dimensions.emplace(it.key().toStdString(),dimension);
+    }
+    for(auto it=at->expressions.cbegin();it!=at->expressions.cend();++it)
+        edits.emplace(it.key().toStdString(),it.value().toStdString());
+    std::map<std::string,study::Quantity> evaluated;
+    std::string detail;
+    if(!study::evaluateParameterExpressions(baseline,edits,dimensions,&evaluated,&detail)){
+        setError(error,QString::fromStdString(detail));return false;
+    }
+    QMap<QString,double> edited;
+    for(auto it=at->expressions.cbegin();it!=at->expressions.cend();++it)
+        edited.insert(it.key(),evaluated.at(it.key().toStdString()).value);
+    return setNamedParametersWithLinks(id,edited,part->parameterLinks,true,error,nullptr,&name);
+}
+
+bool SceneDocument::compareDesignConfigurations(const QString& partId,
+                  QVector<ConfigurationBomComparison>* output,QString* error) const {
+    const Part* source=find(partId);
+    if(!output||!source||!source->hasParametricDefinition||
+       !parametricDefinitionCurrent(partId)){
+        setError(error,"Configuration/BOM comparison requires a current parametric body and result buffer.");
+        return false;
+    }
+    if(!validateDesignConfigurations(*source,source->designConfigurations,error))return false;
+    if(source->designConfigurations.isEmpty()){
+        setError(error,"Save at least one named configuration before comparing its geometry and BOM.");
+        return false;
+    }
+    QVector<ConfigurationBomComparison> prepared;
+    prepared.reserve(source->designConfigurations.size()+1);
+    const auto addRow=[&](const SceneDocument& trial,const QString& name,bool current)->bool {
+        const Part* target=trial.find(partId);
+        if(!target||!trial.parametricDefinitionCurrent(partId)){
+            setError(error,QStringLiteral("Configuration %1 lost its parametric source.").arg(name));return false;
+        }
+        BodyDiagnostics body;
+        QString detail;
+        if(!trial.diagnoseBody(partId,&body,&detail)||!body.valid){
+            setError(error,QStringLiteral("Configuration %1 has invalid target geometry: %2").arg(name,detail));
+            return false;
+        }
+        const auto bom=trial.billOfMaterials(&detail);
+        if(bom.isEmpty()){
+            setError(error,QStringLiteral("Configuration %1 could not generate a valid BOM: %2").arg(name,detail));
+            return false;
+        }
+        ConfigurationBomComparison row;
+        row.name=name;row.current=current;row.targetVolumeMm3=body.volume;
+        row.allMassesKnown=true;row.bomLines=bom.size();
+        for(const BillOfMaterialsRow& item:bom){
+            row.totalAssemblyVolumeMm3+=item.totalVolumeMm3;
+            row.knownAssemblyMassKg+=item.totalMassKg;
+            row.componentQuantity+=item.quantity;
+            if(item.quantity<=0||!std::isfinite(item.totalVolumeMm3)||
+               !std::isfinite(item.totalMassKg)||item.totalVolumeMm3<0||item.totalMassKg<0){
+                setError(error,QStringLiteral("Configuration %1 produced an invalid BOM quantity or measurement.")
+                            .arg(name));return false;
+            }
+            // Zero mass for a nonempty material-bearing solid means density is
+            // unknown; never present a partial mass as a complete assembly mass.
+            if(item.totalVolumeMm3>0&&item.unitMassKg<=0)row.allMassesKnown=false;
+        }
+        if(!std::isfinite(row.targetVolumeMm3)||row.targetVolumeMm3<0||
+           !std::isfinite(row.totalAssemblyVolumeMm3)||
+           !std::isfinite(row.knownAssemblyMassKg)){
+            setError(error,"Nonfinite configuration/BOM totals.");return false;
+        }
+        prepared.append(std::move(row));return true;
+    };
+    if(!addRow(*this,QStringLiteral("CURRENT"),true))return false;
+    for(const auto& variant:source->designConfigurations){
+        SceneDocument trial;
+        // Lightweight read-only snapshot. No open document, file, undo history
+        // or B-rep cache is changed; an internal checkpoint only affects trial.
+        trial.parts_=parts_;
+        trial.liveRigidMateFixed_=liveRigidMateFixed_;
+        trial.liveRigidMates_=liveRigidMates_;
+        trial.liveArticulatedFixed_=liveArticulatedFixed_;
+        trial.liveArticulatedJoints_=liveArticulatedJoints_;
+        trial.liveArticulatedReferencePoses_=liveArticulatedReferencePoses_;
+        trial.drawingReadinessPolicy_=drawingReadinessPolicy_;
+        QString issue;
+        if(!trial.applyDesignConfiguration(partId,variant.name,&issue)){
+            setError(error,QStringLiteral("Configuration %1 could not rebuild: %2").arg(variant.name,issue));
+            return false;
+        }
+        if(!addRow(trial,variant.name,false))return false;
+    }
+    *output=std::move(prepared);
+    if(error)error->clear();
+    return true;
+}
+
+bool SceneDocument::buildConfigurationComparisonCsv(const QString& partId,
+                                                      QByteArray* output,QString* error) const{
+    if(!output){setError(error,"Provide a configuration comparison CSV destination.");return false;}
+    QVector<ConfigurationBomComparison> rows;
+    if(!compareDesignConfigurations(partId,&rows,error))return false;
+    auto csv=[](QString value){
+        if(!value.trimmed().isEmpty()&&QStringLiteral("=+-@\t\r").contains(value.trimmed().front()))
+            value.prepend(QChar(0x27));
+        value.replace('"',QStringLiteral("\"\""));
+        return QStringLiteral("\"")+value+QStringLiteral("\"");
+    };
+    const auto real=[](double value){return QString::number(value,'g',15);};
+    QString contents=QStringLiteral("CADWorkbench configuration/BOM comparison,GEOMETRY DESIGN REVIEW - NOT PRODUCTION APPROVAL\r\n");
+    contents+=QStringLiteral("Source body,")+csv(partId)+QStringLiteral("\r\n");
+    contents+=QStringLiteral("Source geometry revision,")+csv(find(partId)->geometryToken)+QStringLiteral("\r\n");
+    QVector<const Part*> assembly;
+    assembly.reserve(parts_.size());
+    for(const Part& part:parts_)assembly.append(&part);
+    contents+=QStringLiteral("Assembly geometry fingerprint,")+csv(drawingSourceFingerprint(assembly))+
+              QStringLiteral("\r\n");
+    contents+=QStringLiteral("BOM/material fingerprint,")+csv(drawingSourceDataFingerprint(assembly))+
+              QStringLiteral("\r\n");
+    contents+=QStringLiteral("Configuration,Is current,Target volume (mm3),Assembly volume (mm3),Known mass (kg),Complete mass data,BOM lines,Total quantity\r\n");
+    for(const auto& row:rows){
+        contents+=csv(row.name)+','+(row.current?"YES":"NO")+','+real(row.targetVolumeMm3)+','+
+            real(row.totalAssemblyVolumeMm3)+','+real(row.knownAssemblyMassKg)+','+
+            (row.allMassesKnown?"YES":"NO")+','+QString::number(row.bomLines)+','+
+            QString::number(row.componentQuantity)+QStringLiteral("\r\n");
+    }
+    *output=contents.toUtf8();if(error)error->clear();return true;
+}
+
+bool SceneDocument::exportConfigurationComparisonCsv(const QString& partId,
+                                                    const QString& path,QString* error) const{
+    if(path.trimmed().isEmpty()){setError(error,"Choose a report filename.");return false;}
+    QByteArray bytes;
+    if(!buildConfigurationComparisonCsv(partId,&bytes,error))return false;
+    QSaveFile file(path);
+    if(!file.open(QIODevice::WriteOnly)||file.write(bytes)!=bytes.size()||!file.commit()){
+        setError(error,QStringLiteral("Could not atomically write configuration comparison: %1").arg(file.errorString()));
+        return false;
+    }
+    if(error)error->clear();return true;
+}
+
 bool SceneDocument::setNamedParameter(const QString& partId,const QString& parameterName,double value,QString* error) {
     return setNamedParameters(partId,QMap<QString,double>{{parameterName,value}},error);
 }
@@ -2890,7 +7441,9 @@ bool SceneDocument::setNamedParameters(const QString& partId,const QMap<QString,
 }
 
 bool SceneDocument::setNamedParametersWithLinks(const QString& partId,const QMap<QString,double>& values,
-        const QMap<QString,ParameterLink>& links,bool allowEmpty,QString* error) {
+        const QMap<QString,ParameterLink>& links,bool allowEmpty,QString* error,
+        const QMap<QString,QString>* replacementFormulas,
+        const QString* selectedConfiguration) {
     int index=-1;
     for(int i=0;i<parts_.size();++i)if(parts_[i].id==partId){index=i;break;}
     if(index<0){setError(error,"Object not found.");return false;}
@@ -2899,6 +7452,17 @@ bool SceneDocument::setNamedParametersWithLinks(const QString& partId,const QMap
     if(current.geometryToken!=current.parametricGeometryToken){setError(error,"This body has geometry edits after its parametric feature history. The old parameters are read-only; rebuild a new parametric feature before editing dimensions.");return false;}
     if(values.isEmpty()&&!allowEmpty){setError(error,"Provide at least one named parameter value to edit.");return false;}
     QMap<QString,double> updated=current.namedParameters;
+    QMap<QString,QString> formulas=replacementFormulas?*replacementFormulas:current.namedParameterFormulas;
+    if(replacementFormulas){
+        for(auto it=formulas.cbegin();it!=formulas.cend();++it){
+            if(links.contains(it.key())){
+                setError(error,"A driven parameter cannot also have an editable dimension expression.");return false;
+            }
+        }
+    }else{
+        for(auto it=values.cbegin();it!=values.cend();++it)formulas.remove(it.key());
+        for(auto it=links.cbegin();it!=links.cend();++it)formulas.remove(it.key());
+    }
     for(auto it=values.cbegin();it!=values.cend();++it){
         if(!updated.contains(it.key())){setError(error,"The named parameter does not exist on this feature history.");return false;}
         if(links.contains(it.key())){
@@ -2912,15 +7476,39 @@ bool SceneDocument::setNamedParametersWithLinks(const QString& partId,const QMap
         updated[it.key()]=it.value();
     }
     if(!resolveParameterLinks(links,updated,error))return false;
-    // Valid no-op edits must not invoke OpenCASCADE or disturb undo/redo state.
-    if(current.namedParameters==updated)return true;
+    QMap<QString,double> computed;
+    if(!evaluatePersistentDimensionFormulas(updated,formulas,&computed,error))return false;
+    updated=std::move(computed);
+    if(!resolveParameterLinks(links,updated,error))return false;
+    for(auto it=updated.cbegin();it!=updated.cend();++it){
+        const bool coordinate=it.key()==QStringLiteral("origin_x")||it.key()==QStringLiteral("origin_y")||
+            it.key()==QStringLiteral("hole_x")||it.key()==QStringLiteral("hole_y");
+        const bool count=it.key()==QStringLiteral("hole_pattern_count");
+        if(count?(!std::isfinite(it.value())||it.value()<2||it.value()>100||std::floor(it.value())!=it.value()):
+           coordinate?!finiteOffset(it.value()):!finitePositive(it.value())){
+            setError(error,"Reevaluated dimension expressions produced an invalid physical parameter.");return false;
+        }
+    }
+    const QString selected=selectedConfiguration?*selectedConfiguration:QString{};
+    const bool geometryChanges=current.namedParameters!=updated;
+    const bool formulasChange=current.namedParameterFormulas!=formulas;
+    const bool selectionChanges=current.activeDesignConfiguration!=selected;
+    if(!geometryChanges&&!formulasChange&&!selectionChanges)return true;
+    if(!geometryChanges){
+        checkpoint();parts_[index].namedParameterFormulas=std::move(formulas);
+        parts_[index].activeDesignConfiguration=selected;return true;
+    }
     try{
         TopoDS_Shape rebuilt;
         if(!rebuildParametricSolid(current,updated,current.suppressedParametricFeatures,&rebuilt,error))return false;
-        checkpoint();
-        parts_[index].shape=rebuilt;parts_[index].geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);
-        parts_[index].parametricGeometryToken=parts_[index].geometryToken;
-        parts_[index].namedParameters=std::move(updated);return true;
+        QVector<Part> candidate=parts_;
+        candidate[index].shape=rebuilt;candidate[index].geometryToken=generatedId();
+        candidate[index].parametricGeometryToken=candidate[index].geometryToken;
+        candidate[index].namedParameters=std::move(updated);
+        candidate[index].namedParameterFormulas=std::move(formulas);
+        candidate[index].activeDesignConfiguration=selected;
+        if(!propagateLinkedBodies(&candidate,error))return false;
+        checkpoint();parts_=std::move(candidate);return true;
     }catch(const Standard_Failure& e){setError(error,QStringLiteral("Parametric feature rebuild failed: %1").arg(e.what()));}
     catch(const std::exception& e){setError(error,QString::fromUtf8(e.what()));}
     return false;
@@ -2929,6 +7517,199 @@ bool SceneDocument::setNamedParametersWithLinks(const QString& partId,const QMap
 QMap<QString,double> SceneDocument::namedParameters(const QString& partId) const {
     const Part* part=find(partId);return part&&part->hasParametricDefinition?part->namedParameters:QMap<QString,double>{};
 }
+QMap<QString,QString> SceneDocument::namedParameterFormulas(const QString& partId) const {
+    const Part* part=find(partId);return part&&part->hasParametricDefinition?
+        part->namedParameterFormulas:QMap<QString,QString>{};
+}
+bool SceneDocument::previewNamedParameterFormulas(const QString& partId,
+        const QMap<QString,QString>& formulas,QString* report,QString* error) const{
+    if(!report){setError(error,"Provide an output report for the formula geometry preview.");return false;}
+    const Part* source=find(partId);
+    if(!source||!source->hasParametricDefinition){
+        setError(error,"Select a valid parametric body for formula preview.");return false;
+    }
+    // SceneDocument contains value snapshots, shared immutable OCCT input
+    // handles, and no QObject or live UI pointers. A detached copy invokes
+    // the SAME checked geometry and linked-body transaction as Save.
+    SceneDocument staged=*this;
+    if(!staged.setNamedParameterFormulas(partId,formulas,error))return false;
+    QStringList lines{"READ-ONLY PARAMETRIC FORMULA PREFLIGHT: complete staged regeneration"};
+    int changed=0;
+    for(const Part& original:parts_){
+        const Part* next=staged.find(original.id);
+        if(!next){setError(error,"Staged formula rebuild lost a source body.");return false;}
+        if(original.geometryToken==next->geometryToken)continue;
+        ++changed;
+        if(next->shape.IsNull()||!validShape(next->shape,error))return false;
+        if(!next->isSurfaceBody){
+            GProp_GProps mass;BRepGProp::VolumeProperties(next->shape,mass);
+            if(!std::isfinite(mass.Mass())||mass.Mass()<=0.0){
+                setError(error,"Staged parameter rebuild produced a nonpositive solid volume.");return false;
+            }
+            lines << QString("%1: new volume %2 mm^3")
+                .arg(next->name).arg(mass.Mass(),0,'g',12);
+        }else{
+            lines << QString("%1: surface geometry regenerated").arg(next->name);
+        }
+    }
+    lines.prepend(QString("Rebuilt bodies: %1; no saved geometry or revision was modified.")
+                  .arg(changed));
+    *report=lines.join('\n');
+    if(error)error->clear();return true;
+}
+
+bool SceneDocument::setNamedParameterFormulas(const QString& partId,
+        const QMap<QString,QString>& formulas,QString* error){
+    // The graph and complete B-rep are validated and committed together.
+    return setNamedParametersWithLinks(partId,{},parameterLinks(partId),true,error,&formulas);
+}
+bool SceneDocument::previewNamedParameterBatch(
+        const QMap<QString,QMap<QString,double>>& changes,QString* report,QString* error) const{
+    if(!report||changes.isEmpty()||changes.size()>12){
+        setError(error,"Provide a report and between 1 and 12 edited parametric bodies.");return false;
+    }
+    SceneDocument staged=*this;
+    QStringList lines{"COORDINATED PARAMETRIC CHANGE REVIEW (detached full-scene geometry)",
+        QString("Requested source bodies: %1").arg(changes.size())};
+    for(auto it=changes.cbegin();it!=changes.cend();++it){
+        if(it.value().isEmpty()){
+            setError(error,QString("No dimensions were supplied for body %1.").arg(it.key()));return false;
+        }
+        QString issue;
+        if(!staged.setNamedParameters(it.key(),it.value(),&issue)){
+            setError(error,QString("Batch source %1 failed: %2").arg(it.key(),issue));return false;
+        }
+    }
+    int rebuilt=0;
+    for(const Part& before:parts_){
+        const Part* after=staged.find(before.id);
+        if(!after){setError(error,"Detached batch lost a body.");return false;}
+        if(before.geometryToken==after->geometryToken)continue;
+        ++rebuilt;
+        if(after->shape.IsNull()||!validShape(after->shape,error))return false;
+        if(after->isSurfaceBody){
+            lines<<QString("%1: surface rebuilt").arg(after->name);continue;
+        }
+        GProp_GProps volume;
+        BRepGProp::VolumeProperties(after->shape,volume);
+        if(!std::isfinite(volume.Mass())||volume.Mass()<=1e-9){
+            setError(error,"A staged dependent body has nonpositive volume.");return false;
+        }
+        lines<<QString("%1: rebuilt solid %2 mm^3").arg(after->name).arg(volume.Mass(),0,'g',14);
+    }
+    lines<<QString("Total rebuilt source/dependent bodies: %1. No saved scene or undo history changed.").arg(rebuilt);
+    *report=lines.join('\n');
+    if(error)error->clear();return true;
+}
+
+bool SceneDocument::setNamedParameterBatch(
+        const QMap<QString,QMap<QString,double>>& changes,QString* error){
+    QString checked;
+    if(!previewNamedParameterBatch(changes,&checked,error))return false;
+    SceneDocument staged=*this;
+    for(auto it=changes.cbegin();it!=changes.cend();++it){
+        if(!staged.setNamedParameters(it.key(),it.value(),error))return false;
+    }
+    bool different=false;
+    for(const Part& current:parts_){
+        const Part* next=staged.find(current.id);
+        if(!next){setError(error,"Parametric batch lost an original scene body.");return false;}
+        if(current.geometryToken!=next->geometryToken||
+           current.namedParameterFormulas!=next->namedParameterFormulas||
+           current.namedParameters!=next->namedParameters){different=true;break;}
+    }
+    if(!different){if(error)error->clear();return true;}
+    checkpoint();
+    parts_=std::move(staged.parts_);
+    if(error)error->clear();return true;
+}
+
+bool SceneDocument::evaluateParametricDesignAlternatives(
+        const QVector<ParametricDesignAlternative>& alternatives,
+        QVector<ParametricDesignAlternativeResult>* results,QString* error) const{
+    if(!results||alternatives.isEmpty()||alternatives.size()>8){
+        setError(error,"Choose 1-8 alternatives and a separate results buffer.");return false;
+    }
+    QSet<QString> labels;
+    for(const auto& alternative:alternatives){
+        const QString label=alternative.label.trimmed();
+        if(label.isEmpty()||labels.contains(label)||alternative.changes.size()>12){
+            setError(error,"Alternative labels must be unique/nonempty, with up to 12 changed bodies.");return false;
+        }
+        labels.insert(label);
+    }
+    const auto measure=[&](const SceneDocument& document,
+            double* volume,double* knownMass)->bool{
+        double sum=0,mass=0;
+        for(const Part& part:document.parts_){
+            if(part.isSurfaceBody)continue;
+            if(part.shape.IsNull()||!validShape(part.shape,nullptr))return false;
+            GProp_GProps properties;BRepGProp::VolumeProperties(part.shape,properties);
+            const double v=properties.Mass();
+            if(!std::isfinite(v)||v<=1e-9)return false;
+            sum+=v;
+            if(part.materialDensityKgPerM3>0&&std::isfinite(part.materialDensityKgPerM3))
+                mass+=v*1e-9*part.materialDensityKgPerM3;
+        }
+        *volume=sum;*knownMass=mass;return std::isfinite(sum)&&std::isfinite(mass);
+    };
+    double baselineVolume=0,baselineMass=0;
+    if(!measure(*this,&baselineVolume,&baselineMass)){
+        setError(error,"Current design contains an invalid or non-measurable solid.");return false;
+    }
+    QVector<ParametricDesignAlternativeResult> stagedResults;
+    stagedResults.reserve(alternatives.size());
+    for(const auto& alternative:alternatives){
+        ParametricDesignAlternativeResult row;row.label=alternative.label.trimmed();
+        SceneDocument candidate=*this;
+        QString issue;
+        if(!alternative.changes.isEmpty()&&
+           !candidate.setNamedParameterBatch(alternative.changes,&issue)){
+            row.failure=issue.isEmpty()?"Candidate dependent-body rebuild failed.":issue;
+        }else{
+            double volume=0,mass=0;
+            if(!measure(candidate,&volume,&mass)){
+                row.failure="Candidate geometry is invalid or has nonpositive volume.";
+            }else{
+                row.valid=true;row.totalSolidVolumeMm3=volume;row.knownMassKg=mass;
+                row.volumeChangePercent=baselineVolume>1e-9?
+                    (volume-baselineVolume)*100.0/baselineVolume:0.0;
+                for(const Part& part:parts_){
+                    const Part* changed=candidate.find(part.id);
+                    if(!changed)continue;
+                    if(changed->geometryToken!=part.geometryToken||
+                       changed->namedParameters!=part.namedParameters){
+                        ++row.rebuiltBodies;
+                        // Always inspect actual OCCT B-reps. Geometry tokens
+                        // alone cannot tell us when a dependent feature gained
+                        // or lost a face/edge during regeneration.
+                        if(!part.isSurfaceBody){
+                            ParametricBodyImpact impact;
+                            impact.bodyId=part.id;impact.bodyName=part.name;
+                            GProp_GProps beforeVolume,afterVolume;
+                            BRepGProp::VolumeProperties(part.shape,beforeVolume);
+                            BRepGProp::VolumeProperties(changed->shape,afterVolume);
+                            impact.beforeVolumeMm3=beforeVolume.Mass();
+                            impact.afterVolumeMm3=afterVolume.Mass();
+                            for(TopExp_Explorer e(part.shape,TopAbs_FACE);e.More();e.Next())++impact.beforeFaces;
+                            for(TopExp_Explorer e(changed->shape,TopAbs_FACE);e.More();e.Next())++impact.afterFaces;
+                            for(TopExp_Explorer e(part.shape,TopAbs_EDGE);e.More();e.Next())++impact.beforeEdges;
+                            for(TopExp_Explorer e(changed->shape,TopAbs_EDGE);e.More();e.Next())++impact.afterEdges;
+                            impact.topologyCountChanged=(impact.beforeFaces!=impact.afterFaces||
+                                impact.beforeEdges!=impact.afterEdges);
+                            if(impact.topologyCountChanged)++row.topologyCountChangedBodies;
+                            row.bodyImpacts.append(std::move(impact));
+                        }
+                    }
+                }
+            }
+        }
+        stagedResults.append(std::move(row));
+    }
+    *results=std::move(stagedResults);
+    if(error)error->clear();return true;
+}
+
 QStringList SceneDocument::suppressedParametricFeatures(const QString& partId) const {
     const Part* part=find(partId);return part&&part->hasParametricDefinition?part->suppressedParametricFeatures:QStringList{};
 }
@@ -2983,15 +7764,246 @@ bool SceneDocument::setParametricFeaturesSuppressed(const QString& partId,const 
     try{
         TopoDS_Shape rebuilt;
         if(!rebuildParametricSolid(current,current.namedParameters,proposed,&rebuilt,error))return false;
-        checkpoint();Part& updated=parts_[index];updated.shape=rebuilt;
-        updated.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);
+        QVector<Part> candidate=parts_;
+        Part& updated=candidate[index];updated.shape=rebuilt;
+        updated.geometryToken=generatedId();
         updated.parametricGeometryToken=updated.geometryToken;
         updated.suppressedParametricFeatures=std::move(proposed);
+        if(!propagateLinkedBodies(&candidate,error))return false;
+        checkpoint();parts_=std::move(candidate);
         return true;
     }catch(const Standard_Failure& e){setError(error,QStringLiteral("Feature suppression rebuild failed: %1").arg(e.what()));}
     catch(const std::exception& e){setError(error,QString::fromUtf8(e.what()));}
     return false;
 }
+bool SceneDocument::setCoordinatedParametricRevision(
+        const QMap<QString,QMap<QString,double>>& dimensions,
+        const QMap<QString,QStringList>& suppression,QString* error){
+    QSet<QString> selected;
+    for(auto it=dimensions.cbegin();it!=dimensions.cend();++it)selected.insert(it.key());
+    for(auto it=suppression.cbegin();it!=suppression.cend();++it)selected.insert(it.key());
+    if(selected.size()<2||selected.size()>12){
+        setError(error,"Select 2-12 different parametric bodies for the coordinated revision.");return false;
+    }
+    QVector<Part> candidate=parts_;
+    bool modified=false;
+    try{
+        for(const QString& id:selected){
+            auto it=std::find_if(candidate.begin(),candidate.end(),
+                [&](const Part& item){return item.id==id;});
+            if(it==candidate.end()||!it->hasParametricDefinition||
+               !parametricDefinitionCurrent(id)){
+                setError(error,"Each selected body needs a current editable parametric definition.");return false;
+            }
+            Part& part=*it;
+            QMap<QString,double> values=part.namedParameters;
+            QMap<QString,QString> formulas=part.namedParameterFormulas;
+            const auto requests=dimensions.value(id);
+            for(auto change=requests.cbegin();change!=requests.cend();++change){
+                if(!values.contains(change.key())||part.parameterLinks.contains(change.key())){
+                    setError(error,QString("Unknown or linked dimension %1 in %2.").arg(change.key(),id));
+                    return false;
+                }
+                const bool coordinate=change.key()==QStringLiteral("origin_x")||
+                    change.key()==QStringLiteral("origin_y")||
+                    change.key()==QStringLiteral("hole_x")||
+                    change.key()==QStringLiteral("hole_y");
+                const bool count=change.key()==QStringLiteral("hole_pattern_count");
+                const double value=change.value();
+                if(count?(!std::isfinite(value)||value<2||value>100||std::floor(value)!=value):
+                    (coordinate?!finiteOffset(value):!finitePositive(value))){
+                    setError(error,QString("Invalid value for %1 in %2.").arg(change.key(),id));return false;
+                }
+                values[change.key()]=value;
+                formulas.remove(change.key());
+            }
+            if(!resolveParameterLinks(part.parameterLinks,values,error))return false;
+            QMap<QString,double> computed;
+            if(!evaluatePersistentDimensionFormulas(values,formulas,&computed,error))return false;
+            values=std::move(computed);
+            if(!resolveParameterLinks(part.parameterLinks,values,error))return false;
+            for(auto entry=values.cbegin();entry!=values.cend();++entry){
+                const bool position=entry.key()==QStringLiteral("origin_x")||
+                    entry.key()==QStringLiteral("origin_y")||
+                    entry.key()==QStringLiteral("hole_x")||entry.key()==QStringLiteral("hole_y");
+                const bool count=entry.key()==QStringLiteral("hole_pattern_count");
+                const double v=entry.value();
+                if(count?(!std::isfinite(v)||v<2||v>100||std::floor(v)!=v):
+                    (position?!finiteOffset(v):!finitePositive(v))){
+                    setError(error,"Calculated dimension is outside the valid geometry domain.");return false;
+                }
+            }
+            QStringList suppressed=suppression.contains(id)?suppression.value(id):part.suppressedParametricFeatures;
+            suppressed.sort();
+            for(int i=0;i<suppressed.size();++i){
+                if((i>0&&suppressed[i-1]==suppressed[i])||
+                    !optionalParametricFeaturePresent(part,suppressed[i])){
+                    setError(error,QString("Duplicate or missing optional feature in %1.").arg(id));return false;
+                }
+            }
+            if(values==part.namedParameters&&formulas==part.namedParameterFormulas&&
+               suppressed==part.suppressedParametricFeatures)continue;
+            // One combined rebuild: the requested final state need not pass
+            // through an intermediate dimension-only or suppression-only B-rep.
+            TopoDS_Shape solid;
+            if(!rebuildParametricSolid(part,values,suppressed,&solid,error)||
+               solid.IsNull()||!validShape(solid,error))return false;
+            part.shape=solid;
+            part.geometryToken=generatedId();part.parametricGeometryToken=part.geometryToken;
+            part.namedParameters=std::move(values);
+            part.namedParameterFormulas=std::move(formulas);
+            part.suppressedParametricFeatures=std::move(suppressed);
+            part.activeDesignConfiguration.clear();
+            modified=true;
+        }
+        if(!modified){if(error)error->clear();return true;}
+        if(!propagateLinkedBodies(&candidate,error))return false;
+        // Nothing is changed in this document until every source AND dependent
+        // has been validated against the final configuration.
+        for(const Part& body:candidate){
+            if(body.shape.IsNull()){setError(error,"A staged dependent body has no geometry.");return false;}
+        }
+        checkpoint();parts_=std::move(candidate);
+        if(error)error->clear();return true;
+    }catch(const Standard_Failure& failure){
+        setError(error,QString("Coordinated feature revision kernel failure: %1").arg(failure.what()));
+    }catch(const std::exception& failure){
+        setError(error,QString("Coordinated revision failed: %1").arg(failure.what()));
+    }
+    return false;
+}
+
+bool SceneDocument::previewCoordinatedParametricRevision(
+        const QMap<QString,QMap<QString,double>>& dimensions,
+        const QMap<QString,QStringList>& suppression,
+        QString* report,QString* error) const{
+    if(!report){setError(error,"Provide a separate review report destination.");return false;}
+    SceneDocument staged=*this;
+    if(!staged.setCoordinatedParametricRevision(dimensions,suppression,error))return false;
+    QStringList lines{"COORDINATED DIMENSION + FEATURE-SUPPRESSION PREVIEW",
+        "One final-state rebuild per source; linked descendants regenerated; live model unchanged."};
+    int altered=0,topologyChanges=0,linkedChanges=0;
+    for(const Part& before:parts_){
+        const Part* after=staged.find(before.id);
+        if(!after){setError(error,"An original scene body disappeared in the staged rebuild.");return false;}
+        if(before.geometryToken==after->geometryToken)continue;
+        ++altered;
+        if(!validShape(after->shape,error))return false;
+        const bool source=dimensions.contains(after->id)||suppression.contains(after->id);
+        if(!source)++linkedChanges;
+        if(after->isSurfaceBody){
+            lines<<after->name+": valid rebuilt surface (physical identity not inferred)";
+            continue;
+        }
+        if(!validShape(before.shape,error))return false;
+        GProp_GProps previous,properties;
+        BRepGProp::VolumeProperties(before.shape,previous);
+        BRepGProp::VolumeProperties(after->shape,properties);
+        if(!std::isfinite(previous.Mass())||previous.Mass()<=1e-9||
+           !std::isfinite(properties.Mass())||properties.Mass()<=1e-9){
+            setError(error,"A staged solid has invalid or zero volume.");return false;
+        }
+        int oldFaces=0,oldEdges=0,faces=0,edges=0;
+        for(TopExp_Explorer f(before.shape,TopAbs_FACE);f.More();f.Next())++oldFaces;
+        for(TopExp_Explorer e(before.shape,TopAbs_EDGE);e.More();e.Next())++oldEdges;
+        for(TopExp_Explorer f(after->shape,TopAbs_FACE);f.More();f.Next())++faces;
+        for(TopExp_Explorer e(after->shape,TopAbs_EDGE);e.More();e.Next())++edges;
+        const bool countChanged=oldFaces!=faces||oldEdges!=edges;
+        if(countChanged)++topologyChanges;
+        const double percent=(properties.Mass()-previous.Mass())*100.0/previous.Mass();
+        lines<<QString("%1 [%2]: volume %3 -> %4 mm3 (%5%), faces %6 -> %7, edges %8 -> %9 [%10]%11")
+            .arg(after->name,after->id)
+            .arg(previous.Mass(),0,'g',14).arg(properties.Mass(),0,'g',14)
+            .arg(percent,0,'g',9).arg(oldFaces).arg(faces).arg(oldEdges).arg(edges)
+            .arg(source?"source":"linked descendant")
+            .arg(countChanged?"  TOPOLOGY COUNT CHANGED":"");
+    }
+    lines<<QString("Rebuilt bodies: %1, linked descendants: %2, topology-count changes: %3.")
+        .arg(altered).arg(linkedChanges).arg(topologyChanges);
+    if(topologyChanges>0)lines<<
+        "Review downstream face/edge references after acceptance. Equal topology counts do not prove identity.";
+    lines<<"No live geometry, revision or undo change until accepted.";
+    *report=lines.join('\n');if(error)error->clear();return true;
+}
+
+bool SceneDocument::setParametricFeaturesSuppressedBatch(
+        const QMap<QString,QStringList>& byBody,QString* error){
+    if(byBody.size()<2||byBody.size()>12){
+        setError(error,"Batch optional-feature editing requires 2-12 parametric bodies.");return false;
+    }
+    QVector<Part> candidate=parts_;
+    bool changed=false;
+    try{
+        // Validate ALL source definitions before rebuilding any geometry. The
+        // candidate is detached until the complete linked graph has passed.
+        for(auto it=byBody.cbegin();it!=byBody.cend();++it){
+            const int index=static_cast<int>(std::distance(candidate.cbegin(),
+                std::find_if(candidate.cbegin(),candidate.cend(),[&](const Part& p){return p.id==it.key();})));
+            if(index<0||index>=candidate.size()){
+                setError(error,"A selected parametric body is missing.");return false;
+            }
+            Part& part=candidate[index];
+            if(!part.hasParametricDefinition||!parametricDefinitionCurrent(part.id)){
+                setError(error,"Every selected body needs a current editable parametric history.");return false;
+            }
+            QStringList proposed=it.value();proposed.sort();
+            for(int i=0;i<proposed.size();++i){
+                if(!optionalParametricFeaturePresent(part,proposed[i])||
+                   (i>0&&proposed[i]==proposed[i-1])){
+                    setError(error,"An optional feature is missing or duplicated in the selected body.");return false;
+                }
+            }
+            if(proposed==part.suppressedParametricFeatures)continue;
+            TopoDS_Shape rebuilt;
+            if(!rebuildParametricSolid(part,part.namedParameters,proposed,&rebuilt,error))return false;
+            if(rebuilt.IsNull()||!validShape(rebuilt,error))return false;
+            part.shape=rebuilt;
+            part.geometryToken=generatedId();
+            part.parametricGeometryToken=part.geometryToken;
+            part.suppressedParametricFeatures=std::move(proposed);
+            changed=true;
+        }
+        if(!changed){if(error)error->clear();return true;}
+        if(!propagateLinkedBodies(&candidate,error))return false;
+        // Exactly one checkpoint, including every linked descendant.
+        checkpoint();parts_=std::move(candidate);
+        if(error)error->clear();return true;
+    }catch(const Standard_Failure& e){
+        setError(error,QString("Coordinated feature-history rebuild failed: %1").arg(e.what()));
+    }catch(const std::exception& e){setError(error,QString::fromUtf8(e.what()));}
+    return false;
+}
+
+bool SceneDocument::previewParametricFeaturesSuppressedBatch(
+        const QMap<QString,QStringList>& byBody,QString* report,QString* error) const{
+    if(!report){setError(error,"Provide a report buffer for coordinated feature preview.");return false;}
+    SceneDocument trial=*this;
+    if(!trial.setParametricFeaturesSuppressedBatch(byBody,error))return false;
+    QStringList lines{"Coordinated optional-feature history: validated detached geometry"};
+    int changedBodies=0;
+    for(const Part& before:parts_){
+        const Part* after=trial.find(before.id);
+        if(!after){setError(error,"A linked descendant disappeared during feature replay.");return false;}
+        if(before.geometryToken==after->geometryToken)continue;
+        if(before.isSurfaceBody||after->isSurfaceBody||!validShape(after->shape,error)){
+            setError(error,"A changed body is not a valid solid.");return false;
+        }
+        GProp_GProps props;
+        BRepGProp::VolumeProperties(after->shape,props);
+        const double volume=props.Mass();
+        if(!std::isfinite(volume)||volume<=1e-9){
+            setError(error,"A rebuilt feature produces a nonpositive or nonfinite volume.");return false;
+        }
+        lines<<QString("%1 [%2]: validated volume %3 mm^3%4")
+            .arg(after->name,after->id).arg(volume,0,'g',14)
+            .arg(byBody.contains(after->id)?" (edited source)":" (linked dependent)");
+        ++changedBodies;
+    }
+    lines<<QString("%1 affected bodies. No live geometry or history was modified.").arg(changedBodies);
+    *report=lines.join('\n');
+    if(error)error->clear();return true;
+}
+
 QStringList SceneDocument::sketchConstraints(const QString& partId) const {
     const Part* part=find(partId);return part&&part->hasParametricDefinition?part->sketchConstraints:QStringList{};
 }
@@ -3004,9 +8016,17 @@ bool SceneDocument::parametricDefinitionCurrent(const QString& partId) const {
 
 bool SceneDocument::booleanOperation(BooleanOp op, const QString& firstId, const QString& secondId, QString* error) {
     if (firstId == secondId) { setError(error, "Choose two different solids."); return false; }
+    for(const Part& part:parts_)if(part.hasLinkedBoolean&&
+       (part.linkedPrimaryId==firstId||part.linkedToolId==firstId||
+        part.linkedPrimaryId==secondId||part.linkedToolId==secondId)){
+        setError(error,"A selected source has linked Boolean dependents. Use a non-destructive linked Boolean instead.");return false;
+    }
     const Part* a = find(firstId);
     const Part* b = find(secondId);
     if (!a || !b) { setError(error, "Both solids must exist."); return false; }
+    if(!a->linkedFoldedFlatSourceId.isEmpty()||!b->linkedFoldedFlatSourceId.isEmpty()){
+        setError(error,"A linked neutral flat blank cannot be consumed by a destructive Boolean; use an independent copy.");return false;
+    }
     if(rejectSurfaceOnlyInput(*a,QStringLiteral("Boolean operations"),error)||
        rejectSurfaceOnlyInput(*b,QStringLiteral("Boolean operations"),error))return false;
     try {
@@ -3181,6 +8201,72 @@ bool SceneDocument::measureMassFromDensity(const QString& id,double densityKgPer
         setError(error,QString("Mass-property calculation failed: %1").arg(failure.what()));
     }
     return false;
+}
+
+bool SceneDocument::measureMassTensor(const QString& id,double densityKgPerM3,
+                                       tensor::Report* result,QString* error) const {
+    if(!result){setError(error,"Mass tensor output is null.");return false;}
+    if(!std::isfinite(densityKgPerM3)||densityKgPerM3<=0.0||densityKgPerM3>1e6){
+        setError(error,"Density must be finite, positive, and no greater than 1,000,000 kg/m^3.");return false;
+    }
+    const Part* part=find(id);
+    if(!part||part->shape.IsNull()||part->isSurfaceBody){
+        setError(error,"Select a solid body to compute its inertia tensor.");return false;
+    }
+    try {
+        if(!BRepCheck_Analyzer(part->shape).IsValid()){
+            setError(error,"Mass tensor requires a valid solid.");return false;
+        }
+        GProp_GProps volume;
+        BRepGProp::VolumeProperties(part->shape,volume);
+        const gp_Pnt center=volume.CentreOfMass();
+        const gp_Mat inertia=volume.MatrixOfInertia(); // About its center of mass, unit volumetric density.
+        tensor::Input input;
+        input.volumeMm3=volume.Mass();input.densityKgPerM3=densityKgPerM3;
+        input.centerMm={center.X(),center.Y(),center.Z()};
+        for(int row=0;row<3;++row)for(int col=0;col<3;++col)
+            input.geometricInertiaMm5[row*3+col]=inertia.Value(row+1,col+1);
+        std::string message;
+        if(!tensor::analyze(input,result,&message)){
+            setError(error,QString::fromStdString(message));return false;
+        }
+        return true;
+    } catch(const Standard_Failure& exception) {
+        setError(error,QStringLiteral("Inertia calculation failed: %1").arg(exception.what()));
+    } catch(const std::exception& exception) {
+        setError(error,QStringLiteral("Inertia calculation failed: %1").arg(exception.what()));
+    }
+    return false;
+}
+
+bool SceneDocument::measureAssemblyMassTensor(const QStringList& bodyIds,
+                                               tensor::Report* result,QString* error) const {
+    if(!result){setError(error,"Assembly mass tensor output is null.");return false;}
+    if(bodyIds.isEmpty()){setError(error,"Choose at least one physical component.");return false;}
+    if(bodyIds.size()>1000){setError(error,"Too many components for one mass calculation.");return false;}
+    QSet<QString> seen;
+    std::vector<tensor::Report> bodies;
+    bodies.reserve(static_cast<size_t>(bodyIds.size()));
+    for(const QString& id:bodyIds){
+        if(seen.contains(id)){setError(error,"An assembly body was selected more than once.");return false;}
+        seen.insert(id);
+        const Part* part=find(id);
+        if(!part||part->shape.IsNull()||part->isSurfaceBody){
+            setError(error,QStringLiteral("Missing or non-solid assembly component: %1").arg(id));return false;
+        }
+        if(!std::isfinite(part->materialDensityKgPerM3)||part->materialDensityKgPerM3<=0.0){
+            setError(error,QStringLiteral("Assign material density before measuring assembly component: %1").arg(part->name));
+            return false;
+        }
+        tensor::Report body;
+        if(!measureMassTensor(id,part->materialDensityKgPerM3,&body,error))return false;
+        bodies.push_back(body);
+    }
+    std::string message;
+    if(!tensor::aggregate(bodies,result,&message)){
+        setError(error,QString::fromStdString(message));return false;
+    }
+    return true;
 }
 
 bool SceneDocument::measurePlanarSection(const QString& id,int normalAxis,double offset,
@@ -3465,18 +8551,28 @@ bool SceneDocument::filletEdge(const EdgeReference& reference, double radius, QS
 bool SceneDocument::filletAllEdges(const QString& id,double radius,QString* error) {
     if(!finitePositive(radius)){setError(error,"Fillet radius must be finite and positive.");return false;}
     const Part* part=find(id);if(!part){setError(error,"Object not found.");return false;}
+    if(part->hasLinkedBoolean||part->hasLinkedSketchExtrusion||part->hasInPlaceSketchFeature){setError(error,"Edit the source bodies of a linked Boolean result instead.");return false;}
+    if(!part->linkedFoldedFlatSourceId.isEmpty()){setError(error,"Associative flat blanks are read-only; edit the folded source.");return false;}
     if(rejectSurfaceOnlyInput(*part,QStringLiteral("Fillet"),error))return false;
     try{
         BRepFilletAPI_MakeFillet operation(part->shape);
-        int edgeCount=0;
-        for(TopExp_Explorer explorer(part->shape,TopAbs_EDGE);explorer.More();explorer.Next()){
-            operation.Add(radius,TopoDS::Edge(explorer.Current()));++edgeCount;
+        NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> uniqueEdges;
+        TopExp::MapShapes(part->shape,TopAbs_EDGE,uniqueEdges);
+        for(int index=1;index<=uniqueEdges.Extent();++index){
+            operation.Add(radius,TopoDS::Edge(uniqueEdges.FindKey(index)));
         }
-        if(edgeCount==0){setError(error,"The body has no edges to fillet.");return false;}
+        if(uniqueEdges.Extent()==0){setError(error,"The body has no edges to fillet.");return false;}
         operation.Build();
         if(!operation.IsDone()){setError(error,"The selected radius cannot be applied to every body edge.");return false;}
         const TopoDS_Shape result=operation.Shape();if(!validShape(result,error))return false;
-        checkpoint();for(Part& target:parts_)if(target.id==id){target.shape=result;target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);break;}
+        QVector<Part> candidate=parts_;
+        for(Part& target:candidate)if(target.id==id){
+            target.shape=result;
+            target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);
+            break;
+        }
+        if(!propagateLinkedBodies(&candidate,error))return false;
+        checkpoint();parts_=std::move(candidate);
         return true;
     }catch(const Standard_Failure& e){setError(error,QStringLiteral("CAD kernel error: %1").arg(e.what()));}
      catch(const std::exception& e){setError(error,QString::fromUtf8(e.what()));}
@@ -3497,6 +8593,8 @@ bool SceneDocument::prepareFillet(const QVector<EdgeReference>& references,doubl
     const EdgeReference& reference=references.first();
     const Part* part = find(reference.partId);
     if (!part) { setError(error, "The selected body no longer exists."); return false; }
+    if(part->hasLinkedBoolean||part->hasLinkedSketchExtrusion||part->hasInPlaceSketchFeature){setError(error,"Edit linked Boolean source bodies, not the derived result.");return false;}
+    if(!part->linkedFoldedFlatSourceId.isEmpty()){setError(error,"Associative flat blanks are read-only; edit the folded source.");return false;}
     if(rejectSurfaceOnlyInput(*part,QStringLiteral("Fillet"),error))return false;
     QVector<TopoDS_Edge> resolved;
     QSet<int> uniqueIndices;
@@ -3546,17 +8644,21 @@ FilletPreview SceneDocument::buildFilletPreview(const FilletCommand& command) {
 bool SceneDocument::commitFillet(const FilletCommand& command, const TopoDS_Shape& preview, QString* error) {
     const Part* part = find(command.edge.partId);
     if (!part) { setError(error, "The selected body no longer exists."); return false; }
+    if(part->hasLinkedBoolean||part->hasLinkedSketchExtrusion||part->hasInPlaceSketchFeature){setError(error,"Edit linked Boolean source bodies, not the derived result.");return false;}
+    if(!part->linkedFoldedFlatSourceId.isEmpty()){setError(error,"Associative flat blanks are read-only; edit the folded source.");return false;}
     if (part->geometryToken != command.edge.geometryToken) {
         setError(error, "The fillet preview is stale because the body geometry changed. Select the edge again.");
         return false;
     }
     if (!validShape(preview, error)) return false;
-    checkpoint();
-    for (auto& target : parts_) if (target.id == command.edge.partId) {
-        target.shape = preview;
-        target.geometryToken = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    QVector<Part> candidate=parts_;
+    for(Part& target:candidate)if(target.id==command.edge.partId){
+        target.shape=preview;
+        target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);
         break;
     }
+    if(!propagateLinkedBodies(&candidate,error))return false;
+    checkpoint();parts_=std::move(candidate);
     return true;
 }
 
@@ -3571,18 +8673,28 @@ bool SceneDocument::chamferEdge(const EdgeReference& reference, double distance,
 bool SceneDocument::chamferAllEdges(const QString& id,double distance,QString* error) {
     if(!finitePositive(distance)){setError(error,"Chamfer distance must be finite and positive.");return false;}
     const Part* part=find(id);if(!part){setError(error,"Object not found.");return false;}
+    if(part->hasLinkedBoolean||part->hasLinkedSketchExtrusion||part->hasInPlaceSketchFeature){setError(error,"Edit the source bodies of a linked Boolean result instead.");return false;}
+    if(!part->linkedFoldedFlatSourceId.isEmpty()){setError(error,"Associative flat blanks are read-only; edit the folded source.");return false;}
     if(rejectSurfaceOnlyInput(*part,QStringLiteral("Chamfer"),error))return false;
     try{
         BRepFilletAPI_MakeChamfer operation(part->shape);
-        int edgeCount=0;
-        for(TopExp_Explorer explorer(part->shape,TopAbs_EDGE);explorer.More();explorer.Next()){
-            operation.Add(distance,TopoDS::Edge(explorer.Current()));++edgeCount;
+        NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> uniqueEdges;
+        TopExp::MapShapes(part->shape,TopAbs_EDGE,uniqueEdges);
+        for(int index=1;index<=uniqueEdges.Extent();++index){
+            operation.Add(distance,TopoDS::Edge(uniqueEdges.FindKey(index)));
         }
-        if(edgeCount==0){setError(error,"The body has no edges to chamfer.");return false;}
+        if(uniqueEdges.Extent()==0){setError(error,"The body has no edges to chamfer.");return false;}
         operation.Build();
         if(!operation.IsDone()){setError(error,"The selected distance cannot be applied to every body edge.");return false;}
         const TopoDS_Shape result=operation.Shape();if(!validShape(result,error))return false;
-        checkpoint();for(Part& target:parts_)if(target.id==id){target.shape=result;target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);break;}
+        QVector<Part> candidate=parts_;
+        for(Part& target:candidate)if(target.id==id){
+            target.shape=result;
+            target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);
+            break;
+        }
+        if(!propagateLinkedBodies(&candidate,error))return false;
+        checkpoint();parts_=std::move(candidate);
         return true;
     }catch(const Standard_Failure& e){setError(error,QStringLiteral("CAD kernel error: %1").arg(e.what()));}
      catch(const std::exception& e){setError(error,QString::fromUtf8(e.what()));}
@@ -3637,6 +8749,8 @@ bool SceneDocument::prepareChamfer(const QVector<EdgeReference>& references,doub
     const EdgeReference& reference=references.first();
     const Part* part = find(reference.partId);
     if (!part) { setError(error, "The selected body no longer exists."); return false; }
+    if(part->hasLinkedBoolean||part->hasLinkedSketchExtrusion||part->hasInPlaceSketchFeature){setError(error,"Edit linked Boolean source bodies, not the derived result.");return false;}
+    if(!part->linkedFoldedFlatSourceId.isEmpty()){setError(error,"Associative flat blanks are read-only; edit the folded source.");return false;}
     QVector<TopoDS_Edge> resolved;QSet<int> uniqueIndices;
     for(const EdgeReference& selected:references){
         if(selected.partId!=reference.partId){setError(error,"Selected chamfer edges must belong to one body.");return false;}
@@ -3670,6 +8784,8 @@ bool SceneDocument::prepareAsymmetricChamfer(const EdgeReference& reference,doub
     }
     const Part* part=find(reference.partId);
     if (!part) { setError(error,"The selected body no longer exists."); return false; }
+    if(part->hasLinkedBoolean||part->hasLinkedSketchExtrusion||part->hasInPlaceSketchFeature){setError(error,"Edit linked Boolean source bodies, not the derived result.");return false;}
+    if(!part->linkedFoldedFlatSourceId.isEmpty()){setError(error,"Associative flat blanks are read-only; edit the folded source.");return false;}
     if (reference.geometryToken.isEmpty()||part->geometryToken!=reference.geometryToken) {
         setError(error,"The selected edge is stale because its body geometry has changed. Select the edge again."); return false;
     }
@@ -3715,17 +8831,21 @@ ChamferPreview SceneDocument::buildChamferPreview(const ChamferCommand& command)
 bool SceneDocument::commitChamfer(const ChamferCommand& command, const TopoDS_Shape& preview, QString* error) {
     const Part* part = find(command.edge.partId);
     if (!part) { setError(error, "The selected body no longer exists."); return false; }
+    if(part->hasLinkedBoolean||part->hasLinkedSketchExtrusion||part->hasInPlaceSketchFeature){setError(error,"Edit linked Boolean source bodies, not the derived result.");return false;}
+    if(!part->linkedFoldedFlatSourceId.isEmpty()){setError(error,"Associative flat blanks are read-only; edit the folded source.");return false;}
     if (part->geometryToken != command.edge.geometryToken) {
         setError(error, "The chamfer preview is stale because the body geometry changed. Select the edge again.");
         return false;
     }
     if (!validShape(preview, error)) return false;
-    checkpoint();
-    for (auto& target : parts_) if (target.id == command.edge.partId) {
-        target.shape = preview;
-        target.geometryToken = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    QVector<Part> candidate=parts_;
+    for(Part& target:candidate)if(target.id==command.edge.partId){
+        target.shape=preview;
+        target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);
         break;
     }
+    if(!propagateLinkedBodies(&candidate,error))return false;
+    checkpoint();parts_=std::move(candidate);
     return true;
 }
 
@@ -3773,7 +8893,7 @@ bool SceneDocument::prepareExtrusion(SketchProfile profile, double originX, doub
         setError(error, "The extrusion operation is not supported."); return false;
     }
     command->profile = profile;
-    command->sketchPlane = SketchPlane::XY;
+    command->sketchPlane = ExtrusionSketchPlane::XY;
     command->mode = mode;
     command->targetPartId = target ? target->id : QString();
     command->targetGeometryToken = target ? target->geometryToken : QString();
@@ -3835,7 +8955,7 @@ ExtrusionPreview SceneDocument::buildExtrusionPreview(const ExtrusionCommand& co
     ExtrusionPreview preview;
     try {
         gp_Dir customNormal(0,0,1),customU(1,0,0),customV(0,1,0);
-        if(command.sketchPlane==SketchPlane::Custom){
+        if(command.sketchPlane==ExtrusionSketchPlane::Custom){
             const double frameValues[]={command.customOriginX,command.customOriginY,command.customOriginZ,
                 command.customNormalX,command.customNormalY,command.customNormalZ,
                 command.customUAxisX,command.customUAxisY,command.customUAxisZ};
@@ -3866,8 +8986,8 @@ ExtrusionPreview SceneDocument::buildExtrusionPreview(const ExtrusionCommand& co
               std::floor(command.depth) != command.depth)) ||
             !std::isfinite(command.taperDegrees)||std::abs(command.taperDegrees)>45.0||
             (command.symmetric&&command.taperDegrees!=0.0)||
-            (command.sketchPlane!=SketchPlane::XY&&command.sketchPlane!=SketchPlane::XZ&&
-             command.sketchPlane!=SketchPlane::YZ&&command.sketchPlane!=SketchPlane::Custom)) {
+            (command.sketchPlane!=ExtrusionSketchPlane::XY&&command.sketchPlane!=ExtrusionSketchPlane::XZ&&
+             command.sketchPlane!=ExtrusionSketchPlane::YZ&&command.sketchPlane!=ExtrusionSketchPlane::Custom)) {
             preview.error = "The sketch extrusion parameters are invalid.";
             return preview;
         }
@@ -3884,7 +9004,7 @@ ExtrusionPreview SceneDocument::buildExtrusionPreview(const ExtrusionCommand& co
             double xmin=0,ymin=0,zmin=0,xmax=0,ymax=0,zmax=0;
             targetBounds.Get(xmin,ymin,zmin,xmax,ymax,zmax);
             double low=0,high=0,start=0,worldDirection=0;
-            if(command.sketchPlane==SketchPlane::Custom){
+            if(command.sketchPlane==ExtrusionSketchPlane::Custom){
                 low=std::numeric_limits<double>::infinity();high=-low;start=command.planeOffset;worldDirection=1;
                 const gp_Pnt origin(command.customOriginX,command.customOriginY,command.customOriginZ);
                 for(int x=0;x<2;++x)for(int y=0;y<2;++y)for(int z=0;z<2;++z){
@@ -3892,8 +9012,8 @@ ExtrusionPreview SceneDocument::buildExtrusionPreview(const ExtrusionCommand& co
                     const double projection=gp_Vec(origin,corner).Dot(gp_Vec(customNormal));
                     low=std::min(low,projection);high=std::max(high,projection);
                 }
-            }else if(command.sketchPlane==SketchPlane::XY){low=zmin;high=zmax;start=command.planeOffset;worldDirection=1;}
-            else if(command.sketchPlane==SketchPlane::XZ){low=ymin;high=ymax;start=-command.planeOffset;worldDirection=-1;}
+            }else if(command.sketchPlane==ExtrusionSketchPlane::XY){low=zmin;high=zmax;start=command.planeOffset;worldDirection=1;}
+            else if(command.sketchPlane==ExtrusionSketchPlane::XZ){low=ymin;high=ymax;start=-command.planeOffset;worldDirection=-1;}
             else {low=xmin;high=xmax;start=command.planeOffset;worldDirection=1;}
             worldDirection*=command.reverseDirection?-1.0:1.0;
             const double distance=worldDirection>0?high-start:start-low;
@@ -4032,16 +9152,16 @@ ExtrusionPreview SceneDocument::buildExtrusionPreview(const ExtrusionCommand& co
             offsetTransform.SetTranslation(gp_Vec(0,0,command.planeOffset));
             tool=BRepBuilderAPI_Transform(tool,offsetTransform,true).Shape();
         }
-        if(command.sketchPlane==SketchPlane::Custom){
+        if(command.sketchPlane==ExtrusionSketchPlane::Custom){
             const gp_Pnt frameOrigin(command.customOriginX,command.customOriginY,command.customOriginZ);
             gp_Trsf frameTransform;
             frameTransform.SetValues(customU.X(),customV.X(),customNormal.X(),frameOrigin.X(),
                                      customU.Y(),customV.Y(),customNormal.Y(),frameOrigin.Y(),
                                      customU.Z(),customV.Z(),customNormal.Z(),frameOrigin.Z());
             tool=BRepBuilderAPI_Transform(tool,frameTransform,true).Shape();
-        }else if(command.sketchPlane!=SketchPlane::XY){
+        }else if(command.sketchPlane!=ExtrusionSketchPlane::XY){
             gp_Trsf planeTransform;
-            if(command.sketchPlane==SketchPlane::XZ)
+            if(command.sketchPlane==ExtrusionSketchPlane::XZ)
                 planeTransform.SetRotation(gp_Ax1(gp_Pnt(0,0,0),gp_Dir(1,0,0)),std::numbers::pi/2.0);
             else
                 planeTransform.SetRotation(gp_Ax1(gp_Pnt(0,0,0),gp_Dir(1,1,1)),2.0*std::numbers::pi/3.0);
@@ -4308,6 +9428,9 @@ bool SceneDocument::rotateAboutAxis(const QString& id,double ox,double oy,double
     }
     const Part* source=find(id);
     if (!source) { setError(error,"Object not found."); return false; }
+    if(!source->linkedFoldedFlatSourceId.isEmpty()){
+        setError(error,"Linked folded flat blank geometry is read-only; edit the folded source.");return false;
+    }
     if (degrees==0.0) return true;
     if(!source->componentDefinitionId.isEmpty()){
         setError(error,"Use the occurrence orientation command for component placements.");return false;
@@ -4541,9 +9664,51 @@ bool SceneDocument::prepareHole(const QString& id, double x, double y, double en
     command->x=x;
     command->y=y;
     command->entryZ=entryZ;
+    command->inwardAxis=gp_Dir(0,0,-1); // Reset reused commands to the legacy world-axis default.
     command->diameter=diameter;
     command->depth=depth;
     command->throughAll=throughAll;
+    command->style=HoleStyle::Simple;
+    command->headDiameter=0.0;
+    command->headDepth=0.0;
+    command->sinkAngleDegrees=90.0;
+    return true;
+}
+
+bool SceneDocument::prepareHoleOnPlanarFace(const FaceReference& reference,double x,double y,double z,
+                                            double diameter,double depth,bool throughAll,
+                                            HoleCommand* command,QString* error) const {
+    const Part* part=find(reference.partId);
+    if(!part||reference.geometryToken.isEmpty()||part->geometryToken!=reference.geometryToken){
+        setError(error,"The selected face is stale or its body no longer exists. Select it again.");return false;
+    }
+    if(reference.faceIndex<1){setError(error,"Select a valid planar face.");return false;}
+    TopoDS_Face face;int index=0;
+    for(TopExp_Explorer faces(part->shape,TopAbs_FACE);faces.More();faces.Next())
+        if(++index==reference.faceIndex){face=TopoDS::Face(faces.Current());break;}
+    if(face.IsNull()||!BRepCheck_Analyzer(face).IsValid()){
+        setError(error,"The selected face is missing or invalid.");return false;
+    }
+    const BRepAdaptor_Surface surface(face);
+    if(surface.GetType()!=GeomAbs_Plane){
+        setError(error,"Face-normal drilling requires a planar face. Use a datum plane for curved surfaces.");return false;
+    }
+    const gp_Pln plane=surface.Plane();
+    const gp_Pnt requested(x,y,z);
+    if(!finiteOffset(x)||!finiteOffset(y)||!finiteOffset(z)||
+       plane.Distance(requested)>0.02){
+        setError(error,"The drill center must lie on the selected face plane (within 0.02 mm).");return false;
+    }
+    // Snap small UI round-off onto the analytic support plane.
+    const gp_Dir outward=plane.Axis().Direction();
+    const gp_Vec toPoint(plane.Location(),requested);
+    const double shift=toPoint.Dot(gp_Vec(outward));
+    const gp_Pnt entry=requested.Translated(gp_Vec(outward)*(-shift));
+    if(!prepareHole(reference.partId,entry.X(),entry.Y(),entry.Z(),diameter,depth,throughAll,command,error))
+        return false;
+    gp_Dir inward=outward;
+    if(face.Orientation()!=TopAbs_REVERSED)inward.Reverse();
+    command->inwardAxis=inward;
     return true;
 }
 
@@ -4583,29 +9748,44 @@ HolePreview SceneDocument::buildHolePreview(const HoleCommand& command) {
             preview.error="The hole command is incomplete or invalid.";
             return preview;
         }
-        double cutDepth=command.depth;
+        const gp_Pnt entry(command.x,command.y,command.entryZ);
+        const gp_Vec direction(command.inwardAxis);
         double margin=0.01;
-        if (command.throughAll) {
+        double startOffset=-margin;
+        double toolLength=command.depth+margin;
+        if(command.throughAll){
             Bnd_Box bounds;
             BRepBndLib::Add(command.sourceShape,bounds);
-            if (bounds.IsVoid()) { preview.error="The selected body has no measurable bounds."; return preview; }
+            if(bounds.IsVoid()){
+                preview.error="The selected body has no measurable bounds.";return preview;
+            }
             double xmin=0,ymin=0,zmin=0,xmax=0,ymax=0,zmax=0;
             bounds.Get(xmin,ymin,zmin,xmax,ymax,zmax);
-            margin=std::max(0.01,(zmax-zmin)*1e-4);
-            cutDepth=command.entryZ-zmin+2.0*margin;
-            if (!finitePositive(cutDepth)) { preview.error="The hole entry point is below the selected body's lower bound."; return preview; }
+            directional_holes::Span span;
+            if(!directional_holes::throughAllSpan(
+                {xmin,ymin,zmin,xmax,ymax,zmax},
+                {entry.X(),entry.Y(),entry.Z()},
+                {direction.X(),direction.Y(),direction.Z()},&span)){
+                preview.error="Could not establish a finite through-all depth along the selected drill axis.";
+                return preview;
+            }
+            startOffset=span.start;
+            toolLength=span.length;
         }
-        const double startZ=command.entryZ+margin;
-        const double toolLength=cutDepth+margin;
-        if (!finiteOffset(startZ) || !finitePositive(toolLength)) { preview.error="Hole cutter dimensions are out of range."; return preview; }
-        const gp_Ax2 axis(gp_Pnt(command.x,command.y,startZ),gp_Dir(0,0,-1));
+        const gp_Pnt start=entry.Translated(direction*startOffset);
+        if(!std::isfinite(start.X())||!std::isfinite(start.Y())||!std::isfinite(start.Z())||
+           !std::isfinite(toolLength)||toolLength<=0.0){
+            preview.error="Hole cutter dimensions are out of range.";return preview;
+        }
+        const gp_Ax2 axis(start,command.inwardAxis);
         const TopoDS_Shape cutter=BRepPrimAPI_MakeCylinder(axis,command.diameter/2.0,toolLength).Shape();
         BRepAlgoAPI_Cut operation(command.sourceShape,cutter);
         operation.Build();
         if (!operation.IsDone()) { preview.error="The kernel could not cut the requested hole."; return preview; }
         preview.shape=operation.Shape();
+        const gp_Ax2 headAxis(entry.Translated(direction*(-margin)),command.inwardAxis);
         if(command.style==HoleStyle::Counterbore){
-            const TopoDS_Shape headCutter=BRepPrimAPI_MakeCylinder(axis,command.headDiameter/2.0,command.headDepth+margin).Shape();
+            const TopoDS_Shape headCutter=BRepPrimAPI_MakeCylinder(headAxis,command.headDiameter/2.0,command.headDepth+margin).Shape();
             BRepAlgoAPI_Cut headCut(preview.shape,headCutter);headCut.Build();
             if(!headCut.IsDone()){preview.shape=TopoDS_Shape();preview.error="The counterbore recess could not be cut.";return preview;}
             preview.shape=headCut.Shape();
@@ -4614,7 +9794,7 @@ HolePreview SceneDocument::buildHolePreview(const HoleCommand& command) {
             if(!finitePositive(sinkDepth)){preview.shape=TopoDS_Shape();preview.error="The countersink depth is invalid.";return preview;}
             const double drillRadius=command.diameter/2.0;
             const double radialSlope=(command.headDiameter/2.0-drillRadius)/sinkDepth;
-            const TopoDS_Shape sinkCutter=BRepPrimAPI_MakeCone(axis,command.headDiameter/2.0+radialSlope*margin,
+            const TopoDS_Shape sinkCutter=BRepPrimAPI_MakeCone(headAxis,command.headDiameter/2.0+radialSlope*margin,
                                                               drillRadius,sinkDepth+margin).Shape();
             BRepAlgoAPI_Cut sinkCut(preview.shape,sinkCutter);sinkCut.Build();
             if(!sinkCut.IsDone()){preview.shape=TopoDS_Shape();preview.error="The countersink recess could not be cut.";return preview;}
@@ -4640,13 +9820,23 @@ bool SceneDocument::commitHole(const HoleCommand& command, const TopoDS_Shape& p
     if (part->geometryToken!=command.geometryToken) {
         setError(error,"The hole preview is stale because the body geometry changed. Select the body again."); return false;
     }
+    if(part->hasLinkedBoolean||part->hasLinkedSketchExtrusion||part->hasInPlaceSketchFeature||
+       !part->linkedFoldedFlatSourceId.isEmpty()){
+        setError(error,"The selected body is an associative result. Edit its source bodies instead.");
+        return false;
+    }
     if (!validShape(preview,error)) return false;
-    checkpoint();
-    for (auto& target:parts_) if (target.id==command.partId) {
+    QVector<Part> candidate=parts_;
+    for(Part& target:candidate)if(target.id==command.partId){
         target.shape=preview;
         target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);
         break;
     }
+    // All dependent linked Boolean/sketch bodies must regenerate in the same
+    // transaction. If any descendant fails, preserve the original geometry,
+    // history, and undo stack rather than leaving silently stale derived parts.
+    if(!propagateLinkedBodies(&candidate,error))return false;
+    checkpoint();parts_=std::move(candidate);
     return true;
 }
 
@@ -4715,18 +9905,67 @@ DovetailGroovePreview SceneDocument::buildDovetailGroovePreview(const DovetailGr
     return preview;
 }
 
+bool SceneDocument::commitMachiningShape(const QString& bodyId,
+                                         const QString& expectedRevision,
+                                         const TopoDS_Shape& result,QString* error){
+    const Part* original=find(bodyId);
+    if(!original){setError(error,"The machining source body no longer exists.");return false;}
+    if(expectedRevision.isEmpty()||original->geometryToken!=expectedRevision){
+        setError(error,"The machining result is stale: the source geometry changed.");return false;
+    }
+    // Derived solids must be rebuilt through their definitions. A direct
+    // replacement would break upstream lineage and its downstream drawing links.
+    if(original->hasLinkedBoolean||original->hasLinkedSketchExtrusion||
+       original->hasInPlaceSketchFeature||!original->linkedFoldedFlatSourceId.isEmpty()){
+        setError(error,"Edit the linked source or folded body, not its associative result.");return false;
+    }
+    try{
+    if(original->shape.IsNull()){
+        setError(error,"The source machining solid is missing.");return false;
+    }
+    if(!validShape(result,error))return false;
+    // A milling/drilling cut must actually remove material; a mechanically
+    // valid but unchanged or material-adding solid is not a valid cut result.
+    GProp_GProps sourceProps,resultProps;
+    BRepGProp::VolumeProperties(original->shape,sourceProps);
+    BRepGProp::VolumeProperties(result,resultProps);
+    const double sourceVolume=sourceProps.Mass(),resultVolume=resultProps.Mass();
+    if(!std::isfinite(sourceVolume)||sourceVolume<=1e-12||
+       !std::isfinite(resultVolume)||resultVolume<=1e-12||
+       sourceVolume-resultVolume<=std::max(1e-9,sourceVolume*1e-12)){
+        setError(error,"Machining must remove a measurable amount of material from the source solid.");
+        return false;
+    }
+    QVector<Part> staged=parts_;
+    bool matched=false;
+    for(Part& item:staged)if(item.id==bodyId){
+        item.shape=result;
+        item.geometryToken=generatedId();
+        matched=true;
+        break;
+    }
+    if(!matched){setError(error,"Machining target vanished during staging.");return false;}
+    // Reject a cutter edit if any linked dependent fails to rebuild. Neither
+    // geometry, drawing-source revisions nor undo/redo are touched on failure.
+    if(!propagateLinkedBodies(&staged,error))return false;
+    checkpoint();
+    parts_=std::move(staged);
+    if(error)error->clear();
+    return true;
+    }catch(const Standard_Failure& failure){
+        setError(error,QStringLiteral("Machining regeneration failed in CAD kernel: %1").arg(failure.what()));
+    }catch(const std::exception& failure){
+        setError(error,QString::fromUtf8(failure.what()));
+    }
+    return false;
+}
+
 bool SceneDocument::commitDovetailGroove(const DovetailGrooveCommand& command,const TopoDS_Shape& preview,QString* error){
     const Part* part=find(command.partId);
     if(!part){setError(error,"The selected body no longer exists.");return false;}
     if(part->geometryToken!=command.geometryToken){setError(error,"The dovetail-groove preview is stale because the body geometry changed. Select the body again.");return false;}
     if(!validShape(preview,error))return false;
-    checkpoint();
-    for(Part& target:parts_)if(target.id==command.partId){
-        target.shape=preview;
-        target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);
-        break;
-    }
-    return true;
+    return commitMachiningShape(command.partId,command.geometryToken,preview,error);
 }
 
 bool SceneDocument::prepareTSlotGroove(const QString& id,double centerX,double centerY,double entryZ,
@@ -4806,13 +10045,7 @@ bool SceneDocument::commitTSlotGroove(const TSlotGrooveCommand& command,const To
     if(!part){setError(error,"The selected body no longer exists.");return false;}
     if(part->geometryToken!=command.geometryToken){setError(error,"The T-slot preview is stale because the body geometry changed. Select the body again.");return false;}
     if(!validShape(preview,error))return false;
-    checkpoint();
-    for(Part& target:parts_)if(target.id==command.partId){
-        target.shape=preview;
-        target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);
-        break;
-    }
-    return true;
+    return commitMachiningShape(command.partId,command.geometryToken,preview,error);
 }
 
 bool SceneDocument::prepareRoundedSlot(const QString& id,double centerX,double centerY,double entryZ,
@@ -4891,11 +10124,7 @@ bool SceneDocument::commitRoundedSlot(const RoundedSlotCommand& command,const To
     if(!part){setError(error,"The selected body no longer exists.");return false;}
     if(part->geometryToken!=command.geometryToken){setError(error,"The rounded-slot preview is stale because the body geometry changed. Select the body again.");return false;}
     if(!validShape(preview,error))return false;
-    checkpoint();
-    for(Part& target:parts_)if(target.id==command.partId){
-        target.shape=preview;target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);break;
-    }
-    return true;
+    return commitMachiningShape(command.partId,command.geometryToken,preview,error);
 }
 
 bool SceneDocument::prepareKeyholeSlot(const QString& id,double centerX,double centerY,double entryZ,
@@ -4965,11 +10194,7 @@ bool SceneDocument::commitKeyholeSlot(const KeyholeSlotCommand& command,const To
     if(!part){setError(error,"The selected body no longer exists.");return false;}
     if(part->geometryToken!=command.geometryToken){setError(error,"The keyhole-slot preview is stale because the body geometry changed. Select the body again.");return false;}
     if(!validShape(preview,error))return false;
-    checkpoint();
-    for(Part& target:parts_)if(target.id==command.partId){
-        target.shape=preview;target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);break;
-    }
-    return true;
+    return commitMachiningShape(command.partId,command.geometryToken,preview,error);
 }
 
 bool SceneDocument::prepareRoundedSlotPattern(const QString& id,double centerX,double centerY,double entryZ,
@@ -5035,11 +10260,7 @@ bool SceneDocument::commitRoundedSlotPattern(const RoundedSlotPatternCommand& co
     if(!part){setError(error,"The selected body no longer exists.");return false;}
     if(part->geometryToken!=command.geometryToken){setError(error,"The rounded-slot pattern preview is stale because the body geometry changed. Select the body again.");return false;}
     if(!validShape(preview,error))return false;
-    checkpoint();
-    for(Part& target:parts_)if(target.id==command.partId){
-        target.shape=preview;target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);break;
-    }
-    return true;
+    return commitMachiningShape(command.partId,command.geometryToken,preview,error);
 }
 
 bool SceneDocument::holePattern(const QString& id,double x,double y,double entryZ,double diameter,double depth,bool throughAll,
@@ -5065,9 +10286,7 @@ bool SceneDocument::holePattern(const QString& id,double x,double y,double entry
         working=preview.shape;
     }
     if(!validShape(working,error))return false;
-    checkpoint();
-    for(Part& target:parts_)if(target.id==id){target.shape=working;target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);break;}
-    return true;
+    return commitMachiningShape(id,sourceToken,working,error);
 }
 
 bool SceneDocument::circularHolePattern(const QString& id,double centerX,double centerY,double entryZ,double boltCircleRadius,
@@ -5097,9 +10316,7 @@ bool SceneDocument::circularHolePattern(const QString& id,double centerX,double 
         working=preview.shape;
     }
     if(!validShape(working,error))return false;
-    checkpoint();
-    for(Part& target:parts_)if(target.id==id){target.shape=working;target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);break;}
-    return true;
+    return commitMachiningShape(id,geometryToken,working,error);
 }
 
 bool SceneDocument::circularCountersinkPattern(const QString& id,double centerX,double centerY,double entryZ,double boltCircleRadius,
@@ -5132,9 +10349,7 @@ bool SceneDocument::circularCountersinkPattern(const QString& id,double centerX,
         working=preview.shape;
     }
     if(!validShape(working,error))return false;
-    checkpoint();
-    for(Part& target:parts_)if(target.id==id){target.shape=working;target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);break;}
-    return true;
+    return commitMachiningShape(id,geometryToken,working,error);
 }
 
 bool SceneDocument::circularCounterborePattern(const QString& id,double centerX,double centerY,double entryZ,double boltCircleRadius,
@@ -5166,9 +10381,7 @@ bool SceneDocument::circularCounterborePattern(const QString& id,double centerX,
         working=preview.shape;
     }
     if(!validShape(working,error))return false;
-    checkpoint();
-    for(Part& target:parts_)if(target.id==id){target.shape=working;target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);break;}
-    return true;
+    return commitMachiningShape(id,geometryToken,working,error);
 }
 
 bool SceneDocument::linearCounterborePattern(const QString& id,double centerX,double centerY,double entryZ,double diameter,
@@ -5198,9 +10411,7 @@ bool SceneDocument::linearCounterborePattern(const QString& id,double centerX,do
         working=preview.shape;
     }
     if(!validShape(working,error))return false;
-    checkpoint();
-    for(Part& target:parts_)if(target.id==id){target.shape=working;target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);break;}
-    return true;
+    return commitMachiningShape(id,token,working,error);
 }
 
 bool SceneDocument::linearCountersinkPattern(const QString& id,double centerX,double centerY,double entryZ,double diameter,
@@ -5230,9 +10441,7 @@ bool SceneDocument::linearCountersinkPattern(const QString& id,double centerX,do
         working=preview.shape;
     }
     if(!validShape(working,error))return false;
-    checkpoint();
-    for(Part& target:parts_)if(target.id==id){target.shape=working;target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);break;}
-    return true;
+    return commitMachiningShape(id,token,working,error);
 }
 
 bool SceneDocument::linearKeyholeSlotPattern(const QString& id,double centerX,double centerY,double entryZ,double headDiameter,
@@ -5261,9 +10470,7 @@ bool SceneDocument::linearKeyholeSlotPattern(const QString& id,double centerX,do
         working=preview.shape;
     }
     if(!validShape(working,error))return false;
-    checkpoint();
-    for(Part& target:parts_)if(target.id==id){target.shape=working;target.geometryToken=QUuid::createUuid().toString(QUuid::WithoutBraces);break;}
-    return true;
+    return commitMachiningShape(id,token,working,error);
 }
 
 bool SceneDocument::circularPattern(const QString& id, Axis axis, double centerU, double centerV,
@@ -5499,6 +10706,40 @@ bool SceneDocument::rename(const QString& id, const QString& name, QString* erro
     setError(error, "Object not found."); return false;
 }
 
+bool SceneDocument::renameBatch(const QMap<QString,QString>& desired, QString* error) {
+    if(desired.isEmpty()) { setError(error,"Select at least one body to rename."); return false; }
+    // Validate the final state across ALL bodies, including untouched bodies.
+    // This permits intentional swaps A->B and B->A while rejecting collisions.
+    QSet<QString> finalNames;
+    bool changed=false;
+    for(const auto& part:parts_) {
+        const auto proposal=desired.constFind(part.id);
+        const QString candidate=proposal==desired.cend()?part.name:proposal.value().trimmed();
+        if(candidate.isEmpty()||candidate.size()>120||candidate.contains('\n')||candidate.contains('\r')){
+            setError(error,QStringLiteral("Invalid single-line body name for %1 (maximum 120 characters).").arg(part.id));
+            return false;
+        }
+        const QString identity=candidate.toCaseFolded();
+        if(finalNames.contains(identity)){
+            setError(error,QStringLiteral("Duplicate final body name: %1").arg(candidate));return false;
+        }
+        finalNames.insert(identity);
+        if(proposal!=desired.cend()&&candidate!=part.name)changed=true;
+    }
+    for(auto it=desired.cbegin();it!=desired.cend();++it){
+        if(!find(it.key())){
+            setError(error,QStringLiteral("Selected body %1 no longer exists.").arg(it.key()));return false;
+        }
+    }
+    if(!changed)return true;
+    checkpoint();
+    for(auto& part:parts_){
+        const auto proposal=desired.constFind(part.id);
+        if(proposal!=desired.cend())part.name=proposal.value().trimmed();
+    }
+    return true;
+}
+
 bool SceneDocument::setVisibility(const QString& id, bool visible, QString* error) {
     for (const auto& part : parts_) if (part.id == id) {
         if (part.visible == visible) return true;
@@ -5507,6 +10748,44 @@ bool SceneDocument::setVisibility(const QString& id, bool visible, QString* erro
         return true;
     }
     setError(error, "Object not found."); return false;
+}
+
+bool SceneDocument::setVisibilityBatch(const QMap<QString,bool>& desired, QString* error) {
+    if(desired.isEmpty()) { setError(error,"Choose at least one body visibility change."); return false; }
+    // Validate the ENTIRE request before any document checkpoint. Never let a
+    // missing ID produce a partially hidden model or a misleading undo entry.
+    bool changed=false;
+    for(auto it=desired.cbegin();it!=desired.cend();++it){
+        const Part* part=find(it.key());
+        if(!part){setError(error,QStringLiteral("Body %1 no longer exists.").arg(it.key()));return false;}
+        changed=changed || part->visible!=it.value();
+    }
+    if(!changed)return true;
+    checkpoint();
+    for(Part& part:parts_){
+        auto it=desired.constFind(part.id);
+        if(it!=desired.cend())part.visible=it.value();
+    }
+    return true;
+}
+
+bool SceneDocument::isolateBodies(const QStringList& selectedIds, QString* error) {
+    QSet<QString> selected;
+    for(const QString& id:selectedIds)selected.insert(id);
+    if(selected.isEmpty()) {setError(error,"Select at least one body to isolate.");return false;}
+    for(const QString& id:selected)if(!find(id)){
+        setError(error,QStringLiteral("Selected body %1 no longer exists.").arg(id));return false;
+    }
+    QMap<QString,bool> desired;
+    for(const Part& part:parts_)desired.insert(part.id,selected.contains(part.id));
+    return setVisibilityBatch(desired,error);
+}
+
+bool SceneDocument::showAllBodies(QString* error) {
+    QMap<QString,bool> desired;
+    for(const Part& part:parts_)desired.insert(part.id,true);
+    if(desired.isEmpty())return true;
+    return setVisibilityBatch(desired,error);
 }
 
 bool SceneDocument::setColor(const QString& id, const QString& color, QString* error) {
@@ -5597,37 +10876,116 @@ bool SceneDocument::eraseMany(const QStringList& ids, QString* error) {
     for (const auto& id : ids) requested.insert(id);
     if (requested.isEmpty()) return true;
     for (const auto& id : requested) if (!find(id)) { setError(error, "One or more selected bodies no longer exist."); return false; }
+    for(const Part& part:parts_)if(!part.linkedFoldedFlatSourceId.isEmpty()&&
+       !requested.contains(part.id)&&requested.contains(part.linkedFoldedFlatSourceId)){
+        setError(error,"A folded body has an associative flat blank. Delete the dependent blank too.");return false;
+    }
+    for(const Part& part:parts_)if(part.hasLinkedBoolean&&!requested.contains(part.id)&&
+       (requested.contains(part.linkedPrimaryId)||requested.contains(part.linkedToolId))){
+        setError(error,"A selected body has a linked Boolean dependent. Include that dependent in the delete selection.");return false;
+    }
+    for(const Part& part:parts_)if(part.hasInPlaceSketchFeature&&!requested.contains(part.id)&&
+       (requested.contains(part.inPlaceSketchSourceId)||
+        (part.hasInPlaceSketchFollowUp&&requested.contains(part.inPlaceFollowSourceId))||
+        std::any_of(part.extraInPlaceSketchStages.begin(),part.extraInPlaceSketchStages.end(),
+                    [&](const auto& stage){return requested.contains(stage.sourceId);}))){
+        setError(error,"A selected body is the source of an in-place sketch feature. Include the target in the deletion.");return false;
+    }
+    for(const Part& part:parts_)if(part.hasInterleavedHistory&&!requested.contains(part.id)&&
+       std::any_of(part.interleavedSteps.begin(),part.interleavedSteps.end(),
+                   [&](const auto& step){return step.kind!=QStringLiteral("Shape")&&
+                       requested.contains(step.sketchSourceId);})){
+        setError(error,"A selected body drives an interleaved feature history. Include the dependent target.");return false;
+    }
+    for(const Part& part:parts_)if(part.hasLinkedSketchExtrusion&&!requested.contains(part.id)&&
+       requested.contains(part.linkedSketchSourceId)){
+        setError(error,"A selected body is the source of a linked sketch extrusion. Include its dependent in the deletion.");return false;
+    }
     for(const Part& part:parts_)if(!requested.contains(part.id)&&requested.contains(part.assemblyJointParentBodyId)){
         setError(error,"A selected occurrence is the parent of a joint. Include its jointed descendants in the delete selection.");return false;
     }
+    if(!liveRigidMateFixed_.isEmpty()){
+        QSet<QString> endpoints{liveRigidMateFixed_};
+        for(const auto& link:liveRigidMates_){
+            endpoints.insert(link.parentBodyId);endpoints.insert(link.childBodyId);
+        }
+        bool any=false,all=true;
+        for(const QString& id:endpoints){
+            any=any||requested.contains(id);all=all&&requested.contains(id);
+        }
+        if(any&&!all){
+            setError(error,"A selected occurrence belongs to a saved live rigid mate network. Remove its mate network first, or delete all its member occurrences.");return false;
+        }
+    }
+    if(!liveArticulatedFixed_.isEmpty()){
+        QSet<QString> members{liveArticulatedFixed_};
+        for(const auto& joint:liveArticulatedJoints_){
+            members.insert(joint.parentBodyId);members.insert(joint.childBodyId);
+        }
+        bool any=false,all=true;
+        for(const auto& id:members){any=any||requested.contains(id);all=all&&requested.contains(id);}
+        if(any&&!all){
+            setError(error,"A selected occurrence belongs to a saved live articulated mechanism. Remove that network first or delete every member.");return false;
+        }
+    }
     checkpoint();
     for (int i = parts_.size()-1; i >= 0; --i) if (requested.contains(parts_[i].id)) parts_.removeAt(i);
+    if(!liveRigidMateFixed_.isEmpty()&&requested.contains(liveRigidMateFixed_)){
+        liveRigidMateFixed_.clear();liveRigidMates_.clear();
+    }
+    if(!liveArticulatedFixed_.isEmpty()&&requested.contains(liveArticulatedFixed_)){
+        liveArticulatedFixed_.clear();liveArticulatedJoints_.clear();
+        liveArticulatedReferencePoses_.clear();
+    }
     return true;
 }
 
-void SceneDocument::clear() { if (!parts_.isEmpty()) { checkpoint(); parts_.clear(); } }
+void SceneDocument::clear() {
+    if(!parts_.isEmpty()||!liveRigidMateFixed_.isEmpty()||!liveArticulatedFixed_.isEmpty()){
+        checkpoint();parts_.clear();liveRigidMateFixed_.clear();liveRigidMates_.clear();
+        liveArticulatedFixed_.clear();liveArticulatedJoints_.clear();
+        liveArticulatedReferencePoses_.clear();
+    }
+}
 void SceneDocument::newDocument() {
     parts_.clear(); undo_.clear(); redo_.clear(); path_.clear();
     drawingReadinessPolicy_={};
+    liveRigidMateFixed_.clear();liveRigidMates_.clear();
+    liveArticulatedFixed_.clear();liveArticulatedJoints_.clear();
+    liveArticulatedReferencePoses_.clear();
     revision_ = 0; savedRevision_ = 0; nextRevision_ = 1;
 }
 bool SceneDocument::undo() {
     if (undo_.isEmpty()) return false;
     QVector<Part> snapshotParts = parts_;
     for (auto& part : snapshotParts) part.shape = BRepBuilderAPI_Copy(part.shape).Shape();
-    redo_.append({std::move(snapshotParts),drawingReadinessPolicy_,revision_});
+    redo_.append({std::move(snapshotParts),drawingReadinessPolicy_,revision_,
+                  liveRigidMateFixed_,liveRigidMates_,
+                  liveArticulatedFixed_,liveArticulatedJoints_,liveArticulatedReferencePoses_});
     const Snapshot previous = undo_.takeLast();
-    parts_ = previous.parts; drawingReadinessPolicy_=previous.drawingReadinessPolicy; revision_ = previous.revision;
+    parts_ = previous.parts; drawingReadinessPolicy_=previous.drawingReadinessPolicy;
+    liveRigidMateFixed_=previous.liveRigidMateFixed;liveRigidMates_=previous.liveRigidMates;
+    liveArticulatedFixed_=previous.liveArticulatedFixed;
+    liveArticulatedJoints_=previous.liveArticulatedJoints;
+    liveArticulatedReferencePoses_=previous.liveArticulatedReferencePoses;
+    revision_ = previous.revision;
     return true;
 }
 bool SceneDocument::redo() {
     if (redo_.isEmpty()) return false;
     QVector<Part> snapshotParts = parts_;
     for (auto& part : snapshotParts) part.shape = BRepBuilderAPI_Copy(part.shape).Shape();
-    undo_.append({std::move(snapshotParts),drawingReadinessPolicy_,revision_});
+    undo_.append({std::move(snapshotParts),drawingReadinessPolicy_,revision_,
+                  liveRigidMateFixed_,liveRigidMates_,
+                  liveArticulatedFixed_,liveArticulatedJoints_,liveArticulatedReferencePoses_});
     if (undo_.size() > kHistoryDepth) undo_.removeFirst();
     const Snapshot next = redo_.takeLast();
-    parts_ = next.parts; drawingReadinessPolicy_=next.drawingReadinessPolicy; revision_ = next.revision;
+    parts_ = next.parts; drawingReadinessPolicy_=next.drawingReadinessPolicy;
+    liveRigidMateFixed_=next.liveRigidMateFixed;liveRigidMates_=next.liveRigidMates;
+    liveArticulatedFixed_=next.liveArticulatedFixed;
+    liveArticulatedJoints_=next.liveArticulatedJoints;
+    liveArticulatedReferencePoses_=next.liveArticulatedReferencePoses;
+    revision_ = next.revision;
     return true;
 }
 
@@ -5640,6 +10998,136 @@ bool SceneDocument::saveAs(const QString& path, QString* error) {
             item.insert("id",part.id); item.insert("name",part.name);
             item.insert("brep",brepToText(part.shape));
             if(part.isSurfaceBody)item.insert("body_type",QStringLiteral("surface"));
+            if(part.hasLinkedBoolean){
+                QJsonObject linked;
+                linked.insert("primary",part.linkedPrimaryId);
+                linked.insert("tool",part.linkedToolId);
+                linked.insert("operation",part.linkedOperation);
+                linked.insert("primary_token",part.linkedPrimaryToken);
+                linked.insert("tool_token",part.linkedToolToken);
+                item.insert("linked_boolean",linked);
+            }
+            if(part.hasLinkedSketchExtrusion){
+                QJsonObject link;
+                link.insert("source",part.linkedSketchSourceId);
+                link.insert("source_token",part.linkedSketchSourceToken);
+                link.insert("depth_mm",part.linkedSketchDepthMm);
+                link.insert("normal_offset_mm",part.linkedSketchOffsetMm);
+                item.insert("linked_sketch_extrusion",link);
+            }
+            if(part.hasInPlaceSketchFeature){
+                QJsonObject link;
+                link.insert("source",part.inPlaceSketchSourceId);
+                link.insert("source_token",part.inPlaceSketchSourceToken);
+                link.insert("operation",part.inPlaceSketchOperation);
+                link.insert("depth_mm",part.inPlaceSketchDepthMm);
+                link.insert("normal_offset_mm",part.inPlaceSketchOffsetMm);
+                link.insert("base_brep",brepToText(part.inPlaceSketchBase));
+                if(part.hasInPlaceSketchFollowUp){
+                    QJsonObject second;
+                    second.insert("source",part.inPlaceFollowSourceId);
+                    second.insert("source_token",part.inPlaceFollowSourceToken);
+                    second.insert("operation",part.inPlaceFollowOperation);
+                    second.insert("depth_mm",part.inPlaceFollowDepthMm);
+                    second.insert("normal_offset_mm",part.inPlaceFollowOffsetMm);
+                    link.insert("follow_up",second);
+                }
+                if(!part.extraInPlaceSketchStages.isEmpty()){
+                    QJsonArray extra;
+                    for(const auto& stage:part.extraInPlaceSketchStages){
+                        QJsonObject record;
+                        record.insert("source",stage.sourceId);
+                        record.insert("source_token",stage.sourceToken);
+                        record.insert("operation",stage.operation);
+                        record.insert("depth_mm",stage.depthMm);
+                        record.insert("normal_offset_mm",stage.offsetMm);
+                        extra.append(record);
+                    }
+                    link.insert("extra_stages",extra);
+                }
+                // Detect accidental edits of serialized feature parameters before
+                // replaying geometry. This is a consistency checksum, not an
+                // authenticity signature. Older project files remain readable.
+                const QByteArray linkedBytes=QJsonDocument(link).toJson(QJsonDocument::Compact);
+                link.insert("integrity_sha256",QString::fromLatin1(
+                    QCryptographicHash::hash(linkedBytes,QCryptographicHash::Sha256).toHex()));
+                item.insert("in_place_sketch_feature",link);
+            }
+            if(part.hasInterleavedHistory){
+                QJsonObject record;
+                const bool branched=std::any_of(part.interleavedSteps.cbegin(),part.interleavedSteps.cend(),
+                    [](const InterleavedHistoryStep& step){return !step.inputs.isEmpty();});
+                const bool topologyLinks=std::any_of(part.interleavedSteps.cbegin(),part.interleavedSteps.cend(),
+                    [](const InterleavedHistoryStep& step){return !step.referenceSourceId.isEmpty();});
+                const bool nestedOccurrences=std::any_of(part.interleavedSteps.cbegin(),part.interleavedSteps.cend(),
+                    [](const InterleavedHistoryStep& step){return !step.referencePatternOccurrences.isEmpty();});
+                const bool patternOccurrences=std::any_of(part.interleavedSteps.cbegin(),part.interleavedSteps.cend(),
+                    [](const InterleavedHistoryStep& step){return step.referencePatternOccurrence!=0;});
+                record.insert("type",nestedOccurrences?QStringLiteral("dag-interleaved-history-v5"):
+                    patternOccurrences?QStringLiteral("dag-interleaved-history-v4"):
+                    topologyLinks?QStringLiteral("dag-interleaved-history-v3"):
+                    branched?QStringLiteral("dag-interleaved-history-v2"):
+                    QStringLiteral("linear-interleaved-history-v1"));
+                record.insert("base_brep",brepToText(part.interleavedBase));
+                record.insert("geometry_token",part.interleavedGeometryToken);
+                QJsonArray entries;
+                for(int i=0;i<part.interleavedSteps.size();++i){
+                    const auto& step=part.interleavedSteps[i];
+                    QJsonObject itemStep;itemStep.insert("id",step.id);itemStep.insert("kind",step.kind);
+                    if(!step.inputs.isEmpty()){
+                        QJsonArray links;for(const QString& link:step.inputs)links.append(link);
+                        itemStep.insert("inputs",links);
+                    }
+                    if(step.kind==QStringLiteral("Shape")){
+                        if(!step.referenceSourceId.isEmpty())
+                            itemStep.insert("reference_source",step.referenceSourceId);
+                        if(step.referencePatternOccurrence!=0)
+                            itemStep.insert("reference_occurrence",step.referencePatternOccurrence);
+                        if(!step.referencePatternOccurrences.isEmpty()){
+                            QJsonObject occurrences;
+                            for(auto it=step.referencePatternOccurrences.cbegin();
+                                it!=step.referencePatternOccurrences.cend();++it)
+                                occurrences.insert(it.key(),it.value());
+                            itemStep.insert("reference_occurrences",occurrences);
+                        }
+                        itemStep.insert("operation",step.feature.type);
+                        itemStep.insert("suppressed",step.feature.suppressed);
+                        QJsonObject params;
+                        for(auto it=step.feature.parameters.cbegin();it!=step.feature.parameters.cend();++it)
+                            params.insert(it.key(),it.value());
+                        itemStep.insert("parameters",params);
+                    }else{
+                        itemStep.insert("source",step.sketchSourceId);
+                        itemStep.insert("source_token",part.interleavedSourceTokens.value(i));
+                        itemStep.insert("depth_mm",step.depthMm);
+                        itemStep.insert("normal_offset_mm",step.offsetMm);
+                    }
+                    entries.append(itemStep);
+                }
+                record.insert("steps",entries);item.insert("interleaved_history",record);
+            }
+            if(part.hasShapeFeatureTree){
+                QJsonObject tree;
+                tree.insert("type",QStringLiteral("shape-independent-modifiers-v1"));
+                tree.insert("base_brep",brepToText(part.shapeFeatureBase));
+                tree.insert("geometry_token",part.shapeFeatureGeometryToken);
+                QJsonArray nodes;
+                for(const ShapeFeatureNode& node:part.shapeFeatureNodes){
+                    QJsonObject record;record.insert("id",node.id);
+                    record.insert("operation",node.type);record.insert("suppressed",node.suppressed);
+                    QJsonObject parameters;
+                    for(auto it=node.parameters.cbegin();it!=node.parameters.cend();++it)parameters.insert(it.key(),it.value());
+                    record.insert("parameters",parameters);
+                    if(!node.inputs.isEmpty()){
+                        QJsonArray sources;for(const QString& id:node.inputs)sources.append(id);
+                        record.insert("inputs",sources);
+                    }
+                    nodes.append(record);
+                }
+                tree.insert("nodes",nodes);
+                item.insert("shape_feature_tree",tree);
+            }
+
             item.insert("visible",part.visible); item.insert("color",part.color);
             item.insert("material",part.materialName);
             item.insert("density_kg_per_m3",part.materialDensityKgPerM3);
@@ -5657,6 +11145,24 @@ bool SceneDocument::saveAs(const QString& path, QString* error) {
             item.insert("supplier",part.supplier);
             item.insert("supplier_part_number",part.supplierPartNumber);
             item.insert("geometry_token",part.geometryToken);
+            if(!part.linkedFoldedFlatSourceId.isEmpty()){
+                QJsonObject flatLink;
+                flatLink.insert("source_id",part.linkedFoldedFlatSourceId);
+                flatLink.insert("source_token",part.linkedFoldedFlatSourceToken);
+                if(part.linkedFoldedFlatKFactors.isEmpty()&&
+                   part.linkedFoldedFlatRelief.widthMm==0.0&&
+                   part.linkedFoldedFlatRelief.depthMm==0.0){
+                    flatLink.insert("type","neutral-flat-blank-v1");
+                }else{
+                    flatLink.insert("type","developed-flat-blank-v2");
+                    QJsonArray factors;
+                    for(double value:part.linkedFoldedFlatKFactors)factors.append(value);
+                    flatLink.insert("k_factors",factors);
+                    flatLink.insert("relief_width_mm",part.linkedFoldedFlatRelief.widthMm);
+                    flatLink.insert("relief_depth_mm",part.linkedFoldedFlatRelief.depthMm);
+                }
+                item.insert("linked_folded_flat_blank",flatLink);
+            }
             item.insert("component_definition_id",part.componentDefinitionId);
             item.insert("component_name",part.componentName);
             item.insert("occurrence_id",part.occurrenceId);
@@ -5699,7 +11205,36 @@ bool SceneDocument::saveAs(const QString& path, QString* error) {
                 for(const DrawingEdgeDimensionAnnotation& dimension:part.drawingSettings.edgeDimensionAnnotations){
                     QJsonObject annotation;annotation.insert("id",dimension.id);annotation.insert("source_body_id",dimension.sourceBodyId);
                     annotation.insert("source_geometry_token",dimension.sourceGeometryToken);annotation.insert("edge_index",dimension.edgeIndex);
-                    annotation.insert("view",dimension.view);annotation.insert("offset_mm",dimension.offsetMm);edgeDimensions.append(annotation);
+                    annotation.insert("view",dimension.view);annotation.insert("offset_mm",dimension.offsetMm);
+                    annotation.insert("kind",dimension.kind);
+                    annotation.insert("second_edge_index",dimension.secondEdgeIndex);
+                    annotation.insert("upper_tolerance_mm",dimension.upperToleranceMm);
+                    annotation.insert("lower_tolerance_mm",dimension.lowerToleranceMm);
+                    if(!dimension.secondEdgeAnchor.isEmpty()){
+                        QJsonObject secondWitness;
+                        for(auto it=dimension.secondEdgeAnchor.cbegin();it!=dimension.secondEdgeAnchor.cend();++it)
+                            secondWitness.insert(it.key(),it.value());
+                        annotation.insert("second_edge_anchor",secondWitness);
+                    }
+                    if(!dimension.edgeAnchor.isEmpty()){
+                        QJsonObject witness;
+                        for(auto it=dimension.edgeAnchor.cbegin();it!=dimension.edgeAnchor.cend();++it)
+                            witness.insert(it.key(),it.value());
+                        annotation.insert("edge_anchor",witness);
+                    }
+                    edgeDimensions.append(annotation);
+                }
+                QJsonArray gdtFrames;
+                for(const DrawingGdtFrameAnnotation& frame:part.drawingSettings.gdtFrames){
+                    QJsonObject annotation;
+                    annotation.insert("id",frame.id);annotation.insert("source_body_id",frame.sourceBodyId);
+                    annotation.insert("source_geometry_token",frame.sourceGeometryToken);
+                    annotation.insert("characteristic",frame.characteristic);
+                    annotation.insert("tolerance_mm",frame.toleranceMm);
+                    annotation.insert("datum_a",frame.datumA);annotation.insert("datum_b",frame.datumB);
+                    annotation.insert("datum_c",frame.datumC);
+                    annotation.insert("x_mm",frame.xMm);annotation.insert("y_mm",frame.yMm);
+                    gdtFrames.append(annotation);
                 }
                 QJsonObject partsList;partsList.insert("id",part.drawingSettings.partsListAnnotation.id);
                 partsList.insert("visible",part.drawingSettings.partsListAnnotation.visible);
@@ -5729,6 +11264,7 @@ bool SceneDocument::saveAs(const QString& path, QString* error) {
                 drawing.insert("view_ids",views);drawing.insert("view_centers",centers);drawing.insert("note_annotations",annotations);
                 drawing.insert("dimension_annotations",dimensions);
                 drawing.insert("edge_dimension_annotations",edgeDimensions);
+                drawing.insert("gdt_frame_annotations",gdtFrames);
                 drawing.insert("linked_parts_list",partsList);
                 drawing.insert("balloon_annotations",balloons);
                 drawing.insert("detail_views",detailViews);
@@ -5746,6 +11282,7 @@ bool SceneDocument::saveAs(const QString& path, QString* error) {
                 QJsonArray boundary;for(const QString& id:part.constrainedPolygonBoundary)boundary.append(id);
                 definition.insert("boundary",boundary);definition.insert("depth_mm",part.constrainedPolygonDepthMm);
                 definition.insert("geometry_token",part.constrainedPolygonGeometryToken);
+                definition.insert("plane",sketchPlaneToJson(part.constrainedPolygonPlane));
                 item.insert("parametric_definition",definition);
             }else if(part.hasParametricDefinition){
                 const bool hasThroughHole=part.featureHistory.contains(QStringLiteral("Cut: Parametric through-hole"));
@@ -5767,6 +11304,12 @@ bool SceneDocument::saveAs(const QString& path, QString* error) {
                 QJsonObject definition;definition.insert("type",type);
                 QJsonObject parameters;for(auto it=part.namedParameters.cbegin();it!=part.namedParameters.cend();++it)parameters.insert(it.key(),it.value());
                 definition.insert("parameters",parameters);
+                if(!part.namedParameterFormulas.isEmpty()){
+                    QJsonObject persistedFormulas;
+                    for(auto it=part.namedParameterFormulas.cbegin();it!=part.namedParameterFormulas.cend();++it)
+                        persistedFormulas.insert(it.key(),it.value());
+                    definition.insert("dimension_formulas",persistedFormulas);
+                }
                 if(!part.parameterLinks.isEmpty()){
                     QJsonObject links;
                     for(auto it=part.parameterLinks.cbegin();it!=part.parameterLinks.cend();++it){
@@ -5788,6 +11331,30 @@ bool SceneDocument::saveAs(const QString& path, QString* error) {
                 definition.insert("geometry_token",part.parametricGeometryToken);
                 item.insert("parametric_definition",definition);
             }else item.insert("parametric_definition",QJsonValue::Null);
+            if(!part.featureInspectionNotes.isEmpty()){
+                QJsonArray notes;
+                for(const auto& note:part.featureInspectionNotes){
+                    QJsonObject itemNote;
+                    itemNote.insert("id",note.id);itemNote.insert("feature_id",note.featureId);
+                    itemNote.insert("category",note.category);itemNote.insert("note",note.text);
+                    itemNote.insert("reviewed_geometry_token",note.reviewedGeometryToken);
+                    notes.append(itemNote);
+                }
+                item.insert("feature_inspection_notes",notes);
+            }
+            if(!part.designConfigurations.isEmpty()){
+                QJsonArray catalog;
+                for(const SavedDesignConfiguration& saved:part.designConfigurations){
+                    QJsonObject entry;entry.insert("name",saved.name);
+                    QJsonObject expressions;
+                    for(auto it=saved.expressions.cbegin();it!=saved.expressions.cend();++it)
+                        expressions.insert(it.key(),it.value());
+                    entry.insert("expressions",expressions);catalog.append(entry);
+                }
+                item.insert("design_configurations",catalog);
+            }
+            if(!part.activeDesignConfiguration.isEmpty())
+                item.insert("active_design_configuration",part.activeDesignConfiguration);
             if(part.hasFoldedSheetMetalDefinition){
                 QJsonObject definition;definition.insert("type","faceted-folded-sheet-v1");
                 definition.insert("geometry_token",part.foldedSheetGeometryToken);
@@ -5801,7 +11368,7 @@ bool SceneDocument::saveAs(const QString& path, QString* error) {
             array.append(item);
         }
         QJsonObject root;
-        root.insert("schema",kSchema22);
+        root.insert("schema",kSchema24);
         root.insert("units","mm");
         QJsonObject readinessPolicy;
         QJsonArray requiredFields;for(const QString& field:drawingReadinessPolicy_.requiredTitleBlockFields)requiredFields.append(field);
@@ -5809,6 +11376,67 @@ bool SceneDocument::saveAs(const QString& path, QString* error) {
         readinessPolicy.insert("required_title_block_fields",requiredFields);
         readinessPolicy.insert("required_annotation_conventions",requiredConventions);
         root.insert("drawing_readiness_policy",readinessPolicy);
+        if(!liveRigidMateFixed_.isEmpty()){
+            const auto vectorJson=[](mates::Vec3 v){
+                QJsonArray xyz;xyz.append(v.x);xyz.append(v.y);xyz.append(v.z);return xyz;
+            };
+            QJsonObject savedMates;savedMates.insert("version",1);
+            savedMates.insert("fixed",liveRigidMateFixed_);
+            QJsonArray links;
+            for(const AssemblyNetworkMate& link:liveRigidMates_){
+                QJsonObject entry;entry.insert("parent",link.parentBodyId);
+                entry.insert("child",link.childBodyId);
+                QJsonArray observations;
+                for(const auto& c:link.constraints){
+                    QJsonObject observation;
+                    observation.insert("kind",static_cast<int>(c.kind));
+                    observation.insert("parent_point",vectorJson(c.parentPoint));
+                    observation.insert("child_point",vectorJson(c.childPoint));
+                    observation.insert("parent_axis",vectorJson(c.parentDirection));
+                    observation.insert("child_axis",vectorJson(c.childDirection));
+                    // Omit zero for exact compatibility with pre-offset scenes.
+                    if(c.kind==mates::Kind::CoincidentPlane&&c.offsetMm!=0.0)
+                        observation.insert("plane_offset_mm",c.offsetMm);
+                    observations.append(observation);
+                }
+                entry.insert("constraints",observations);links.append(entry);
+            }
+            savedMates.insert("connections",links);
+            root.insert("live_rigid_mates",savedMates);
+        }
+        if(!liveArticulatedFixed_.isEmpty()){
+            const auto vectorJson=[](mates::Vec3 v){
+                QJsonArray xyz;xyz.append(v.x);xyz.append(v.y);xyz.append(v.z);return xyz;
+            };
+            const auto frameJson=[&](const mates::Transform& frame){
+                QJsonObject data;data.insert("translation",vectorJson(frame.translation));
+                QJsonArray rotation;for(double value:frame.rotation)rotation.append(value);
+                data.insert("rotation",rotation);return data;
+            };
+            QJsonObject network;network.insert("version",1);
+            network.insert("fixed",liveArticulatedFixed_);
+            QJsonArray edges;
+            for(const auto& joint:liveArticulatedJoints_){
+                QJsonObject item;
+                item.insert("parent",joint.parentBodyId);
+                item.insert("child",joint.childBodyId);
+                item.insert("kind",static_cast<int>(joint.kind));
+                item.insert("child_at_zero",frameJson(joint.childAtZero));
+                item.insert("axis",vectorJson(joint.axis));
+                item.insert("initial",joint.initial);item.insert("min",joint.minimum);
+                item.insert("max",joint.maximum);item.insert("driven",joint.driven);
+                edges.append(item);
+            }
+            network.insert("joints",edges);
+            QJsonArray frames;
+            for(auto it=liveArticulatedReferencePoses_.cbegin();
+                it!=liveArticulatedReferencePoses_.cend();++it){
+                QJsonObject item;item.insert("id",it.key());
+                item.insert("frame",frameJson(it.value()));frames.append(item);
+            }
+            network.insert("reference_poses",frames);
+            root.insert("live_articulated_mates",network);
+        }
         root.insert("parts",array);
         const QByteArray bytes = QJsonDocument(root).toJson(QJsonDocument::Compact);
         if (bytes.size() > kMaxFileBytes) { setError(error, "Project exceeds native format size limit (96 MiB)."); return false; }
@@ -5834,11 +11462,11 @@ bool SceneDocument::load(const QString& path, QString* error) {
     if (parseError.error != QJsonParseError::NoError || !json.isObject()) { setError(error,"Invalid project JSON."); return false; }
     const QJsonObject root = json.object();
     const QString schema = root.value("schema").toString();
-    if ((schema != kSchema1 && schema != kSchema2 && schema != kSchema3 && schema != kSchema4 && schema != kSchema5 && schema != kSchema6 && schema != kSchema7 && schema != kSchema8 && schema != kSchema9 && schema != kSchema10 && schema != kSchema11 && schema != kSchema12 && schema != kSchema13 && schema != kSchema14 && schema != kSchema15 && schema != kSchema16 && schema != kSchema17 && schema != kSchema18 && schema != kSchema19 && schema != kSchema20 && (schema != kSchema21 && schema != kSchema22)) || root.value("units").toString() != "mm" || !root.value("parts").isArray()) {
+    if ((schema != kSchema1 && schema != kSchema2 && schema != kSchema3 && schema != kSchema4 && schema != kSchema5 && schema != kSchema6 && schema != kSchema7 && schema != kSchema8 && schema != kSchema9 && schema != kSchema10 && schema != kSchema11 && schema != kSchema12 && schema != kSchema13 && schema != kSchema14 && schema != kSchema15 && schema != kSchema16 && schema != kSchema17 && schema != kSchema18 && schema != kSchema19 && schema != kSchema20 && (schema != kSchema21 && schema != kSchema22 && (schema!=kSchema23&&schema!=kSchema24))) || root.value("units").toString() != "mm" || !root.value("parts").isArray()) {
         setError(error,"Unsupported project schema or units."); return false;
     }
     DrawingReadinessPolicy candidateReadinessPolicy;
-    if(schema==kSchema13||schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || schema == kSchema22))){
+    if(schema==kSchema13||schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || (schema == kSchema22 || (schema==kSchema23||schema==kSchema24))))){
         const QJsonValue rawPolicy=root.value("drawing_readiness_policy");
         if(!rawPolicy.isObject()){setError(error,"Missing drawing project readiness policy.");return false;}
         const QJsonObject policy=rawPolicy.toObject();
@@ -5880,7 +11508,7 @@ bool SceneDocument::load(const QString& path, QString* error) {
             MaterialEngineeringData materialEngineering;
             QString partNumber, description, revision, assemblyPath;
             QString procurementType = QStringLiteral("Manufactured"), supplier, supplierPartNumber;
-            if (schema == kSchema2 || schema == kSchema3 || schema == kSchema4 || schema == kSchema5 || schema == kSchema6 || schema == kSchema7 || schema == kSchema8 || schema == kSchema9 || schema == kSchema10 || schema == kSchema11 || schema == kSchema12 || schema == kSchema13 || schema == kSchema14 || schema == kSchema15 || (schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || schema == kSchema22))) {
+            if (schema == kSchema2 || schema == kSchema3 || schema == kSchema4 || schema == kSchema5 || schema == kSchema6 || schema == kSchema7 || schema == kSchema8 || schema == kSchema9 || schema == kSchema10 || schema == kSchema11 || schema == kSchema12 || schema == kSchema13 || schema == kSchema14 || schema == kSchema15 || (schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || (schema == kSchema22 || (schema==kSchema23||schema==kSchema24))))) {
                 if (!item.value("visible").isBool() || !item.value("color").isString()) {
                     setError(error,"Invalid v2 appearance fields."); return false;
                 }
@@ -5917,7 +11545,7 @@ bool SceneDocument::load(const QString& path, QString* error) {
                     }
                     materialEngineering={source,modulus};
                 }
-                if (schema == kSchema3 || schema == kSchema4 || schema == kSchema5 || schema == kSchema6 || schema == kSchema7 || schema == kSchema8 || schema == kSchema9 || schema == kSchema10 || schema == kSchema11 || schema == kSchema12 || schema == kSchema13 || schema == kSchema14 || schema == kSchema15 || (schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || schema == kSchema22))) {
+                if (schema == kSchema3 || schema == kSchema4 || schema == kSchema5 || schema == kSchema6 || schema == kSchema7 || schema == kSchema8 || schema == kSchema9 || schema == kSchema10 || schema == kSchema11 || schema == kSchema12 || schema == kSchema13 || schema == kSchema14 || schema == kSchema15 || (schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || (schema == kSchema22 || (schema==kSchema23||schema==kSchema24))))) {
                     if (!item.value("part_number").isString() || !item.value("description").isString() || !item.value("revision").isString()) {
                         setError(error,"Invalid part-information fields."); return false;
                     }
@@ -5929,7 +11557,7 @@ bool SceneDocument::load(const QString& path, QString* error) {
                         partNumber.contains('\r') || description.contains('\r') || revision.contains('\r')) {
                         setError(error,"Invalid part-information values."); return false;
                     }
-                    if (schema == kSchema4 || schema == kSchema5 || schema == kSchema6 || schema == kSchema7 || schema == kSchema8 || schema == kSchema9 || schema == kSchema10 || schema == kSchema11 || schema == kSchema12 || schema == kSchema13 || schema == kSchema14 || schema == kSchema15 || (schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || schema == kSchema22))) {
+                    if (schema == kSchema4 || schema == kSchema5 || schema == kSchema6 || schema == kSchema7 || schema == kSchema8 || schema == kSchema9 || schema == kSchema10 || schema == kSchema11 || schema == kSchema12 || schema == kSchema13 || schema == kSchema14 || schema == kSchema15 || (schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || (schema == kSchema22 || (schema==kSchema23||schema==kSchema24))))) {
                         if (!item.value("assembly_path").isString()) { setError(error,"Invalid assembly path."); return false; }
                         assemblyPath = item.value("assembly_path").toString();
                         QStringList normalizedSegments;
@@ -5945,7 +11573,7 @@ bool SceneDocument::load(const QString& path, QString* error) {
                             setError(error,"Invalid assembly path value."); return false;
                         }
                     }
-                    if (schema == kSchema5 || schema == kSchema6 || schema == kSchema7 || schema == kSchema8 || schema == kSchema9 || schema == kSchema10 || schema == kSchema11 || schema == kSchema12 || schema == kSchema13 || schema == kSchema14 || schema == kSchema15 || (schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || schema == kSchema22))) {
+                    if (schema == kSchema5 || schema == kSchema6 || schema == kSchema7 || schema == kSchema8 || schema == kSchema9 || schema == kSchema10 || schema == kSchema11 || schema == kSchema12 || schema == kSchema13 || schema == kSchema14 || schema == kSchema15 || (schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || (schema == kSchema22 || (schema==kSchema23||schema==kSchema24))))) {
                         if (!item.value("procurement_type").isString() || !item.value("supplier").isString() ||
                             !item.value("supplier_part_number").isString()) {
                             setError(error,"Invalid procurement fields."); return false;
@@ -5960,7 +11588,7 @@ bool SceneDocument::load(const QString& path, QString* error) {
                             setError(error,"Invalid supplier fields."); return false;
                         }
                     }
-                    if (schema == kSchema6 || schema == kSchema7 || schema == kSchema8 || schema == kSchema9 || schema == kSchema10 || schema == kSchema11 || schema == kSchema12 || schema == kSchema13 || schema == kSchema14 || schema == kSchema15 || (schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || schema == kSchema22))) {
+                    if (schema == kSchema6 || schema == kSchema7 || schema == kSchema8 || schema == kSchema9 || schema == kSchema10 || schema == kSchema11 || schema == kSchema12 || schema == kSchema13 || schema == kSchema14 || schema == kSchema15 || (schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || (schema == kSchema22 || (schema==kSchema23||schema==kSchema24))))) {
                         if (!item.value("component_definition_id").isString() || !item.value("component_name").isString() ||
                             !item.value("occurrence_id").isString() || !item.value("placement_x").isDouble() ||
                             !item.value("placement_y").isDouble() || !item.value("placement_z").isDouble()) {
@@ -5974,8 +11602,394 @@ bool SceneDocument::load(const QString& path, QString* error) {
             if(surfaceBody?!validSurfaceBodyShape(shape,error):!validShape(shape,error))return false;
             candidate.append({id,name,shape,visible,color});
             candidate.last().isSurfaceBody=surfaceBody;
+            if(item.contains("linked_boolean")){
+                if(schema!=kSchema24||!item.value("linked_boolean").isObject()){
+                    setError(error,"Linked Boolean requires the v24 scene schema.");return false;
+                }
+                const QJsonObject link=item.value("linked_boolean").toObject();
+                if(link.size()!=5||!link.value("primary").isString()||
+                   !link.value("tool").isString()||!link.value("operation").isString()||
+                   !link.value("primary_token").isString()||!link.value("tool_token").isString()){
+                    setError(error,"Malformed saved linked Boolean fields.");return false;
+                }
+                auto& linked=candidate.last();linked.hasLinkedBoolean=true;
+                linked.linkedPrimaryId=link.value("primary").toString();
+                linked.linkedToolId=link.value("tool").toString();
+                linked.linkedOperation=link.value("operation").toString();
+                linked.linkedPrimaryToken=link.value("primary_token").toString();
+                linked.linkedToolToken=link.value("tool_token").toString();
+                if(linked.linkedPrimaryId.isEmpty()||linked.linkedToolId.isEmpty()||
+                   linked.linkedPrimaryToken.isEmpty()||linked.linkedToolToken.isEmpty()||
+                   linked.linkedPrimaryToken.size()>64||linked.linkedToolToken.size()>64||
+                   linked.linkedPrimaryId.size()>64||linked.linkedToolId.size()>64||
+                   (linked.linkedOperation!="Fuse"&&linked.linkedOperation!="Cut"&&linked.linkedOperation!="Common")||
+                   surfaceBody){
+                    setError(error,"Invalid saved linked Boolean references.");return false;
+                }
+            }
+            if(item.contains("linked_sketch_extrusion")){
+                if(schema!=kSchema24||!item.value("linked_sketch_extrusion").isObject()||
+                   candidate.last().hasLinkedBoolean||surfaceBody){
+                    setError(error,"Linked sketch extrusion requires a solid v24 scene record.");return false;
+                }
+                const QJsonObject link=item.value("linked_sketch_extrusion").toObject();
+                if(link.size()!=4||!link.value("source").isString()||
+                   !link.value("source_token").isString()||
+                   !link.value("depth_mm").isDouble()||
+                   !link.value("normal_offset_mm").isDouble()){
+                    setError(error,"Malformed saved linked sketch extrusion.");return false;
+                }
+                Part& derived=candidate.last();
+                derived.hasLinkedSketchExtrusion=true;
+                derived.linkedSketchSourceId=link.value("source").toString();
+                derived.linkedSketchSourceToken=link.value("source_token").toString();
+                derived.linkedSketchDepthMm=link.value("depth_mm").toDouble();
+                derived.linkedSketchOffsetMm=link.value("normal_offset_mm").toDouble();
+                if(derived.linkedSketchSourceId.isEmpty()||derived.linkedSketchSourceId.size()>64||
+                   derived.linkedSketchSourceToken.isEmpty()||derived.linkedSketchSourceToken.size()>64||
+                   !std::isfinite(derived.linkedSketchDepthMm)||derived.linkedSketchDepthMm<=1e-5||
+                   derived.linkedSketchDepthMm>1000000||!std::isfinite(derived.linkedSketchOffsetMm)||
+                   std::abs(derived.linkedSketchOffsetMm)>1000000){
+                    setError(error,"Invalid saved linked sketch extrusion values.");return false;
+                }
+            }
+            if(item.contains("in_place_sketch_feature")){
+                if(schema!=kSchema24||!item.value("in_place_sketch_feature").isObject()||
+                   candidate.last().hasLinkedBoolean||candidate.last().hasLinkedSketchExtrusion||
+                   surfaceBody){
+                    setError(error,"In-place sketch feature requires an ordinary solid v24 body.");return false;
+                }
+                const QJsonObject link=item.value("in_place_sketch_feature").toObject();
+                if(link.contains("integrity_sha256")){
+                    if(!link.value("integrity_sha256").isString()){
+                        setError(error,"Malformed in-place feature integrity checksum.");return false;
+                    }
+                    QJsonObject payload=link;
+                    payload.remove("integrity_sha256");
+                    const QByteArray digest=QCryptographicHash::hash(
+                        QJsonDocument(payload).toJson(QJsonDocument::Compact),
+                        QCryptographicHash::Sha256).toHex();
+                    if(link.value("integrity_sha256").toString()!=QString::fromLatin1(digest)){
+                        setError(error,"Saved in-place feature parameters have changed since export.");return false;
+                    }
+                }
+                const int expectedFields=6+int(link.contains("follow_up"))+
+                    int(link.contains("extra_stages"))+int(link.contains("integrity_sha256"));
+                if(link.size()!=expectedFields||!link.value("source").isString()||
+                   !link.value("source_token").isString()||!link.value("operation").isString()||
+                   !link.value("depth_mm").isDouble()||!link.value("normal_offset_mm").isDouble()||
+                   !link.value("base_brep").isString()){
+                    setError(error,"Malformed saved in-place sketch feature.");return false;
+                }
+                Part& derived=candidate.last();
+                derived.inPlaceSketchSourceId=link.value("source").toString();
+                derived.inPlaceSketchSourceToken=link.value("source_token").toString();
+                derived.inPlaceSketchOperation=link.value("operation").toString();
+                derived.inPlaceSketchDepthMm=link.value("depth_mm").toDouble();
+                derived.inPlaceSketchOffsetMm=link.value("normal_offset_mm").toDouble();
+                derived.inPlaceSketchBase=brepFromText(link.value("base_brep").toString());
+                if(derived.inPlaceSketchSourceId.isEmpty()||derived.inPlaceSketchSourceId.size()>64||
+                   derived.inPlaceSketchSourceToken.isEmpty()||derived.inPlaceSketchSourceToken.size()>64||
+                   (derived.inPlaceSketchOperation!="Fuse"&&derived.inPlaceSketchOperation!="Cut")||
+                   !std::isfinite(derived.inPlaceSketchDepthMm)||derived.inPlaceSketchDepthMm<=1e-5||
+                   derived.inPlaceSketchDepthMm>1e6||!std::isfinite(derived.inPlaceSketchOffsetMm)||
+                   std::abs(derived.inPlaceSketchOffsetMm)>1e6||
+                   !validShape(derived.inPlaceSketchBase,error)){
+                    setError(error,"Invalid saved in-place sketch references or base geometry.");return false;
+                }
+                if(link.contains("follow_up")){
+                    if(!link.value("follow_up").isObject()){
+                        setError(error,"Malformed second in-place modifier.");return false;
+                    }
+                    const QJsonObject second=link.value("follow_up").toObject();
+                    if(!second.value("source").isString()||
+                       !second.value("source_token").isString()||
+                       !second.value("operation").isString()||
+                       !second.value("depth_mm").isDouble()||
+                       !second.value("normal_offset_mm").isDouble()){
+                        setError(error,"Incomplete second in-place modifier.");return false;
+                    }
+                    derived.hasInPlaceSketchFollowUp=true;
+                    derived.inPlaceFollowSourceId=second.value("source").toString();
+                    derived.inPlaceFollowSourceToken=second.value("source_token").toString();
+                    derived.inPlaceFollowOperation=second.value("operation").toString();
+                    derived.inPlaceFollowDepthMm=second.value("depth_mm").toDouble();
+                    derived.inPlaceFollowOffsetMm=second.value("normal_offset_mm").toDouble();
+                    if(derived.inPlaceFollowSourceId.isEmpty()||
+                       derived.inPlaceFollowSourceId==derived.inPlaceSketchSourceId||
+                       derived.inPlaceFollowSourceId==derived.id||
+                       derived.inPlaceFollowSourceId.size()>64||
+                       derived.inPlaceFollowSourceToken.isEmpty()||
+                       derived.inPlaceFollowSourceToken.size()>64||
+                       (derived.inPlaceFollowOperation!="Fuse"&&derived.inPlaceFollowOperation!="Cut")||
+                       !std::isfinite(derived.inPlaceFollowDepthMm)||
+                       derived.inPlaceFollowDepthMm<=1e-5||derived.inPlaceFollowDepthMm>1e6||
+                       !std::isfinite(derived.inPlaceFollowOffsetMm)||
+                       std::abs(derived.inPlaceFollowOffsetMm)>1e6){
+                        setError(error,"Invalid saved second in-place modifier.");return false;
+                    }
+                }
+                if(link.contains("extra_stages")){
+                    if(!derived.hasInPlaceSketchFollowUp||!link.value("extra_stages").isArray()){
+                        setError(error,"Additional stages require a valid second modifier.");return false;
+                    }
+                    const QJsonArray extra=link.value("extra_stages").toArray();
+                    if(extra.isEmpty()||extra.size()>kMaxInPlaceSketchStages-2){
+                        setError(error,"Invalid count of additional sketch modifiers.");return false;
+                    }
+                    QSet<QString> sources={derived.inPlaceSketchSourceId,derived.inPlaceFollowSourceId,derived.id};
+                    for(const QJsonValue& value:extra){
+                        if(!value.isObject()){
+                            setError(error,"Additional in-place stage must be an object.");return false;
+                        }
+                        const QJsonObject record=value.toObject();
+                        if(record.size()!=5||!record.value("source").isString()||
+                           !record.value("source_token").isString()||!record.value("operation").isString()||
+                           !record.value("depth_mm").isDouble()||!record.value("normal_offset_mm").isDouble()){
+                            setError(error,"Malformed additional in-place modifier.");return false;
+                        }
+                        Part::AdditionalInPlaceSketchStage stage;
+                        stage.sourceId=record.value("source").toString();
+                        stage.sourceToken=record.value("source_token").toString();
+                        stage.operation=record.value("operation").toString();
+                        stage.depthMm=record.value("depth_mm").toDouble();
+                        stage.offsetMm=record.value("normal_offset_mm").toDouble();
+                        if(stage.sourceId.isEmpty()||stage.sourceId.size()>64||
+                           stage.sourceToken.isEmpty()||stage.sourceToken.size()>64||
+                           sources.contains(stage.sourceId)||
+                           (stage.operation!="Fuse"&&stage.operation!="Cut")||
+                           !std::isfinite(stage.depthMm)||stage.depthMm<=1e-5||stage.depthMm>1e6||
+                           !std::isfinite(stage.offsetMm)||std::abs(stage.offsetMm)>1e6){
+                            setError(error,"Invalid or duplicated additional in-place sketch modifier.");return false;
+                        }
+                        sources.insert(stage.sourceId);
+                        derived.extraInPlaceSketchStages.append(std::move(stage));
+                    }
+                }
+                derived.hasInPlaceSketchFeature=true;
+            }
             candidate.last().materialName=materialName;
-            if((schema==kSchema8||schema==kSchema9||schema==kSchema10||schema==kSchema11||schema==kSchema12||schema==kSchema13||schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || schema == kSchema22)))&&item.contains("geometry_token")){
+            // Version-23 feature-stack record; malformed stacks are rejected
+            // before the open scene is touched.
+            if(item.contains("shape_feature_tree")){
+                if((schema!=kSchema23&&schema!=kSchema24)||!item.value("shape_feature_tree").isObject()){
+                    setError(error,"Invalid shape feature tree schema.");return false;
+                }
+                const QJsonObject tree=item.value("shape_feature_tree").toObject();
+                const QJsonValue rawNodes=tree.value("nodes");
+                if(tree.size()!=4||tree.value("type").toString()!=QStringLiteral("shape-independent-modifiers-v1")||
+                   !tree.value("base_brep").isString()||!tree.value("geometry_token").isString()||
+                   !rawNodes.isArray()||rawNodes.toArray().size()>40||
+                   tree.value("geometry_token").toString().isEmpty()||tree.value("geometry_token").toString().size()>64){
+                    setError(error,"Invalid shape feature tree data.");return false;
+                }
+                QVector<ShapeFeatureNode> nodes;
+                for(const QJsonValue& rawNode:rawNodes.toArray()){
+                    if(!rawNode.isObject()){setError(error,"Invalid shape feature node.");return false;}
+                    const QJsonObject record=rawNode.toObject();
+                    if((record.size()!=4&&record.size()!=5)||!record.value("id").isString()||!record.value("operation").isString()||
+                       !record.value("suppressed").isBool()||!record.value("parameters").isObject()||
+                       (record.contains("inputs")&&(!record.value("inputs").isArray()||(schema!=kSchema24)))){
+                        setError(error,"Invalid shape feature node fields.");return false;
+                    }
+                    ShapeFeatureNode node;node.id=record.value("id").toString();
+                    node.type=record.value("operation").toString();
+                    node.suppressed=record.value("suppressed").toBool();
+                    const QJsonObject params=record.value("parameters").toObject();
+                    for(auto it=params.begin();it!=params.end();++it){
+                        if(!it.value().isDouble()){setError(error,"Non-numeric feature parameter.");return false;}
+                        node.parameters.insert(it.key(),it.value().toDouble());
+                    }
+                    if(record.contains("inputs"))for(const auto& source:record.value("inputs").toArray()){
+                        if(!source.isString()||source.toString().isEmpty()||source.toString().size()>64){
+                            setError(error,"Invalid saved feature graph reference.");return false;
+                        }
+                        node.inputs.append(source.toString());
+                    }
+                    nodes.append(node);
+                }
+                if(!validateShapeFeatureNodes(nodes,error))return false;
+                const TopoDS_Shape base=brepFromText(tree.value("base_brep").toString());
+                TopoDS_Shape rebuilt;
+                QVector<TopoDS_Shape> intermediate;
+                if(!rebuildShapeFeatureTree(base,surfaceBody,nodes,&rebuilt,error,
+                                             nullptr,&intermediate))return false;
+                if(tree.value("geometry_token").toString()==item.value("geometry_token").toString()){
+                    GProp_GProps expected,stored;
+                    // Compare volume and model bounds to reject corrupted or
+                    // mismatched geometry only when the saved tree is current.
+                    if(!surfaceBody){
+                        BRepGProp::VolumeProperties(rebuilt,expected);
+                        BRepGProp::VolumeProperties(shape,stored);
+                        if(std::abs(expected.Mass()-stored.Mass())>std::max(1e-5,expected.Mass()*1e-5)){
+                            setError(error,"Saved feature tree does not match body volume.");return false;
+                        }
+                    }
+                    Bnd_Box a,b;BRepBndLib::AddOptimal(rebuilt,a,false,false);BRepBndLib::AddOptimal(shape,b,false,false);
+                    if(a.IsVoid()!=b.IsVoid()){setError(error,"Saved feature tree bounds are invalid.");return false;}
+                    if(!a.IsVoid()){
+                        double xyzA[6],xyzB[6];a.Get(xyzA[0],xyzA[1],xyzA[2],xyzA[3],xyzA[4],xyzA[5]);
+                        b.Get(xyzB[0],xyzB[1],xyzB[2],xyzB[3],xyzB[4],xyzB[5]);
+                        for(int coord=0;coord<6;++coord)if(std::abs(xyzA[coord]-xyzB[coord])>1e-4){
+                            setError(error,"Saved feature tree does not match body bounds.");return false;
+                        }
+                    }
+                }
+                Part& loaded=candidate.last();
+                loaded.hasShapeFeatureTree=true;
+                loaded.shapeFeatureBase=base;
+                loaded.shapeFeatureGeometryToken=tree.value("geometry_token").toString();
+                loaded.shapeFeatureNodes=std::move(nodes);
+                loaded.shapeFeatureCachedOutputs=std::move(intermediate);
+            }
+
+            if(item.contains("interleaved_history")){
+                if(schema!=kSchema24||candidate.last().hasShapeFeatureTree||
+                   candidate.last().hasInPlaceSketchFeature||
+                   candidate.last().hasLinkedBoolean||candidate.last().hasLinkedSketchExtrusion||
+                   candidate.last().hasConstrainedPolygonDefinition||
+                   candidate.last().hasParametricDefinition||
+                   candidate.last().hasFoldedSheetMetalDefinition||surfaceBody||
+                   !item.value("interleaved_history").isObject()){
+                    setError(error,"Interleaved feature history conflicts with the saved body definition.");return false;
+                }
+                const QJsonObject data=item.value("interleaved_history").toObject();
+                const auto entries=data.value("steps");
+                const QString historyType=data.value("type").toString();
+                const bool nestedPatternHistory=historyType==QStringLiteral("dag-interleaved-history-v5");
+                const bool patternHistory=nestedPatternHistory||historyType==QStringLiteral("dag-interleaved-history-v4");
+                const bool topologyHistory=patternHistory||historyType==QStringLiteral("dag-interleaved-history-v3");
+                const bool dagHistory=topologyHistory||historyType==QStringLiteral("dag-interleaved-history-v2");
+                if(data.size()!=4||(!dagHistory&&historyType!=QStringLiteral("linear-interleaved-history-v1"))||
+                   !data.value("base_brep").isString()||!data.value("geometry_token").isString()||
+                   data.value("geometry_token").toString().isEmpty()||
+                   data.value("geometry_token").toString().size()>64||
+                   !entries.isArray()||entries.toArray().isEmpty()||entries.toArray().size()>40){
+                    setError(error,"Invalid interleaved history record.");return false;
+                }
+                auto& saved=candidate.last();
+                saved.interleavedBase=brepFromText(data.value("base_brep").toString());
+                if(saved.interleavedBase.IsNull()||!validShape(saved.interleavedBase,error))return false;
+                saved.interleavedGeometryToken=data.value("geometry_token").toString();
+                QSet<QString> seen;
+                QSet<QString> earlierPatternIds;
+                for(const auto& value:entries.toArray()){
+                    if(!value.isObject()){setError(error,"Invalid history step.");return false;}
+                    const QJsonObject stepData=value.toObject();
+                    InterleavedHistoryStep step;
+                    if(!stepData.value("id").isString()||!stepData.value("kind").isString()){
+                        setError(error,"Malformed feature history step identity.");return false;
+                    }
+                    step.id=stepData.value("id").toString();step.kind=stepData.value("kind").toString();
+                    if(step.id.isEmpty()||step.id.size()>64||seen.contains(step.id)){
+                        setError(error,"Duplicated or malformed history step ID.");return false;
+                    }
+                    // Validate inputs before adding this step to the valid
+                    // set: this rejects cycles and later/unknown references.
+                    const bool withInputs=stepData.contains("inputs");
+                    if(withInputs){
+                        if(!dagHistory||!stepData.value("inputs").isArray()||
+                           stepData.value("inputs").toArray().isEmpty()||
+                           stepData.value("inputs").toArray().size()>2){
+                            setError(error,"Invalid mixed history input list.");return false;
+                        }
+                        QSet<QString> uniqueInputs;
+                        for(const auto& link:stepData.value("inputs").toArray()){
+                            if(!link.isString()||!seen.contains(link.toString())&&link.toString()!=QStringLiteral("@base")||
+                               uniqueInputs.contains(link.toString())){
+                                setError(error,"History references a duplicate or forward dependency.");return false;
+                            }
+                            uniqueInputs.insert(link.toString());step.inputs.append(link.toString());
+                        }
+                    }
+                    seen.insert(step.id);
+                    if(step.kind==QStringLiteral("Shape")){
+                        const bool withReference=stepData.contains("reference_source");
+                        const bool withOccurrence=stepData.contains("reference_occurrence");
+                        const bool withOccurrences=stepData.contains("reference_occurrences");
+                        if(stepData.size()!=(withInputs?6:5)+(withReference?1:0)+
+                           (withOccurrence?1:0)+(withOccurrences?1:0)||
+                           (withOccurrences&&(!nestedPatternHistory||!withReference||withOccurrence||
+                             !stepData.value("reference_occurrences").isObject()||
+                             stepData.value("reference_occurrences").toObject().isEmpty()||
+                             stepData.value("reference_occurrences").toObject().size()>40))||
+                           (withOccurrence&&(!patternHistory||!withReference||
+                             !stepData.value("reference_occurrence").isDouble()||
+                             stepData.value("reference_occurrence").toDouble()<1||
+                             stepData.value("reference_occurrence").toDouble()>23||
+                             std::floor(stepData.value("reference_occurrence").toDouble())!=
+                             stepData.value("reference_occurrence").toDouble()))||
+                           (withReference&&(!topologyHistory||!withInputs||
+                             !stepData.value("reference_source").isString()||
+                             stepData.value("reference_source").toString().isEmpty()||
+                             stepData.value("reference_source").toString().size()>64))||
+                           !stepData.value("operation").isString()||
+                           !stepData.value("suppressed").isBool()||!stepData.value("parameters").isObject()){
+                            setError(error,"Malformed general shape modifier.");return false;
+                        }
+                        step.feature.id=step.id;step.feature.type=stepData.value("operation").toString();
+                        step.feature.suppressed=stepData.value("suppressed").toBool();
+                        if(withReference)step.referenceSourceId=stepData.value("reference_source").toString();
+                        if(withOccurrence)step.referencePatternOccurrence=stepData.value("reference_occurrence").toInt();
+                        if(withOccurrences){
+                            const auto occurrences=stepData.value("reference_occurrences").toObject();
+                            for(auto it=occurrences.begin();it!=occurrences.end();++it){
+                                if(!earlierPatternIds.contains(it.key())||!it.value().isDouble()||
+                                   it.value().toDouble()<1||it.value().toDouble()>23||
+                                   std::floor(it.value().toDouble())!=it.value().toDouble()){
+                                    setError(error,"Invalid or forward nested pattern occurrence reference.");return false;
+                                }
+                                step.referencePatternOccurrences.insert(it.key(),it.value().toInt());
+                            }
+                        }
+                        if(supportsPatternReferenceLineage(step.feature))
+                            earlierPatternIds.insert(step.id);
+                        const QJsonObject serializedParams=stepData.value("parameters").toObject();
+                        for(auto it=serializedParams.begin();it!=serializedParams.end();++it){
+                            if(!it.value().isDouble()){setError(error,"Invalid shape modifier number.");return false;}
+                            step.feature.parameters.insert(it.key(),it.value().toDouble());
+                        }
+                        const bool combine=step.feature.type==QStringLiteral("Fuse branches")||
+                            step.feature.type==QStringLiteral("Subtract branches")||
+                            step.feature.type==QStringLiteral("Intersect branches");
+                        if(combine){
+                            if(step.inputs.size()!=2||!step.feature.parameters.isEmpty()||
+                               step.feature.suppressed||withReference){
+                                setError(error,"Invalid two-input Boolean history step.");return false;
+                            }
+                        }else if(step.inputs.size()>1||!validateShapeFeatureNodes({step.feature},error))return false;
+                    }else if(step.kind==QStringLiteral("SketchFuse")||step.kind==QStringLiteral("SketchCut")){
+                        if(stepData.size()!=(withInputs?7:6)||step.inputs.size()>1||!stepData.value("source").isString()||
+                           !stepData.value("source_token").isString()||
+                           !stepData.value("depth_mm").isDouble()||
+                           !stepData.value("normal_offset_mm").isDouble()){
+                            setError(error,"Malformed linked sketch history step.");return false;
+                        }
+                        step.sketchSourceId=stepData.value("source").toString();
+                        step.depthMm=stepData.value("depth_mm").toDouble();
+                        step.offsetMm=stepData.value("normal_offset_mm").toDouble();
+                        const QString token=stepData.value("source_token").toString();
+                        if(step.sketchSourceId.isEmpty()||step.sketchSourceId.size()>64||
+                           token.isEmpty()||token.size()>64||
+                           !std::isfinite(step.depthMm)||step.depthMm<=1e-5||step.depthMm>1e6||
+                           !std::isfinite(step.offsetMm)||std::abs(step.offsetMm)>1e6){
+                            setError(error,"Invalid saved sketch history parameters.");return false;
+                        }
+                        saved.interleavedSourceTokens.append(token);
+                    }else{setError(error,"Unsupported interleaved history operation.");return false;}
+                    if(step.kind==QStringLiteral("Shape"))saved.interleavedSourceTokens.append(QString());
+                    saved.interleavedSteps.append(std::move(step));
+                }
+                if(std::none_of(saved.interleavedSteps.cbegin(),saved.interleavedSteps.cend(),
+                    [](const InterleavedHistoryStep& step){
+                        return step.kind==QStringLiteral("SketchFuse")||
+                               step.kind==QStringLiteral("SketchCut");})){
+                    setError(error,"Saved interleaved history has no sketch dependency.");return false;
+                }
+                saved.hasInterleavedHistory=true;
+            }
+
+            if((schema==kSchema8||schema==kSchema9||schema==kSchema10||schema==kSchema11||schema==kSchema12||schema==kSchema13||schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || (schema == kSchema22 || (schema==kSchema23||schema==kSchema24)))))&&item.contains("geometry_token")){
                 if(!item.value("geometry_token").isString()||item.value("geometry_token").toString().trimmed().isEmpty()||
                    item.value("geometry_token").toString().size()>64||item.value("geometry_token").toString().contains('\n')||
                    item.value("geometry_token").toString().contains('\r')){
@@ -5992,7 +12006,7 @@ bool SceneDocument::load(const QString& path, QString* error) {
             candidate.last().procurementType=procurementType;
             candidate.last().supplier=supplier;
             candidate.last().supplierPartNumber=supplierPartNumber;
-            if (schema == kSchema6 || schema == kSchema7 || schema == kSchema8 || schema == kSchema9 || schema == kSchema10 || schema == kSchema11 || schema == kSchema12 || schema == kSchema13 || schema == kSchema14 || schema == kSchema15 || (schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || schema == kSchema22))) {
+            if (schema == kSchema6 || schema == kSchema7 || schema == kSchema8 || schema == kSchema9 || schema == kSchema10 || schema == kSchema11 || schema == kSchema12 || schema == kSchema13 || schema == kSchema14 || schema == kSchema15 || (schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || (schema == kSchema22 || (schema==kSchema23||schema==kSchema24))))) {
                 const QJsonObject itemObject=value.toObject();
                 Part& loaded=candidate.last();
                 loaded.componentDefinitionId=itemObject.value("component_definition_id").toString().trimmed();
@@ -6004,13 +12018,13 @@ bool SceneDocument::load(const QString& path, QString* error) {
                 const QJsonValue rollValue=itemObject.value("placement_roll_degrees");
                 if(!yawValue.isUndefined()){
                     // Older schemas do not define this optional v19 field.
-                    if((schema!=kSchema19&&(schema!=kSchema20&&(schema!=kSchema21&&schema!=kSchema22)))||!yawValue.isDouble()){
+                    if((schema!=kSchema19&&(schema!=kSchema20&&(schema!=kSchema21&&(schema!=kSchema22&&(schema!=kSchema23&&schema!=kSchema24)))))||!yawValue.isDouble()){
                         setError(error,"Invalid saved occurrence yaw record.");return false;
                     }
                     loaded.placementYawDegrees=yawValue.toDouble();
                 }
                 if(!pitchValue.isUndefined()||!rollValue.isUndefined()){
-                    if(schema!=kSchema22||(!pitchValue.isUndefined()&&!pitchValue.isDouble())||
+                    if((schema!=kSchema22&&(schema!=kSchema23&&schema!=kSchema24))||(!pitchValue.isUndefined()&&!pitchValue.isDouble())||
                        (!rollValue.isUndefined()&&!rollValue.isDouble())){
                         setError(error,"Invalid saved occurrence pitch or roll record.");return false;
                     }
@@ -6095,7 +12109,7 @@ bool SceneDocument::load(const QString& path, QString* error) {
                     componentNames.insert(loaded.componentDefinitionId,loaded.componentName);
                 }
             }
-            if(schema==kSchema7||schema==kSchema8||schema==kSchema9||schema==kSchema10||schema==kSchema11||schema==kSchema12||schema==kSchema13||schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || schema == kSchema22))){
+            if(schema==kSchema7||schema==kSchema8||schema==kSchema9||schema==kSchema10||schema==kSchema11||schema==kSchema12||schema==kSchema13||schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || (schema == kSchema22 || (schema==kSchema23||schema==kSchema24))))){
                 const QJsonValue raw=value.toObject().value("drawing_settings");
                 if(raw.isObject()){
                     const QJsonObject drawing=raw.toObject();
@@ -6109,7 +12123,7 @@ bool SceneDocument::load(const QString& path, QString* error) {
                     for(const QJsonValue& note:notes){if(!note.isString()){setError(error,"Invalid persistent drawing note.");return false;}settings.generalNotes.append(note.toString());}
                     settings.drawingNumber=drawing.value("drawing_number").toString();settings.drawnBy=drawing.value("drawn_by").toString();settings.checkedBy=drawing.value("checked_by").toString();
                     settings.issueDate=drawing.value("issue_date").toString();settings.revision=drawing.value("revision").toString();
-                    if(schema==kSchema9||schema==kSchema10||schema==kSchema11||schema==kSchema12||schema==kSchema13||schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || schema == kSchema22))){
+                    if(schema==kSchema9||schema==kSchema10||schema==kSchema11||schema==kSchema12||schema==kSchema13||schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || (schema == kSchema22 || (schema==kSchema23||schema==kSchema24))))){
                         const QJsonObject rawIds=drawing.value("view_ids").toObject();const QJsonObject rawCenters=drawing.value("view_centers").toObject();
                         if(!drawing.value("sheet_id").isString()||!drawing.value("source_geometry_token").isString()||
                            (!drawing.value("source_data_token").isUndefined()&&!drawing.value("source_data_token").isString())||
@@ -6145,7 +12159,7 @@ bool SceneDocument::load(const QString& path, QString* error) {
                             note.xMm=annotation.value("x_mm").toDouble();note.yMm=annotation.value("y_mm").toDouble();
                             settings.noteAnnotations.append(note);
                         }
-                        if(schema==kSchema10||schema==kSchema11||schema==kSchema12||schema==kSchema13||schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || schema == kSchema22))){
+                        if(schema==kSchema10||schema==kSchema11||schema==kSchema12||schema==kSchema13||schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || (schema == kSchema22 || (schema==kSchema23||schema==kSchema24))))){
                             const QJsonArray rawDimensions=drawing.value("dimension_annotations").toArray();
                             if(!drawing.value("dimension_annotations").isArray()||rawDimensions.size()!=3){setError(error,"Invalid persistent drawing dimension annotations.");return false;}
                             for(const QJsonValue& dimensionValue:rawDimensions){
@@ -6160,7 +12174,7 @@ bool SceneDocument::load(const QString& path, QString* error) {
                             for(const QString& axis:{QStringLiteral("X"),QStringLiteral("Y"),QStringLiteral("Z")})
                                 settings.dimensionAnnotations.append({QUuid::createUuid().toString(QUuid::WithoutBraces),axis,9.0});
                         }
-                        if(schema==kSchema22){
+                        if((schema==kSchema22||(schema==kSchema23||schema==kSchema24))){
                             const QJsonValue rawEdgeDimensions=drawing.value("edge_dimension_annotations");
                             if(!rawEdgeDimensions.isUndefined()&&!rawEdgeDimensions.isArray()){setError(error,"Invalid selected-edge drawing dimensions.");return false;}
                             for(const QJsonValue& dimensionValue:rawEdgeDimensions.toArray()){
@@ -6173,12 +12187,87 @@ bool SceneDocument::load(const QString& path, QString* error) {
                                 }
                                 const double edgeIndex=dimension.value("edge_index").toDouble();
                                 if(edgeIndex<1||edgeIndex>std::numeric_limits<int>::max()||std::floor(edgeIndex)!=edgeIndex){setError(error,"Invalid selected-edge drawing edge index.");return false;}
-                                settings.edgeDimensionAnnotations.append({dimension.value("id").toString(),dimension.value("source_body_id").toString(),
+                                QMap<QString,double> witness;
+                                if(dimension.contains("edge_anchor")){
+                                    if(!dimension.value("edge_anchor").isObject()){
+                                        setError(error,"Invalid persisted drawing edge witness object.");return false;
+                                    }
+                                    const QJsonObject fields=dimension.value("edge_anchor").toObject();
+                                    for(auto it=fields.begin();it!=fields.end();++it){
+                                        if(!it.value().isDouble()){
+                                            setError(error,"Drawing edge witness contains a nonnumeric field.");return false;
+                                        }
+                                        witness.insert(it.key(),it.value().toDouble());
+                                    }
+                                    if(!validDrawingEdgeWitness(witness)){
+                                        setError(error,"Persisted drawing edge witness is invalid.");return false;
+                                    }
+                                }
+                                const QString kind=dimension.value("kind").toString(QStringLiteral("LENGTH"));
+                                const QJsonValue secondIndexJson=dimension.value("second_edge_index");
+                                const double secondIndex=secondIndexJson.isUndefined()?0.0:secondIndexJson.toDouble(-1);
+                                const double upper=dimension.value("upper_tolerance_mm").isUndefined()?0.0:
+                                    dimension.value("upper_tolerance_mm").toDouble(-1);
+                                const double lower=dimension.value("lower_tolerance_mm").isUndefined()?0.0:
+                                    dimension.value("lower_tolerance_mm").toDouble(-1);
+                                if((!secondIndexJson.isUndefined()&&!secondIndexJson.isDouble())||
+                                   (!dimension.value("upper_tolerance_mm").isUndefined()&&!dimension.value("upper_tolerance_mm").isDouble())||
+                                   (!dimension.value("lower_tolerance_mm").isUndefined()&&!dimension.value("lower_tolerance_mm").isDouble())||
+                                   secondIndex<0||secondIndex>std::numeric_limits<int>::max()||std::floor(secondIndex)!=secondIndex||
+                                   !std::isfinite(upper)||!std::isfinite(lower)||upper<0||lower<0||upper>1000||lower>1000||
+                                   !QSet<QString>{"LENGTH","DIAMETER","CENTER_DISTANCE","CENTER_X","CENTER_Y","CENTER_Z"}.contains(kind)){
+                                    setError(error,"Invalid drawing manufacturing dimension settings.");return false;
+                                }
+                                QMap<QString,double> secondWitness;
+                                if(dimension.contains("second_edge_anchor")){
+                                    if(!dimension.value("second_edge_anchor").isObject()){
+                                        setError(error,"Second circular-edge witness must be an object.");return false;
+                                    }
+                                    const auto values=dimension.value("second_edge_anchor").toObject();
+                                    for(auto it=values.begin();it!=values.end();++it){
+                                        if(!it.value().isDouble()){
+                                            setError(error,"Second circular-edge witness must be numeric.");return false;
+                                        }
+                                        secondWitness.insert(it.key(),it.value().toDouble());
+                                    }
+                                    if(!validDrawingEdgeWitness(secondWitness)){
+                                        setError(error,"Invalid second circular-edge witness.");return false;
+                                    }
+                                }
+                                DrawingEdgeDimensionAnnotation linked{dimension.value("id").toString(),dimension.value("source_body_id").toString(),
                                     dimension.value("source_geometry_token").toString(),static_cast<int>(edgeIndex),dimension.value("view").toString(),
-                                    dimension.value("offset_mm").toDouble()});
+                                    dimension.value("offset_mm").toDouble(),witness};
+                                linked.kind=kind;linked.secondEdgeIndex=static_cast<int>(secondIndex);
+                                linked.secondEdgeAnchor=secondWitness;
+                                linked.upperToleranceMm=upper;linked.lowerToleranceMm=lower;
+                                settings.edgeDimensionAnnotations.append(linked);
                             }
                         }
-                        if(schema==kSchema11||schema==kSchema12||schema==kSchema13||schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || schema == kSchema22))){
+                        // Optional in v24. Absent fields keep pre-RC4 scenes readable.
+                        // Reject malformed optional annotations instead of ignoring them.
+                        const QJsonValue rawGdtFrames=drawing.value("gdt_frame_annotations");
+                        if(!rawGdtFrames.isUndefined()&&!rawGdtFrames.isArray()){
+                            setError(error,"Invalid geometric tolerance annotation list.");return false;
+                        }
+                        if(rawGdtFrames.toArray().size()>8){setError(error,"Too many geometric tolerance frames.");return false;}
+                        for(const QJsonValue& rawFrame:rawGdtFrames.toArray()){
+                            if(!rawFrame.isObject()){setError(error,"Malformed geometric tolerance frame.");return false;}
+                            const QJsonObject frame=rawFrame.toObject();
+                            if(!frame.value("id").isString()||!frame.value("source_body_id").isString()||
+                               !frame.value("source_geometry_token").isString()||!frame.value("characteristic").isString()||
+                               !frame.value("tolerance_mm").isDouble()||!frame.value("datum_a").isString()||
+                               !frame.value("datum_b").isString()||!frame.value("datum_c").isString()||
+                               !frame.value("x_mm").isDouble()||!frame.value("y_mm").isDouble()){
+                                setError(error,"Invalid geometric tolerance frame field types.");return false;
+                            }
+                            settings.gdtFrames.append({frame.value("id").toString(),
+                                frame.value("source_body_id").toString(),frame.value("source_geometry_token").toString(),
+                                frame.value("characteristic").toString(),frame.value("tolerance_mm").toDouble(),
+                                frame.value("datum_a").toString(),frame.value("datum_b").toString(),
+                                frame.value("datum_c").toString(),frame.value("x_mm").toDouble(),
+                                frame.value("y_mm").toDouble()});
+                        }
+                        if(schema==kSchema11||schema==kSchema12||schema==kSchema13||schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || (schema == kSchema22 || (schema==kSchema23||schema==kSchema24))))){
                             const QJsonValue rawPartsList=drawing.value("linked_parts_list");
                             if(!rawPartsList.isObject()){setError(error,"Invalid linked drawing parts-list settings.");return false;}
                             const QJsonObject table=rawPartsList.toObject();
@@ -6187,7 +12276,7 @@ bool SceneDocument::load(const QString& path, QString* error) {
                             }
                             settings.partsListAnnotation={table.value("id").toString(),table.value("visible").toBool(),table.value("x_mm").toDouble(),table.value("y_mm").toDouble()};
                         }
-                        if(schema==kSchema12||schema==kSchema13||schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || schema == kSchema22))){
+                        if(schema==kSchema12||schema==kSchema13||schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || (schema == kSchema22 || (schema==kSchema23||schema==kSchema24))))){
                             const QJsonValue rawBalloons=drawing.value("balloon_annotations");
                             if(!rawBalloons.isArray()||rawBalloons.toArray().size()>50){setError(error,"Invalid persistent drawing balloon list.");return false;}
                             for(const QJsonValue& balloonValue:rawBalloons.toArray()){
@@ -6201,7 +12290,7 @@ bool SceneDocument::load(const QString& path, QString* error) {
                                     balloon.value("x_mm").toDouble(),balloon.value("y_mm").toDouble()});
                             }
                         }
-                        if(schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || schema == kSchema22))){
+                        if(schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || (schema == kSchema22 || (schema==kSchema23||schema==kSchema24))))){
                             const QJsonValue rawDetails=drawing.value("detail_views");
                             if(!rawDetails.isArray()||rawDetails.toArray().size()>4){setError(error,"Invalid persistent drawing detail-view list.");return false;}
                             for(const QJsonValue& detailValue:rawDetails.toArray()){
@@ -6220,7 +12309,7 @@ bool SceneDocument::load(const QString& path, QString* error) {
                                 settings.detailAnnotations.append(parsed);
                             }
                         }
-                        if(schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || schema == kSchema22))){
+                        if(schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || (schema == kSchema22 || (schema==kSchema23||schema==kSchema24))))){
                             const QJsonValue rawSections=drawing.value("section_views");
                             if(!rawSections.isArray()||rawSections.toArray().size()>4){setError(error,"Invalid persistent drawing section-view list.");return false;}
                             for(const QJsonValue& sectionValue:rawSections.toArray()){
@@ -6248,13 +12337,15 @@ bool SceneDocument::load(const QString& path, QString* error) {
                     if(!validDrawingSettings(settings,error))return false;candidate.last().drawingSettings=settings;candidate.last().hasDrawingSettings=true;
                 }else if(!raw.isNull()){setError(error,"Invalid persistent drawing settings record.");return false;}
             }
-            if(schema==kSchema8||schema==kSchema9||schema==kSchema10||schema==kSchema11||schema==kSchema12||schema==kSchema13||schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || schema == kSchema22))){
+            if(schema==kSchema8||schema==kSchema9||schema==kSchema10||schema==kSchema11||schema==kSchema12||schema==kSchema13||schema==kSchema14||schema==kSchema15||(schema == kSchema16 || schema == kSchema17 || schema == kSchema18 || schema == kSchema19 || schema == kSchema20 || (schema == kSchema21 || (schema == kSchema22 || (schema==kSchema23||schema==kSchema24))))){
                 const QJsonValue raw=item.value("parametric_definition");
                 if(raw.isObject()){
                     const QJsonObject definition=raw.toObject();
                     if(definition.value("type").toString()==QStringLiteral("constrained-polygon-extrusion-v1")){
                         const QJsonArray boundary=definition.value("boundary").toArray();
-                        if((schema!=kSchema21&&schema!=kSchema22)||definition.size()!=5||!definition.value("sketch").isObject()||
+                        if((schema!=kSchema21&&(schema!=kSchema22&&(schema!=kSchema23&&schema!=kSchema24)))||(definition.size()!=5&&definition.size()!=6)||
+                           (definition.size()==6&&(schema!=kSchema24||!definition.value("plane").isObject()))||
+                           !definition.value("sketch").isObject()||
                            !definition.value("boundary").isArray()||boundary.size()<3||boundary.size()>64||
                            !definition.value("depth_mm").isDouble()||!finitePositive(definition.value("depth_mm").toDouble())||
                            !definition.value("geometry_token").isString()||
@@ -6262,6 +12353,9 @@ bool SceneDocument::load(const QString& path, QString* error) {
                            definition.value("geometry_token").toString().size()>64){
                             setError(error,"Invalid saved constrained polygon definition.");return false;
                         }
+                        SketchPlane parsedPlane;
+                        if(definition.contains("plane")&&
+                           !sketchPlaneFromJson(definition.value("plane").toObject(),&parsedPlane,error))return false;
                         SketchModel parsedSketch;
                         if(!sketchModelFromJson(definition.value("sketch").toObject(),&parsedSketch,error))return false;
                         QStringList boundaryIds;
@@ -6273,14 +12367,16 @@ bool SceneDocument::load(const QString& path, QString* error) {
                         }
                         SceneDocument rebuilt;
                         const double depth=definition.value("depth_mm").toDouble();
-                        if(!rebuilt.addConstrainedPolygonExtrusion(parsedSketch,boundaryIds,depth,error))return false;
+                        if(!rebuilt.addConstrainedPolygonExtrusion(parsedSketch,boundaryIds,depth,error,parsedPlane))return false;
                         const QString token=definition.value("geometry_token").toString();
                         if(candidate.last().geometryToken==token){
                             GProp_GProps storedMass,rebuiltMass;
-                            BRepGProp::VolumeProperties(candidate.last().shape,storedMass);
+                            BRepGProp::VolumeProperties(candidate.last().hasShapeFeatureTree?
+                                candidate.last().shapeFeatureBase:candidate.last().shape,storedMass);
                             BRepGProp::VolumeProperties(rebuilt.parts().first().shape,rebuiltMass);
                             Bnd_Box storedBox,rebuiltBox;
-                            BRepBndLib::AddOptimal(candidate.last().shape,storedBox,false,false);
+                            BRepBndLib::AddOptimal(candidate.last().hasShapeFeatureTree?
+                                candidate.last().shapeFeatureBase:candidate.last().shape,storedBox,false,false);
                             BRepBndLib::AddOptimal(rebuilt.parts().first().shape,rebuiltBox,false,false);
                             double a[6],b[6];storedBox.Get(a[0],a[1],a[2],a[3],a[4],a[5]);
                             rebuiltBox.Get(b[0],b[1],b[2],b[3],b[4],b[5]);
@@ -6296,6 +12392,7 @@ bool SceneDocument::load(const QString& path, QString* error) {
                         candidate.last().constrainedPolygonSketch=std::move(parsedSketch);
                         candidate.last().constrainedPolygonBoundary=std::move(boundaryIds);
                         candidate.last().constrainedPolygonDepthMm=depth;
+                        candidate.last().constrainedPolygonPlane=parsedPlane;
                         candidate.last().constrainedPolygonGeometryToken=token;
                     }else{
                     const QJsonObject parameters=definition.value("parameters").toObject();
@@ -6310,7 +12407,7 @@ bool SceneDocument::load(const QString& path, QString* error) {
                     const bool hasChamfer=parameters.contains(QStringLiteral("chamfer_distance"));
                     const bool hasFillet=parameters.contains(QStringLiteral("fillet_radius"));
                     QString patternAxis=QStringLiteral("X");
-                    if(hasHolePattern&&(schema==kSchema19||schema==kSchema20||(schema==kSchema21||schema==kSchema22))){
+                    if(hasHolePattern&&(schema==kSchema19||schema==kSchema20||(schema==kSchema21||(schema==kSchema22||(schema==kSchema23||schema==kSchema24))))){
                         if(!definition.value("pattern_axis").isString()||
                            (definition.value("pattern_axis").toString()!=QStringLiteral("X")&&definition.value("pattern_axis").toString()!=QStringLiteral("Y"))){
                             setError(error,"Invalid parametric hole-pattern axis.");return false;
@@ -6328,9 +12425,9 @@ bool SceneDocument::load(const QString& path, QString* error) {
                         type==QStringLiteral("rectangle-extrusion-offset-v1")||
                         type==QStringLiteral("rectangle-extrusion-offset-through-hole-v1")||
                         type==QStringLiteral("rectangle-extrusion-offset-through-hole-pattern-v1")||
-                        ((schema==kSchema21||schema==kSchema22)&&(type==QStringLiteral("rectangle-extrusion-blind-hole-v1")||
+                        ((schema==kSchema21||(schema==kSchema22||(schema==kSchema23||schema==kSchema24)))&&(type==QStringLiteral("rectangle-extrusion-blind-hole-v1")||
                          type==QStringLiteral("rectangle-extrusion-offset-blind-hole-v1")))||
-                        (schema==kSchema22&&blindPattern);
+                        ((schema==kSchema22||(schema==kSchema23||schema==kSchema24))&&blindPattern);
                     const int expectedParameterCount=(hasHolePattern?(hasBlindHole?9:8):(hasBlindHole?7:(hasThroughHole?6:3)))+(offsetProfile?2:0)+(hasChamfer?1:0)+(hasFillet?1:0);
                     const int expectedConstraintCount=(hasHolePattern?(hasBlindHole?11:10):(hasBlindHole?9:(hasThroughHole?8:5)))+(offsetProfile?1:0)+(hasChamfer?1:0)+(hasFillet?1:0);
                     if(!supportedType||!definition.value("parameters").isObject()||parameters.size()!=expectedParameterCount||
@@ -6366,7 +12463,7 @@ bool SceneDocument::load(const QString& path, QString* error) {
                     // Old files have no links; malformed or cyclic rules fail atomically.
                     QMap<QString,ParameterLink> parsedLinks;
                     if(definition.contains("parameter_links")){
-                        if(schema!=kSchema19&&(schema!=kSchema20&&(schema!=kSchema21&&schema!=kSchema22))){setError(error,"Unexpected parameter dependency graph in older scene schema.");return false;}
+                        if(schema!=kSchema19&&(schema!=kSchema20&&(schema!=kSchema21&&(schema!=kSchema22&&(schema!=kSchema23&&schema!=kSchema24))))){setError(error,"Unexpected parameter dependency graph in older scene schema.");return false;}
                         if(!definition.value("parameter_links").isObject()){
                             setError(error,"Invalid saved parameter dependency graph.");return false;
                         }
@@ -6377,7 +12474,7 @@ bool SceneDocument::load(const QString& path, QString* error) {
                             const QJsonObject rule=it.value().toObject();
                             if((rule.size()!=2&&(rule.size()!=3||!rule.contains("offset")))||
                                !rule.value("source").isString()||!rule.value("scale").isDouble()||
-                               (rule.contains("offset")&&(schema!=kSchema20&&(schema!=kSchema21&&schema!=kSchema22)))||
+                               (rule.contains("offset")&&(schema!=kSchema20&&(schema!=kSchema21&&(schema!=kSchema22&&(schema!=kSchema23&&schema!=kSchema24)))))||
                                (rule.contains("offset")&&!rule.value("offset").isDouble())){
                                 setError(error,"Invalid saved parameter dependency rule.");return false;
                             }
@@ -6390,6 +12487,29 @@ bool SceneDocument::load(const QString& path, QString* error) {
                             const double actual=parsedParameters.value(it.key());
                             if(std::abs(evaluated.value(it.key())-actual)>1e-10*std::max(1.0,std::abs(actual))){
                                 setError(error,"Saved dependent named parameters disagree with their sources.");return false;
+                            }
+                        }
+                    }
+                    QMap<QString,QString> parsedFormulas;
+                    if(definition.contains("dimension_formulas")){
+                        if(!definition.value("dimension_formulas").isObject()){
+                            setError(error,"Invalid saved unit-aware dimension formula map.");return false;
+                        }
+                        const QJsonObject formulas=definition.value("dimension_formulas").toObject();
+                        if(formulas.size()>64){setError(error,"Too many saved dimension formulas.");return false;}
+                        for(auto it=formulas.begin();it!=formulas.end();++it){
+                            if(!it.value().isString()||parsedLinks.contains(it.key())){
+                                setError(error,"A saved dimension formula is not text or targets a driven parameter.");return false;
+                            }
+                            parsedFormulas.insert(it.key(),it.value().toString());
+                        }
+                        QMap<QString,double> evaluated;
+                        if(!evaluatePersistentDimensionFormulas(parsedParameters,parsedFormulas,&evaluated,error))return false;
+                        for(auto it=evaluated.cbegin();it!=evaluated.cend();++it){
+                            const double actual=parsedParameters.value(it.key());
+                            if(!std::isfinite(it.value())||
+                               std::abs(it.value()-actual)>1e-9*std::max(1.0,std::abs(actual))){
+                                setError(error,"Persisted dimension formula values disagree with saved geometry parameters.");return false;
                             }
                         }
                     }
@@ -6451,7 +12571,7 @@ bool SceneDocument::load(const QString& path, QString* error) {
                     }
                     QStringList parsedSuppressedFeatures;
                     if(definition.contains("suppressed_features")){
-                        if((schema!=kSchema19&&(schema!=kSchema20&&(schema!=kSchema21&&schema!=kSchema22)))||!definition.value("suppressed_features").isArray()){
+                        if((schema!=kSchema19&&(schema!=kSchema20&&(schema!=kSchema21&&(schema!=kSchema22&&(schema!=kSchema23&&schema!=kSchema24)))))||!definition.value("suppressed_features").isArray()){
                             setError(error,"Invalid saved parametric feature suppression list.");return false;
                         }
                         const QJsonArray suppressed=definition.value("suppressed_features").toArray();
@@ -6478,13 +12598,29 @@ bool SceneDocument::load(const QString& path, QString* error) {
                         const double spacing=parsedParameters.value("hole_pattern_spacing");
                         const double lastX=x+(patternAxis==QStringLiteral("X")?spacing*(patternCount-1):0.0);
                         const double lastY=y+(patternAxis==QStringLiteral("Y")?spacing*(patternCount-1):0.0);
-                        if(x-r<=originX||y-r<=originY||lastX+r>=originX+parsedParameters.value("width")||lastY+r>=originY+parsedParameters.value("height")||
-                           (hasHolePattern&&spacing<parsedParameters.value("hole_diameter"))){
-                            setError(error,"Saved parametric through-hole is outside its rectangular sketch profile.");return false;
+                        // The stored sketch may contain deliberately suppressed hole
+                        // features whose original centers are outside the NEW base
+                        // dimensions. Such a feature is not part of the committed
+                        // solid and must not invalidate a legitimate final-state
+                        // coordinated dimension + suppression edit on reload.
+                        // Still validate every ACTIVE hole and ACTIVE pattern against
+                        // the saved base and the serialized solid below.
+                        const QString holeKey=hasBlindHole?QStringLiteral("blind_hole"):QStringLiteral("through_hole");
+                        const bool activeHole=!parsedSuppressedFeatures.contains(holeKey);
+                        const bool activePattern=activeHole&&hasHolePattern&&
+                            !parsedSuppressedFeatures.contains(QStringLiteral("linear_hole_pattern"));
+                        const double furthestX=activePattern?lastX:x;
+                        const double furthestY=activePattern?lastY:y;
+                        if(activeHole&&(x-r<=originX||y-r<=originY||
+                           furthestX+r>=originX+parsedParameters.value("width")||
+                           furthestY+r>=originY+parsedParameters.value("height")||
+                           (activePattern&&spacing<parsedParameters.value("hole_diameter")))){
+                            setError(error,"Saved active parametric hole is outside its rectangular sketch profile.");return false;
                         }
                     }
                     candidate.last().hasParametricDefinition=true;candidate.last().namedParameters=std::move(parsedParameters);
                     candidate.last().parameterLinks=std::move(parsedLinks);
+                    candidate.last().namedParameterFormulas=std::move(parsedFormulas);
                     candidate.last().sketchConstraints=std::move(parsedConstraints);candidate.last().featureHistory=std::move(parsedHistory);
                     candidate.last().suppressedParametricFeatures=std::move(parsedSuppressedFeatures);
                     candidate.last().parametricGeometryToken=definition.value("geometry_token").toString();
@@ -6585,9 +12721,55 @@ bool SceneDocument::load(const QString& path, QString* error) {
                     }
                 }else if(!raw.isNull()){setError(error,"Invalid parametric definition record.");return false;}
             }
+            // Project-native configurations are optional for all existing v24
+            // projects. Older scenes without this field remain readable.
+            if(item.contains("design_configurations")||item.contains("active_design_configuration")){
+                if(schema!=kSchema24||!item.value("design_configurations").isArray()||
+                   item.value("design_configurations").toArray().size()>32||
+                   !candidate.last().hasParametricDefinition){
+                    setError(error,"Invalid project-native configuration catalog.");return false;
+                }
+                QVector<SavedDesignConfiguration> parsed;
+                for(const QJsonValue& rawEntry:item.value("design_configurations").toArray()){
+                    if(!rawEntry.isObject()){
+                        setError(error,"Invalid project design configuration entry.");return false;
+                    }
+                    const QJsonObject entry=rawEntry.toObject();
+                    if(entry.size()!=2||!entry.value("name").isString()||
+                       !entry.value("expressions").isObject()){
+                        setError(error,"Invalid project design configuration fields.");return false;
+                    }
+                    SavedDesignConfiguration value;value.name=entry.value("name").toString();
+                    const QJsonObject expressions=entry.value("expressions").toObject();
+                    if(expressions.isEmpty()||expressions.size()>16){
+                        setError(error,"Invalid number of configuration dimensions.");return false;
+                    }
+                    for(auto it=expressions.begin();it!=expressions.end();++it){
+                        if(!it.value().isString()){
+                            setError(error,"Invalid stored dimension expression.");return false;
+                        }
+                        value.expressions.insert(it.key(),it.value().toString());
+                    }
+                    parsed.append(std::move(value));
+                }
+                if(!validateDesignConfigurations(candidate.last(),parsed,error))return false;
+                const QJsonValue active=item.value("active_design_configuration");
+                if(!active.isUndefined()){
+                    if(!active.isString()){
+                        setError(error,"Invalid active design configuration name.");return false;
+                    }
+                    const QString selected=active.toString();
+                    if(selected.isEmpty()||std::none_of(parsed.cbegin(),parsed.cend(),
+                       [&](const SavedDesignConfiguration& value){return value.name==selected;})){
+                        setError(error,"The active design configuration is missing from its saved catalog.");return false;
+                    }
+                    candidate.last().activeDesignConfiguration=selected;
+                }
+                candidate.last().designConfigurations=std::move(parsed);
+            }
             const QJsonValue rawFolded=item.value("folded_sheet_definition");
             if(rawFolded.isObject()){
-                if(schema!=kSchema19&&(schema!=kSchema20&&(schema!=kSchema21&&schema!=kSchema22))){setError(error,"Unexpected folded sheet-metal definition in an older scene schema.");return false;}
+                if(schema!=kSchema19&&(schema!=kSchema20&&(schema!=kSchema21&&(schema!=kSchema22&&(schema!=kSchema23&&schema!=kSchema24))))){setError(error,"Unexpected folded sheet-metal definition in an older scene schema.");return false;}
                 const QJsonObject definition=rawFolded.toObject();
                 const QJsonValue rawFlanges=definition.value("straight_flanges_mm"),rawBends=definition.value("bends");
                 if(definition.size()!=6||definition.value("type").toString()!=QStringLiteral("faceted-folded-sheet-v1")||
@@ -6633,10 +12815,271 @@ bool SceneDocument::load(const QString& path, QString* error) {
             }else if(!rawFolded.isNull()&&!rawFolded.isUndefined()){
                 setError(error,"Invalid saved folded sheet-metal definition record.");return false;
             }
+            if(item.contains("linked_folded_flat_blank")){
+                const QJsonValue rawLink=item.value("linked_folded_flat_blank");
+                if(schema!=kSchema24||!rawLink.isObject()){
+                    setError(error,"Invalid linked folded flat-blank record or scene version.");return false;
+                }
+                const QJsonObject link=rawLink.toObject();
+                const bool legacy=link.value("type").toString()==QStringLiteral("neutral-flat-blank-v1");
+                const bool developed=link.value("type").toString()==QStringLiteral("developed-flat-blank-v2");
+                if((!legacy&&!developed)||link.size()!=(legacy?3:6)||
+                   !link.value("source_id").isString()||!link.value("source_token").isString()||
+                   link.value("source_id").toString().isEmpty()||
+                   link.value("source_token").toString().isEmpty()||
+                   link.value("source_id").toString().size()>64||
+                   link.value("source_token").toString().size()>64||
+                   candidate.last().hasFoldedSheetMetalDefinition){
+                    setError(error,"Malformed associative folded blank link.");return false;
+                }
+                Part& loaded=candidate.last();
+                loaded.linkedFoldedFlatSourceId=link.value("source_id").toString();
+                loaded.linkedFoldedFlatSourceToken=link.value("source_token").toString();
+                if(developed){
+                    if(!link.value("k_factors").isArray()||
+                       !link.value("relief_width_mm").isDouble()||
+                       !link.value("relief_depth_mm").isDouble()||
+                       link.value("k_factors").toArray().size()>50){
+                        setError(error,"Malformed saved flat blank bend development.");return false;
+                    }
+                    for(const QJsonValue& factor:link.value("k_factors").toArray()){
+                        if(!factor.isDouble()||!std::isfinite(factor.toDouble())||
+                           factor.toDouble()<=0.0||factor.toDouble()>1.0){
+                            setError(error,"Invalid saved flat blank K-factor.");return false;
+                        }
+                        loaded.linkedFoldedFlatKFactors.append(factor.toDouble());
+                    }
+                    loaded.linkedFoldedFlatRelief={link.value("relief_width_mm").toDouble(),
+                                                  link.value("relief_depth_mm").toDouble()};
+                    if(!std::isfinite(loaded.linkedFoldedFlatRelief.widthMm)||
+                       !std::isfinite(loaded.linkedFoldedFlatRelief.depthMm)){
+                        setError(error,"Invalid saved flat blank relief values.");return false;
+                    }
+                }
+            }
+            // Parse inspection notes after feature trees so source identities
+            // can be checked on first edit. Orphans remain loadable, but the
+            // report marks them MISSING_FEATURE rather than CURRENT.
+            if(item.contains("feature_inspection_notes")){
+                if(schema!=kSchema24||!item.value("feature_inspection_notes").isArray()||
+                   item.value("feature_inspection_notes").toArray().size()>100){
+                    setError(error,"Malformed saved feature inspection notes.");return false;
+                }
+                QVector<FeatureInspectionNote> notes;
+                for(const auto& raw:item.value("feature_inspection_notes").toArray()){
+                    if(!raw.isObject()){
+                        setError(error,"Feature inspection note must be an object.");return false;
+                    }
+                    const QJsonObject entry=raw.toObject();
+                    if(entry.size()!=5||!entry.value("id").isString()||
+                       !entry.value("feature_id").isString()||
+                       !entry.value("category").isString()||
+                       !entry.value("note").isString()||
+                       !entry.value("reviewed_geometry_token").isString()){
+                        setError(error,"Invalid feature inspection note fields.");return false;
+                    }
+                    notes.append({entry.value("id").toString(),entry.value("feature_id").toString(),
+                                  entry.value("category").toString(),entry.value("note").toString(),
+                                  entry.value("reviewed_geometry_token").toString()});
+                }
+                if(!validFeatureNotes(notes,error))return false;
+                candidate.last().featureInspectionNotes=std::move(notes);
+            }
             ids.insert(id); names.insert(name.toLower());
         }
     } catch (const Standard_Failure& e) { setError(error,QStringLiteral("Invalid B-rep: %1").arg(e.what())); return false; }
       catch (const std::exception& e) { setError(error,QString::fromUtf8(e.what())); return false; }
+    // A saved document may contain retargeted links to later independent
+    // bodies. Validate every dependency by stable ID, then verify committed
+    // geometry in graph order rather than requiring creation order.
+    QVector<int> savedOrder;
+    if(!planLinkedBodyOrder(candidate,&savedOrder,error))return false;
+    QMap<QString,int> savedIndices;
+    for(int i=0;i<candidate.size();++i)savedIndices.insert(candidate[i].id,i);
+    for(int i:savedOrder){
+        const Part& child=candidate[i];
+        if(!child.linkedFoldedFlatSourceId.isEmpty()){
+            const int sourceIndex=savedIndices.value(child.linkedFoldedFlatSourceId,-1);
+            if(sourceIndex<0||sourceIndex==i){
+                setError(error,"Saved linked flat blank source does not exist.");return false;
+            }
+            const Part& source=candidate[sourceIndex];
+            if(!source.hasFoldedSheetMetalDefinition||
+               source.geometryToken!=source.foldedSheetGeometryToken||
+               child.linkedFoldedFlatSourceToken!=source.geometryToken){
+                setError(error,"Saved linked flat blank has a stale or invalid folded source.");return false;
+            }
+            TopoDS_Shape expected;
+            if(!createLinkedFlatBlank(source,child.linkedFoldedFlatKFactors,child.linkedFoldedFlatRelief,&expected,error))return false;
+            BRepAlgoAPI_Cut a(child.shape,expected);a.Build();
+            BRepAlgoAPI_Cut b(expected,child.shape);b.Build();
+            if(!a.IsDone()||!b.IsDone()){
+                setError(error,"Saved flat blank geometry could not be verified.");return false;
+            }
+            GProp_GProps pa,pb,pe;
+            BRepGProp::VolumeProperties(a.Shape(),pa);
+            BRepGProp::VolumeProperties(b.Shape(),pb);
+            BRepGProp::VolumeProperties(expected,pe);
+            const double threshold=std::max(1e-7,pe.Mass()*1e-8);
+            if(!std::isfinite(pa.Mass())||!std::isfinite(pb.Mass())||
+               pa.Mass()>threshold||pb.Mass()>threshold){
+                setError(error,"Saved flat blank no longer matches folded source development.");return false;
+            }
+        }
+        if(child.hasInterleavedHistory){
+            if(child.interleavedGeometryToken!=child.geometryToken){
+                setError(error,"Saved interleaved history is stale.");return false;
+            }
+            TopoDS_Shape rebuilt;QStringList sourceTokens;
+            if(!replayInterleavedHistory(child,candidate,savedIndices,&rebuilt,&sourceTokens,error)||
+               sourceTokens!=child.interleavedSourceTokens)return false;
+            BRepAlgoAPI_Cut forward(rebuilt,child.shape);forward.Build();
+            BRepAlgoAPI_Cut reverse(child.shape,rebuilt);reverse.Build();
+            if(!forward.IsDone()||!reverse.IsDone()){
+                setError(error,"Unable to verify saved interleaved geometry.");return false;
+            }
+            GProp_GProps a,b,c;BRepGProp::VolumeProperties(forward.Shape(),a);
+            BRepGProp::VolumeProperties(reverse.Shape(),b);
+            BRepGProp::VolumeProperties(rebuilt,c);
+            const double tolerance=std::max(1e-7,std::abs(c.Mass())*1e-7);
+            if(!std::isfinite(a.Mass())||!std::isfinite(b.Mass())||
+               a.Mass()>tolerance||b.Mass()>tolerance){
+                setError(error,"Saved interleaved steps do not reproduce the committed body.");return false;
+            }
+        }
+        if(child.hasInPlaceSketchFeature){
+            const int sourceIndex=savedIndices.value(child.inPlaceSketchSourceId,-1);
+            if(sourceIndex<0||sourceIndex==i){setError(error,"Saved in-place sketch source is missing.");return false;}
+            const Part& source=candidate[sourceIndex];
+            if(child.inPlaceSketchSourceToken!=source.geometryToken||
+               source.constrainedPolygonGeometryToken!=source.geometryToken){
+                setError(error,"Saved in-place sketch source token is stale.");return false;
+            }
+            TopoDS_Shape tool,expected;
+            if(!rebuildLinkedSketchSolid(source,child.inPlaceSketchDepthMm,child.inPlaceSketchOffsetMm,&tool,error)||
+               !linkedBooleanResult(child.inPlaceSketchBase,tool,child.inPlaceSketchOperation,&expected,error))return false;
+            if(child.inPlaceSketchOperation=="Cut"&&!linkedSketchCutEffective(child.inPlaceSketchBase,expected,error))return false;
+            if(child.inPlaceSketchOperation=="Fuse"&&!linkedSketchFuseEffective(child.inPlaceSketchBase,expected,error))return false;
+            if(child.hasInPlaceSketchFollowUp){
+                const int secondIndex=savedIndices.value(child.inPlaceFollowSourceId,-1);
+                if(secondIndex<0||secondIndex==i||secondIndex==sourceIndex){
+                    setError(error,"Saved second sketch source is missing or duplicated.");return false;
+                }
+                const Part& second=candidate[secondIndex];
+                if(!second.hasConstrainedPolygonDefinition||
+                   second.constrainedPolygonGeometryToken!=second.geometryToken||
+                   child.inPlaceFollowSourceToken!=second.geometryToken){
+                    setError(error,"Saved second sketch source is stale.");return false;
+                }
+                TopoDS_Shape cutter,finalShape;
+                if(!rebuildLinkedSketchSolid(second,child.inPlaceFollowDepthMm,
+                                             child.inPlaceFollowOffsetMm,&cutter,error)||
+                   !linkedBooleanResult(expected,cutter,child.inPlaceFollowOperation,&finalShape,error))return false;
+                if(child.inPlaceFollowOperation=="Cut"&&!linkedSketchCutEffective(expected,finalShape,error))return false;
+                if(child.inPlaceFollowOperation=="Fuse"&&!linkedSketchFuseEffective(expected,finalShape,error))return false;
+                expected=finalShape;
+            }
+            for(const auto& stage:child.extraInPlaceSketchStages){
+                const int extraIndex=savedIndices.value(stage.sourceId,-1);
+                if(extraIndex<0||extraIndex==i){
+                    setError(error,"Saved ordered sketch source is missing or circular.");return false;
+                }
+                const Part& extraSource=candidate[extraIndex];
+                if(!extraSource.hasConstrainedPolygonDefinition||
+                   extraSource.constrainedPolygonGeometryToken!=extraSource.geometryToken||
+                   stage.sourceToken!=extraSource.geometryToken){
+                    setError(error,"Saved ordered sketch stage is stale.");return false;
+                }
+                TopoDS_Shape tool,following;
+                if(!rebuildLinkedSketchSolid(extraSource,stage.depthMm,stage.offsetMm,&tool,error)||
+                   !linkedBooleanResult(expected,tool,stage.operation,&following,error))return false;
+                if(stage.operation=="Cut"&&!linkedSketchCutEffective(expected,following,error))return false;
+                if(stage.operation=="Fuse"&&!linkedSketchFuseEffective(expected,following,error))return false;
+                expected=following;
+            }
+            // The downstream general feature tree consumes the completed
+            // external-sketch stack. Compare against its persisted input
+            // rather than the final shape when both layers are present.
+            const TopoDS_Shape savedInPlaceResult=
+                child.hasShapeFeatureTree?child.shapeFeatureBase:child.shape;
+            GProp_GProps x,y;BRepGProp::VolumeProperties(expected,x);BRepGProp::VolumeProperties(savedInPlaceResult,y);
+            if(std::abs(x.Mass()-y.Mass())>std::max(1e-5,x.Mass()*1e-5)){
+                setError(error,"Saved in-place sketch feature does not match its original geometry.");return false;
+            }
+            // Equal volume alone cannot detect a malicious or corrupted
+            // translated feature. Compare the expected and saved B-rep bounds
+            // as a second, independent persistence invariant.
+            Bnd_Box expectedBounds,savedBounds;
+            BRepBndLib::Add(expected,expectedBounds);
+            BRepBndLib::Add(savedInPlaceResult,savedBounds);
+            if(expectedBounds.IsVoid()||savedBounds.IsVoid()){
+                setError(error,"Saved in-place sketch geometry has invalid bounds.");return false;
+            }
+            double ax0,ay0,az0,ax1,ay1,az1,bx0,by0,bz0,bx1,by1,bz1;
+            expectedBounds.Get(ax0,ay0,az0,ax1,ay1,az1);
+            savedBounds.Get(bx0,by0,bz0,bx1,by1,bz1);
+            const double expectedCoords[]={ax0,ay0,az0,ax1,ay1,az1};
+            const double savedCoords[]={bx0,by0,bz0,bx1,by1,bz1};
+            for(int coord=0;coord<6;++coord){
+                if(std::abs(expectedCoords[coord]-savedCoords[coord])>1e-4){
+                    setError(error,"Saved in-place sketch geometry bounds differ from its source feature.");return false;
+                }
+            }
+            continue;
+        }
+        if(child.hasLinkedSketchExtrusion){
+            const int sourceIndex=savedIndices.value(child.linkedSketchSourceId,-1);
+            if(sourceIndex<0){setError(error,"Saved linked sketch source is missing.");return false;}
+            const Part& source=candidate[sourceIndex];
+            if(source.geometryToken!=child.linkedSketchSourceToken){
+                setError(error,"Saved linked sketch is stale; source token does not match.");return false;
+            }
+            TopoDS_Shape expected;
+            if(!rebuildLinkedSketchSolid(source,child.linkedSketchDepthMm,
+                                         child.linkedSketchOffsetMm,&expected,error)||
+               !validShape(expected,error))return false;
+            GProp_GProps expectedProps,savedProps;
+            BRepGProp::VolumeProperties(expected,expectedProps);
+            BRepGProp::VolumeProperties(child.shape,savedProps);
+            if(std::abs(expectedProps.Mass()-savedProps.Mass())>
+               std::max(1e-5,expectedProps.Mass()*1e-5)){
+                setError(error,"Saved linked sketch solid differs from its source sketch.");return false;
+            }
+            Bnd_Box expectedBounds,actualBounds;
+            BRepBndLib::AddOptimal(expected,expectedBounds,false,false);
+            BRepBndLib::AddOptimal(child.shape,actualBounds,false,false);
+            if(expectedBounds.IsVoid()!=actualBounds.IsVoid()){
+                setError(error,"Invalid linked sketch bounds.");return false;
+            }
+            if(!expectedBounds.IsVoid()){
+                double a[6],b[6];
+                expectedBounds.Get(a[0],a[1],a[2],a[3],a[4],a[5]);
+                actualBounds.Get(b[0],b[1],b[2],b[3],b[4],b[5]);
+                for(int k=0;k<6;++k)if(std::abs(a[k]-b[k])>1e-4){
+                    setError(error,"Saved linked sketch placement differs from its source.");return false;
+                }
+            }
+            continue;
+        }
+        if(!child.hasLinkedBoolean)continue;
+        const int a=savedIndices.value(child.linkedPrimaryId,-1);
+        const int b=savedIndices.value(child.linkedToolId,-1);
+        if(a<0||b<0||a==b||candidate[a].isSurfaceBody||candidate[b].isSurfaceBody){
+            setError(error,"Saved linked Boolean refers to invalid, cyclic, or missing sources.");return false;
+        }
+        if(child.linkedPrimaryToken==candidate[a].geometryToken&&child.linkedToolToken==candidate[b].geometryToken){
+            TopoDS_Shape expected;
+            if(!linkedBooleanResult(candidate[a].shape,candidate[b].shape,child.linkedOperation,&expected,error))return false;
+            if(child.linkedOperation==QStringLiteral("Fuse")&&candidate[b].hasLinkedSketchExtrusion&&
+               !linkedSketchFuseEffective(candidate[a].shape,expected,error))return false;
+            if(child.linkedOperation==QStringLiteral("Cut")&&candidate[b].hasLinkedSketchExtrusion&&
+               !linkedSketchCutEffective(candidate[a].shape,expected,error))return false;
+            GProp_GProps x,y;BRepGProp::VolumeProperties(expected,x);BRepGProp::VolumeProperties(child.shape,y);
+            if(std::abs(x.Mass()-y.Mass())>std::max(1e-5,x.Mass()*1e-5)){
+                setError(error,"Saved linked Boolean geometry is inconsistent with its sources.");return false;
+            }
+        }
+    }
     for(const Part& child:candidate){
         if(child.assemblyJointType.isEmpty())continue;
         if(child.componentDefinitionId.isEmpty()){
@@ -6677,9 +13120,254 @@ bool SceneDocument::load(const QString& path, QString* error) {
         }
         drawingSheetIds.insert(part.drawingSettings.sheetId);
     }
+    // Optional v24 local-frame rigid network. Validate the entire serialized
+    // graph before committing any scene state, including on malformed input.
+    QString loadedMateFixed;
+    QVector<AssemblyNetworkMate> loadedMates;
+    if(root.contains("live_rigid_mates")){
+        if(schema!=kSchema24||!root.value("live_rigid_mates").isObject()){
+            setError(error,"Invalid saved live-mate network format.");return false;
+        }
+        const QJsonObject archive=root.value("live_rigid_mates").toObject();
+        if(archive.size()!=3||archive.value("version").toInt(-1)!=1||
+           !archive.value("fixed").isString()||!archive.value("connections").isArray()){
+            setError(error,"Malformed live-mate record or unknown version.");return false;
+        }
+        loadedMateFixed=archive.value("fixed").toString();
+        const QJsonArray links=archive.value("connections").toArray();
+        if(loadedMateFixed.isEmpty()||links.isEmpty()||links.size()>128){
+            setError(error,"Saved live mates have no fixed component or invalid connection count.");return false;
+        }
+        const auto knownComponent=[&](const QString& id){
+            return std::any_of(candidate.cbegin(),candidate.cend(),[&](const Part& p){
+                return p.id==id&&!p.componentDefinitionId.isEmpty()&&p.assemblyJointType.isEmpty();
+            });
+        };
+        if(!knownComponent(loadedMateFixed)){
+            setError(error,"Saved live-mate fixed occurrence is missing or not independent.");return false;
+        }
+        const auto readVec=[](const QJsonValue& raw,mates::Vec3* value){
+            if(!raw.isArray())return false;
+            const auto components=raw.toArray();
+            if(components.size()!=3)return false;
+            double a[3]{};
+            for(int i=0;i<3;++i){
+                if(!components[i].isDouble()||
+                   !std::isfinite(components[i].toDouble())||
+                   std::abs(components[i].toDouble())>1e6)return false;
+                a[i]=components[i].toDouble();
+            }
+            *value={a[0],a[1],a[2]};return true;
+        };
+        QStringList bodyIds{loadedMateFixed};
+        std::vector<mates::NetworkConnection> graph;
+        for(const auto& rawLink:links){
+            if(!rawLink.isObject()){
+                setError(error,"Saved mate connection must be an object.");return false;
+            }
+            const QJsonObject link=rawLink.toObject();
+            if(link.size()!=3||!link.value("parent").isString()||
+               !link.value("child").isString()||!link.value("constraints").isArray()){
+                setError(error,"Malformed saved rigid mate connection.");return false;
+            }
+            AssemblyNetworkMate entry;
+            entry.parentBodyId=link.value("parent").toString();
+            entry.childBodyId=link.value("child").toString();
+            if(entry.parentBodyId==entry.childBodyId||!knownComponent(entry.parentBodyId)||
+               !knownComponent(entry.childBodyId)){
+                setError(error,"Saved mate refers to an invalid or jointed component.");return false;
+            }
+            if(!bodyIds.contains(entry.parentBodyId))bodyIds.append(entry.parentBodyId);
+            if(!bodyIds.contains(entry.childBodyId))bodyIds.append(entry.childBodyId);
+            const QJsonArray observations=link.value("constraints").toArray();
+            if(observations.isEmpty()||observations.size()>32){
+                setError(error,"Saved mate has invalid constraint count.");return false;
+            }
+            for(const auto& raw:observations){
+                if(!raw.isObject()){
+                    setError(error,"Saved mate observation must be an object.");return false;
+                }
+                const QJsonObject record=raw.toObject();
+                const QJsonValue kind=record.value("kind");
+                if((record.size()!=5&&record.size()!=6)||!kind.isDouble()||
+                   kind.toInt(-1)<0||kind.toInt(-1)>2||kind.toDouble()!=kind.toInt(-1)){
+                    setError(error,"Invalid stored mate observation type.");return false;
+                }
+                mates::Constraint observation;
+                observation.kind=static_cast<mates::Kind>(kind.toInt());
+                if(record.contains("plane_offset_mm")){
+                    const auto offset=record.value("plane_offset_mm");
+                    if(record.size()!=6||observation.kind!=mates::Kind::CoincidentPlane||
+                       !offset.isDouble()||!std::isfinite(offset.toDouble())||
+                       std::abs(offset.toDouble())>1e6){
+                        setError(error,"Invalid saved plane offset observation.");return false;
+                    }
+                    observation.offsetMm=offset.toDouble();
+                }else if(record.size()!=5){
+                    setError(error,"Unexpected saved mate observation field.");return false;
+                }
+                if(!readVec(record.value("parent_point"),&observation.parentPoint)||
+                   !readVec(record.value("child_point"),&observation.childPoint)||
+                   !readVec(record.value("parent_axis"),&observation.parentDirection)||
+                   !readVec(record.value("child_axis"),&observation.childDirection)){
+                    setError(error,"Invalid stored rigid mate vector.");return false;
+                }
+                entry.constraints.push_back(observation);
+            }
+            loadedMates.append(std::move(entry));
+        }
+        if(bodyIds.size()>32||bodyIds.size()<2){
+            setError(error,"Saved live-mate network exceeds supported component count.");return false;
+        }
+        for(const auto& link:loadedMates){
+            graph.push_back({static_cast<std::size_t>(bodyIds.indexOf(link.parentBodyId)),
+                             static_cast<std::size_t>(bodyIds.indexOf(link.childBodyId)),
+                             link.constraints});
+        }
+        mates::NetworkSolution validated;std::string detail;
+        if(!mates::solveRigidNetwork(static_cast<std::size_t>(bodyIds.size()),0,
+                                     graph,&validated,&detail)){
+            setError(error,QStringLiteral("Saved live-mate graph is invalid: ")+QString::fromStdString(detail));return false;
+        }
+    }
+    // All optional articulated data is validated before the document commit.
+    // Old v24 scenes that omit this record retain their original meaning.
+    QString loadedArticulatedFixed;
+    QVector<ArticulatedNetworkJoint> loadedArticulatedJoints;
+    QMap<QString,mates::Transform> loadedArticulatedReferences;
+    if(root.contains("live_articulated_mates")){
+        if(schema!=kSchema24||!root.value("live_articulated_mates").isObject()||
+           !loadedMateFixed.isEmpty()){
+            setError(error,"Invalid or conflicting saved articulated network format.");return false;
+        }
+        const auto network=root.value("live_articulated_mates").toObject();
+        if(network.size()!=4||network.value("version").toInt(-1)!=1||
+           !network.value("fixed").isString()||
+           !network.value("joints").isArray()||
+           !network.value("reference_poses").isArray()){
+            setError(error,"Malformed articulated record or unsupported version.");return false;
+        }
+        loadedArticulatedFixed=network.value("fixed").toString();
+        const auto hasFreeOccurrence=[&](const QString& id){
+            return std::any_of(candidate.cbegin(),candidate.cend(),[&](const Part& part){
+                return part.id==id&&!part.componentDefinitionId.isEmpty()&&
+                       part.assemblyJointType.isEmpty();
+            });
+        };
+        if(loadedArticulatedFixed.isEmpty()||!hasFreeOccurrence(loadedArticulatedFixed)){
+            setError(error,"Saved articulated fixed occurrence is invalid.");return false;
+        }
+        const auto readVec=[](const QJsonValue& source,mates::Vec3* value){
+            if(!source.isArray()||source.toArray().size()!=3||!value)return false;
+            const QJsonArray xyz=source.toArray();double data[3]{};
+            for(int i=0;i<3;++i){
+                if(!xyz[i].isDouble()||!std::isfinite(xyz[i].toDouble())||
+                   std::abs(xyz[i].toDouble())>=1e6)return false;
+                data[i]=xyz[i].toDouble();
+            }
+            *value={data[0],data[1],data[2]};return true;
+        };
+        const auto readFrame=[&](const QJsonValue& source,mates::Transform* frame){
+            if(!source.isObject()||!frame)return false;
+            const auto item=source.toObject();
+            if(item.size()!=2||!readVec(item.value("translation"),&frame->translation)||
+               !item.value("rotation").isArray()||item.value("rotation").toArray().size()!=9)
+                return false;
+            const auto rotation=item.value("rotation").toArray();
+            for(int i=0;i<9;++i){
+                if(!rotation[i].isDouble()||!std::isfinite(rotation[i].toDouble())||
+                   std::abs(rotation[i].toDouble())>2.0)return false;
+                frame->rotation[static_cast<size_t>(i)]=rotation[i].toDouble();
+            }
+            const auto& r=frame->rotation;
+            const double determinant=r[0]*(r[4]*r[8]-r[5]*r[7])-
+                                     r[1]*(r[3]*r[8]-r[5]*r[6])+
+                                     r[2]*(r[3]*r[7]-r[4]*r[6]);
+            if(!std::isfinite(determinant)||std::abs(determinant-1.0)>1e-5)return false;
+            const auto identity=mates::multiply(*frame,mates::inverseRigid(*frame));
+            for(int i=0;i<9;++i)
+                if(std::abs(identity.rotation[static_cast<size_t>(i)]-(i%4==0?1.0:0.0))>1e-5)return false;
+            return true;
+        };
+        const QJsonArray edges=network.value("joints").toArray();
+        if(edges.isEmpty()||edges.size()>64){
+            setError(error,"Saved articulated joint count is invalid.");return false;
+        }
+        QStringList ids{loadedArticulatedFixed};
+        for(const auto& raw:edges){
+            if(!raw.isObject()){
+                setError(error,"Malformed articulated connection.");return false;
+            }
+            const auto joint=raw.toObject();
+            const auto kind=joint.value("kind");
+            if(joint.size()!=9||!joint.value("parent").isString()||
+               !joint.value("child").isString()||!kind.isDouble()||
+               kind.toInt(-1)<0||kind.toInt(-1)>2||kind.toDouble()!=kind.toInt(-1)||
+               !joint.value("driven").isBool()||
+               !joint.value("initial").isDouble()||!joint.value("min").isDouble()||
+               !joint.value("max").isDouble()){
+                setError(error,"Invalid saved articulated joint fields.");return false;
+            }
+            ArticulatedNetworkJoint parsed;
+            parsed.parentBodyId=joint.value("parent").toString();
+            parsed.childBodyId=joint.value("child").toString();
+            if(parsed.parentBodyId==parsed.childBodyId||
+               !hasFreeOccurrence(parsed.parentBodyId)||!hasFreeOccurrence(parsed.childBodyId)||
+               !readVec(joint.value("axis"),&parsed.axis)||
+               !readFrame(joint.value("child_at_zero"),&parsed.childAtZero)){
+                setError(error,"Invalid saved articulated joint frame or endpoints.");return false;
+            }
+            parsed.kind=static_cast<articulated::JointKind>(kind.toInt());
+            parsed.initial=joint.value("initial").toDouble();
+            parsed.minimum=joint.value("min").toDouble();
+            parsed.maximum=joint.value("max").toDouble();
+            parsed.driven=joint.value("driven").toBool();
+            loadedArticulatedJoints.append(parsed);
+            if(!ids.contains(parsed.parentBodyId))ids.append(parsed.parentBodyId);
+            if(!ids.contains(parsed.childBodyId))ids.append(parsed.childBodyId);
+        }
+        if(ids.size()<2||ids.size()>24){
+            setError(error,"Saved articulated component count is invalid.");return false;
+        }
+        const auto frames=network.value("reference_poses").toArray();
+        if(frames.size()!=ids.size()){
+            setError(error,"Saved articulated reference count does not match graph components.");return false;
+        }
+        for(const auto& raw:frames){
+            if(!raw.isObject()){
+                setError(error,"Invalid articulated reference pose record.");return false;
+            }
+            const auto item=raw.toObject();
+            const QString id=item.value("id").toString();
+            mates::Transform pose;
+            if(item.size()!=2||!item.value("id").isString()||
+               !ids.contains(id)||loadedArticulatedReferences.contains(id)||
+               !readFrame(item.value("frame"),&pose)){
+                setError(error,"Invalid or duplicate articulated reference frame.");return false;
+            }
+            loadedArticulatedReferences.insert(id,pose);
+        }
+        std::vector<articulated::Joint> graph;
+        graph.reserve(static_cast<size_t>(loadedArticulatedJoints.size()));
+        for(const auto& joint:loadedArticulatedJoints){
+            graph.push_back({static_cast<size_t>(ids.indexOf(joint.parentBodyId)),
+                             static_cast<size_t>(ids.indexOf(joint.childBodyId)),joint.kind,
+                             joint.childAtZero,joint.axis,joint.initial,joint.minimum,
+                             joint.maximum,joint.driven});
+        }
+        articulated::Solution solution;std::string detail;
+        if(!articulated::solveNetwork(static_cast<size_t>(ids.size()),0,graph,&solution,&detail)){
+            setError(error,QStringLiteral("Saved articulated mechanism is invalid: ")+
+                           QString::fromStdString(detail));return false;
+        }
+    }
     // Transactional load: no part of the original document is touched until all validation succeeds.
     parts_ = std::move(candidate);
     drawingReadinessPolicy_=candidateReadinessPolicy;
+    liveRigidMateFixed_=loadedMateFixed;liveRigidMates_=std::move(loadedMates);
+    liveArticulatedFixed_=loadedArticulatedFixed;
+    liveArticulatedJoints_=std::move(loadedArticulatedJoints);
+    liveArticulatedReferencePoses_=std::move(loadedArticulatedReferences);
     undo_.clear(); redo_.clear(); path_ = path;
     revision_ = 0; savedRevision_ = 0; nextRevision_ = 1;
     return true;
@@ -7187,6 +13875,10 @@ bool SceneDocument::exportBodyScheduleCsv(const QString& path,QString* error) co
     stream.setLocale(QLocale::c());
     const auto field=[](const QString& value){
         QString escaped=value;
+        // External body names must be inert when the schedule is opened in Excel.
+        const QString trimmed=escaped.trimmed();
+        if(!trimmed.isEmpty() && QStringLiteral("=+-@").contains(trimmed.front()))
+            escaped.prepend(QChar(0x27));
         escaped.replace('"',"\"\"");
         return QStringLiteral("\"")+escaped+QStringLiteral("\"");
     };

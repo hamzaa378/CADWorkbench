@@ -1,0 +1,35 @@
+{
+  "date": "2026-11-09",
+  "base_zip": "CADWorkbench_v170_Comprehensive_WindowsQA_GapAudit_PRELIMINARY_20261109.zip",
+  "verification_environment": "Linux container, not Windows MSVC/Qt/OpenCASCADE C++ build",
+  "project_cpp_files": 47,
+  "project_header_files": 53,
+  "native_ctest_registered": 130,
+  "native_ctest_executed_on_modified_source": false,
+  "python_source_and_independent_ocp_tests": {
+    "executed": 533,
+    "passed": 533,
+    "failed": 0,
+    "evidence_file": "docs/V170_20261109_SOURCE_AUDIT_AND_FOLDED_CRASH_DIAGNOSIS.md"
+  },
+  "python_compileall": "pass",
+  "portable_gcc_cpp_targets": {
+    "executed": 22,
+    "passed": 22,
+    "sanitizers": false
+  },
+  "portable_clang_cpp_targets": {
+    "executed": 22,
+    "passed": 22,
+    "sanitizers": true
+  },
+  "previous_user_windows_focused_native": {
+    "passed": 3,
+    "failed": 1,
+    "folded_sheet_metal": "segmentation fault after commit edited solid: before"
+  },
+  "user_windows_full_audit": "not executed (runner falsely treated a CMake Warning as a build failure)",
+  "fix_status": "Qt implicit-sharing iterator bug corrected in source; Windows execution required for confirmation",
+  "test_suppression": "none",
+  "manual_acceptance_verification": "pending: all 60 cases require recorded independent evidence"
+}

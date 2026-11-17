@@ -1,0 +1,3 @@
+Command: python -m unittest discover -s tests -p "*.py"
+Result: Ran 875 tests in 12.325s; OK (16 new Sprint 7 contracts).
+Historical native-pass text in some test fixture output is SYNTHETIC: not actual Windows CTest evidence.

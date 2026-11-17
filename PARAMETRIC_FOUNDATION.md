@@ -1,5 +1,7 @@
 # Parametric sketch foundation
 
+> Current source addendum (3 November 2026): The general sketch editor can add and remove geometric constraints and circles, and the solver supports segment length, segment angle from X, signed point-to-line and point-to-circle offsets, symmetry, tangency, and finite point-on-segment. Failed solves report the largest per-constraint residual. The bounded parametric hole chain also supports blind-hole linear patterns and optional-step suppression. Older release notes below describe the stage at which each feature first appeared; use `CONTINUE_HERE.md` for current scope.
+
 CADWorkbench v1.37 adds a bounded editable feature chain for an XY rectangle, base extrusion, and one circular through-hole cut. The v1.45 extension adds a second fully constrained rectangle sketch with an editable sketch origin, including negative coordinates. Version 1.47 adds an optional linear pattern; v1.48 supports X or Y direction with editable integer count and center spacing. Version 1.54 adds an optional all-edge chamfer; v1.55 adds an optional all-edge fillet. Each stores an editable named dimension. All feature records and parameters persist and edits rebuild the affected solid.
 
 ## Create and edit

@@ -14,6 +14,10 @@
 namespace cad {
 namespace {
 QString csvField(QString value) {
+    // CSV quotation alone does not prevent spreadsheet formula execution.
+    const QString trimmed=value.trimmed();
+    if(!trimmed.isEmpty() && QStringLiteral("=+-@").contains(trimmed.front()))
+        value.prepend(QChar(0x27));
     value.replace('"', "\"\"");
     return QStringLiteral("\"") + value + QStringLiteral("\"");
 }
@@ -138,6 +142,103 @@ bool SceneDocument::setPartMetadata(const QString& id, const QString& partNumber
         part.supplierPartNumber = cleanSupplierPartNumber;
         break;
     }
+    return true;
+}
+
+namespace {
+// The metadata editor allows slash-delimited groups. This stricter parser is
+// used by *batch* hierarchy mutation, preventing ambiguous parent/child sets.
+bool canonicalGroupPath(QString input,QString* path,QString* error) {
+    input=input.trimmed();
+    input.replace(QLatin1Char('\\'),QLatin1Char('/'));
+    if(input.isEmpty() || input.size()>200 || input.startsWith('/') ||
+       input.endsWith('/') || input.contains("//")) {
+        if(error)*error="Assembly group path must be nonempty, at most 200 characters, without empty components.";
+        return false;
+    }
+    const QStringList parts=input.split('/');
+    if(parts.size()>32) {
+        if(error)*error="Assembly nesting exceeds the 32-level limit.";
+        return false;
+    }
+    for(const QString& segment:parts) {
+        if(segment!=segment.trimmed() || segment=="." || segment==".." || segment.size()>80) {
+            if(error)*error="Each assembly group name must be trimmed, 1-80 characters, and cannot be '.' or '..'.";
+            return false;
+        }
+        for(const QChar c:segment) if(c.isNull() || c.category()==QChar::Other_Control) {
+            if(error)*error="Assembly group names cannot contain control characters.";
+            return false;
+        }
+    }
+    if(path)*path=parts.join('/');
+    return true;
+}
+}
+
+QStringList SceneDocument::assemblyGroupPaths() const {
+    QSet<QString> all;
+    for(const Part& part:parts_) {
+        QString prefix;
+        for(const QString& item:part.assemblyPath.split('/',Qt::SkipEmptyParts)) {
+            prefix=prefix.isEmpty()?item:prefix+'/'+item;
+            all.insert(prefix);
+        }
+    }
+    QStringList result=all.values();
+    std::sort(result.begin(),result.end(),[](const QString& a,const QString& b){
+        const int da=a.count('/'),db=b.count('/');
+        return da==db?QString::compare(a,b,Qt::CaseSensitive)<0:da<db;
+    });
+    return result;
+}
+
+bool SceneDocument::moveAssemblySubtree(const QString& oldPath,const QString& newPath,QString* error) {
+    QString from,to;
+    if(!canonicalGroupPath(oldPath,&from,error) ||
+       !canonicalGroupPath(newPath,&to,error))return false;
+    const QString oldPrefix=from+QLatin1Char('/');
+    const QString newPrefix=to+QLatin1Char('/');
+    if(from==to) {
+        for(const Part& part:parts_) if(part.assemblyPath==from || part.assemblyPath.startsWith(oldPrefix))
+            return true;
+        if(error)*error="No body belongs to the specified assembly group.";
+        return false;
+    }
+    if(to.startsWith(oldPrefix,Qt::CaseInsensitive) ||
+       from.compare(to,Qt::CaseInsensitive)==0) {
+        if(error)*error="A group cannot be moved into itself or a case-ambiguous duplicate.";
+        return false;
+    }
+    QVector<int> movedIndices;
+    QStringList replacementPaths;
+    for(int i=0;i<parts_.size();++i) {
+        const QString& current=parts_[i].assemblyPath;
+        if(current==from || current.startsWith(oldPrefix)) {
+            const QString replacement=to+current.mid(from.size());
+            QString valid;
+            if(!canonicalGroupPath(replacement,&valid,error))return false;
+            movedIndices.append(i);
+            replacementPaths.append(valid);
+        }
+    }
+    if(movedIndices.isEmpty()) {
+        if(error)*error="No body belongs to the specified assembly group.";
+        return false;
+    }
+    // A subtree move must not silently absorb an independent existing group.
+    for(int i=0;i<parts_.size();++i) {
+        if(movedIndices.contains(i))continue;
+        const QString& current=parts_[i].assemblyPath;
+        if(current.compare(to,Qt::CaseInsensitive)==0 ||
+           current.startsWith(newPrefix,Qt::CaseInsensitive)) {
+            if(error)*error="Destination already has an independent assembly group; choose a unique group path.";
+            return false;
+        }
+    }
+    checkpoint();
+    for(int i=0;i<movedIndices.size();++i)
+        parts_[movedIndices[i]].assemblyPath=replacementPaths[i];
     return true;
 }
 
@@ -285,6 +386,122 @@ QVector<BillOfMaterialsRow> SceneDocument::buildBillOfMaterials(const QStringLis
         }
     }
     return rows;
+}
+
+bool SceneDocument::exportMotionSamplesCsv(const QString& firstId,const QString& secondId,
+                                            const QVector<MotionInterferenceSample>& samples,
+                                            const QString& path,QString* error) const {
+    const Part* first=find(firstId),*second=find(secondId);
+    if(firstId==secondId||!first||!second){
+        if(error)*error="Select two distinct existing bodies for a motion-sample report.";
+        return false;
+    }
+    if(samples.size()<2||samples.size()>256){
+        if(error)*error="A motion-sample report needs 2 to 256 sampled positions.";
+        return false;
+    }
+    double previousTime=-1.0;
+    for(const MotionInterferenceSample& sample:samples){
+        if(!std::isfinite(sample.timeSeconds)||sample.timeSeconds<0||
+           sample.timeSeconds<=previousTime||sample.timeSeconds>3600||
+           !std::isfinite(sample.overlapVolumeMm3)||sample.overlapVolumeMm3<0||
+           !std::isfinite(sample.clearanceMm)||sample.clearanceMm<0||
+           !std::isfinite(sample.firstX)||!std::isfinite(sample.firstY)||!std::isfinite(sample.firstZ)||
+           !std::isfinite(sample.secondX)||!std::isfinite(sample.secondY)||!std::isfinite(sample.secondZ)||
+           sample.interfering!=(sample.overlapVolumeMm3>1e-7)){
+            if(error)*error="Motion-sample report contains an invalid or out-of-order sample.";
+            return false;
+        }
+        previousTime=sample.timeSeconds;
+    }
+    QByteArray bytes;
+    QTextStream out(&bytes,QIODevice::WriteOnly);out.setLocale(QLocale::c());
+    out << "Time (s),First body ID,First body name,Second body ID,Second body name,Shared volume (mm^3),Clearance (mm),Interfering,First X (mm),First Y (mm),First Z (mm),Second X (mm),Second Y (mm),Second Z (mm)\r\n";
+    for(const MotionInterferenceSample& sample:samples){
+        out << csvNumber(sample.timeSeconds) << ',' << csvField(firstId) << ',' << csvField(first->name)
+            << ',' << csvField(secondId) << ',' << csvField(second->name) << ','
+            << csvNumber(sample.overlapVolumeMm3) << ',' << csvNumber(sample.clearanceMm) << ','
+            << (sample.interfering?1:0) << ','
+            << csvNumber(sample.firstX) << ',' << csvNumber(sample.firstY) << ',' << csvNumber(sample.firstZ) << ','
+            << csvNumber(sample.secondX) << ',' << csvNumber(sample.secondY) << ',' << csvNumber(sample.secondZ)
+            << "\r\n";
+    }
+    out.flush();
+    if(out.status()!=QTextStream::Ok){if(error)*error="Could not format the motion-sample CSV.";return false;}
+    return writeCsvFile(path,bytes,error);
+}
+
+bool SceneDocument::exportMotionClearanceIntervalsCsv(const QString& firstId,const QString& secondId,
+                                                     const QVector<MotionClearanceInterval>& intervals,
+                                                     const QString& path,QString* error) const {
+    const Part* first=find(firstId),*second=find(secondId);
+    if(firstId==secondId||!first||!second){
+        if(error)*error="Select two distinct existing bodies for a clearance-interval report.";
+        return false;
+    }
+    if(intervals.isEmpty()||intervals.size()>255){
+        if(error)*error="An interval audit needs 1 to 255 consecutive time intervals.";
+        return false;
+    }
+    double previousEnd=-1.0;
+    for(const auto& item:intervals){
+        if(!std::isfinite(item.startSeconds)||!std::isfinite(item.endSeconds)||
+           item.startSeconds<0||item.endSeconds<=item.startSeconds||item.endSeconds>3600||
+           (previousEnd>=0&&item.startSeconds!=previousEnd)||
+           !std::isfinite(item.minimumEndpointClearanceMm)||item.minimumEndpointClearanceMm<0||
+           !std::isfinite(item.clearanceLowerBoundMm)||
+           (!item.speedBoundAvailable&&item.provenAboveMargin)||
+           (item.sampledOverlap&&item.provenAboveMargin)||
+           (item.provenAboveMargin&&item.clearanceLowerBoundMm<=0)){
+            if(error)*error="Clearance interval report contains invalid or nonconsecutive observations.";
+            return false;
+        }
+        previousEnd=item.endSeconds;
+    }
+    QByteArray bytes;
+    QTextStream out(&bytes,QIODevice::WriteOnly);out.setLocale(QLocale::c());
+    out << "Start (s),End (s),First body ID,First body name,Second body ID,Second body name,"
+           "Minimum endpoint clearance (mm),Conditional lower bound (mm),Speed bound supplied,"
+           "Sampled overlap,Conditionally above margin,Needs refinement\r\n";
+    for(const auto& item:intervals){
+        out << csvNumber(item.startSeconds) << ',' << csvNumber(item.endSeconds) << ','
+            << csvField(firstId) << ',' << csvField(first->name) << ','
+            << csvField(secondId) << ',' << csvField(second->name) << ','
+            << csvNumber(item.minimumEndpointClearanceMm) << ',';
+        if(item.speedBoundAvailable)out << csvNumber(item.clearanceLowerBoundMm);
+        out << ',' << (item.speedBoundAvailable?1:0)
+            << ',' << (item.sampledOverlap?1:0)
+            << ',' << (item.provenAboveMargin?1:0)
+            << ',' << (item.refinementNeeded?1:0) << "\r\n";
+    }
+    out.flush();
+    if(out.status()!=QTextStream::Ok){if(error)*error="Could not format the clearance-interval CSV.";return false;}
+    return writeCsvFile(path,bytes,error);
+}
+
+bool SceneDocument::exportMotionContactsCsv(const QVector<MotionInterferenceContact>& contacts,
+                                             const QString& path,QString* error) const {
+    if(contacts.size()>50000){if(error)*error="Motion-contact report exceeds its row limit.";return false;}
+    for(const MotionInterferenceContact& contact:contacts){
+        if(!std::isfinite(contact.timeSeconds)||contact.timeSeconds<0||contact.timeSeconds>3600||
+           !std::isfinite(contact.overlapVolumeMm3)||contact.overlapVolumeMm3<=1e-7||
+           contact.firstBodyId==contact.secondBodyId||!find(contact.firstBodyId)||!find(contact.secondBodyId)){
+            if(error)*error="Motion-contact report contains an invalid sample or missing body.";
+            return false;
+        }
+    }
+    QByteArray bytes;
+    QTextStream out(&bytes,QIODevice::WriteOnly);out.setLocale(QLocale::c());
+    out << "Time (s),First body ID,First body name,Second body ID,Second body name,Shared volume (mm^3)\r\n";
+    for(const MotionInterferenceContact& contact:contacts){
+        const Part* first=find(contact.firstBodyId),*second=find(contact.secondBodyId);
+        out << csvNumber(contact.timeSeconds) << ',' << csvField(contact.firstBodyId) << ','
+            << csvField(first->name) << ',' << csvField(contact.secondBodyId) << ','
+            << csvField(second->name) << ',' << csvNumber(contact.overlapVolumeMm3) << "\r\n";
+    }
+    out.flush();
+    if(out.status()!=QTextStream::Ok){if(error)*error="Could not format the motion-contact CSV.";return false;}
+    return writeCsvFile(path,bytes,error);
 }
 
 bool SceneDocument::exportBillOfMaterialsCsv(const QString& path, QString* error) const {

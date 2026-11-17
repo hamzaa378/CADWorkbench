@@ -1,14 +1,38 @@
+# Local build trees, generated CMake/Visual Studio outputs and dependencies.
 /build/
 /out/
 /cmake-build*/
 /vcpkg_installed/
+/.vs/
+/.idea/
+/.vscode/
 /.venv*/
 **/__pycache__/
+**/.pytest_cache/
 *.pyc
+*.pyo
 *.obj
-*.lib
-*.pdb
+*.pch
 *.ilk
+*.pdb
+*.lib
+*.exp
+*.exe
+*.dll
+*.tlog
+*.lastbuildstate
+*.ninja
+*.sln
+*.vcxproj
+*.vcxproj.filters
 *.log
 *.zip
 *.7z
+
+# Older locally-produced QA logs are deliberately part of the checked
+# source archive and SHA256SUMS.txt. Keep these tracked for reproducibility.
+# New runtime/build logs elsewhere remain ignored.
+!/qa/*.log
+!/SPRINT7_QA_EVIDENCE/*.log
+!/SPRINT8_QA_EVIDENCE/*.log
+!/SPRINT9_QA_EVIDENCE/*.log

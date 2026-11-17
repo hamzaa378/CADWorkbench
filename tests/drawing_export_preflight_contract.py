@@ -19,7 +19,8 @@ class ExportPreflightContracts(unittest.TestCase):
         self.assertIn("*prepared=std::move(persisted);", section)
 
     def test_export_is_written_before_persistence_commit(self):
-        section = UI.split("void MainWindow::exportDrawing(bool asPdf) {", 1)[1].split(
+        self.assertIn("void MainWindow::exportDrawingDxf() { exportDrawing(false,true); }", UI)
+        section = UI.split("void MainWindow::exportDrawing(bool asPdf,bool asDxf) {", 1)[1].split(
             "void MainWindow::exportSheetMetalFlatPattern()", 1)[0]
         prepared = section.index("document_.prepareDrawingSheetSettings(")
         exported = section.index("if(!exported){", prepared)
@@ -29,6 +30,7 @@ class ExportPreflightContracts(unittest.TestCase):
         self.assertNotIn("document_.undo()", section)
         self.assertIn("prepared.noteAnnotations", section)
         self.assertIn("prepared.viewIds", section)
+        self.assertIn("cad::exportOrthographicDrawingDxf(svg,path,&error)", section)
 
     def test_native_failure_and_undo_cases_present(self):
         self.assertIn("testDrawingExportPreflightDoesNotAcknowledgeFailedSnapshot", TESTS)

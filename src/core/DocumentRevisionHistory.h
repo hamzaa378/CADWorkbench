@@ -69,6 +69,10 @@ public:
     static bool compare(const QString& scenePath,const QString& olderRevisionId,
                         const QString& newerRevisionId,DocumentRevisionDiff* diff,
                         QString* error = nullptr);
+    // Compare a verified checkpoint with the scene currently saved at scenePath.
+    // The caller must save in-memory edits first; this method never changes a file.
+    static bool compareWithSavedScene(const QString& scenePath,const QString& revisionId,
+                                      DocumentRevisionDiff* diff,QString* error = nullptr);
     // Restores a verified snapshot to targetPath using an atomic file replace.
     // A separate path is recommended so the current working file is retained.
     static bool restore(const QString& scenePath,const QString& revisionId,

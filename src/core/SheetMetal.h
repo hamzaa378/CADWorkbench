@@ -49,6 +49,14 @@ struct MultiBendFlatPattern {
     QVector<double> bendLinePositionsMm;
 };
 
+// Verify two independently produced development representations agree in
+// length, width, every bend position, allowance and deduction. Atomic output:
+// callers receive the existing error untouched on success only after checks.
+// Does not certify manufactured unfold accuracy.
+bool equivalentFoldedSheetDevelopment(const MultiBendFlatPattern& first,
+                                      const MultiBendFlatPattern& second,
+                                      QString* error=nullptr);
+
 struct SheetMetalRelief {
     double widthMm = 0.0; // zero disables end reliefs
     double depthMm = 0.0;
@@ -68,6 +76,14 @@ bool validateMultiBendShopLimits(const QVector<double>& outsideFlangeLengthsMm,
                                  const QVector<SheetMetalBend>& bends,
                                  const SheetMetalShopLimits& limits,
                                  QString* error = nullptr);
+// Folded-body flange lengths are already straight tangent-to-tangent lengths,
+// so the straight-length limit applies directly. This is a project check,
+// not a manufacturing certification or material-specific bend table.
+bool validateFoldedSheetShopLimits(const QVector<double>& straightNeutralFlangeLengthsMm,
+                                   double sheetWidthMm,double thicknessMm,
+                                   const QVector<FoldedSheetBend>& bends,
+                                   const SheetMetalShopLimits& limits,
+                                   QString* error = nullptr);
 
 // Parses comma-separated numeric inputs without discarding empty fields.
 // Invalid input leaves the caller's existing vector unchanged.
@@ -136,6 +152,14 @@ bool buildFoldedSheetFlatPatternDxf(const QVector<double>& straightNeutralFlange
                                    const QVector<FoldedSheetBend>& bends,const QVector<double>& kFactors,
                                    const SheetMetalRelief& relief,QByteArray* dxf,
                                    MultiBendFlatPattern* result = nullptr,QString* error = nullptr);
+// Read-only SVG preview of the *same validated* flat blank and bend stations
+// as the corresponding folded-sheet DXF, including optional end reliefs.
+// Both output buffers and the pattern remain unchanged if validation fails.
+bool buildFoldedSheetFlatPatternSvg(const QVector<double>& straightNeutralFlangeLengthsMm,
+                                   double sheetWidthMm,double thicknessMm,
+                                   const QVector<FoldedSheetBend>& bends,const QVector<double>& kFactors,
+                                   const SheetMetalRelief& relief,QByteArray* svg,
+                                   MultiBendFlatPattern* result=nullptr,QString* error=nullptr);
 bool exportFoldedSheetFlatPatternDxf(const QVector<double>& straightNeutralFlangeLengthsMm,
                                     double sheetWidthMm,double thicknessMm,
                                     const QVector<FoldedSheetBend>& bends,double kFactor,

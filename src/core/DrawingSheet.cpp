@@ -1,4 +1,8 @@
 #include "DrawingSheet.h"
+#include "DrawingEdgeAnchors.h"
+#include "ShapeFeatureTree.h"
+#include "DrawingSourceFingerprint.h"
+#include "DrawingDimensionMeasurement.h"
 
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
@@ -16,6 +20,7 @@
 #include <QHash>
 #include <QCryptographicHash>
 #include <QSet>
+#include <utility>
 #include <QDate>
 #include <QPointF>
 #include <QSaveFile>
@@ -30,6 +35,8 @@
 #include <QPainter>
 #include <QSvgRenderer>
 #include <TopExp_Explorer.hxx>
+#include <TopExp.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
@@ -272,16 +279,29 @@ void renderView(QTextStream& out, const ViewGeometry& view, const QString& label
         const double anchorY=cy-(callout.center.y-my)*scale;
         const double textX=anchorX+callout.annotation.offsetMm;
         const double textY=anchorY-callout.annotation.offsetMm;
+        const QString prefix=callout.annotation.kind=="DIAMETER"?QStringLiteral("Ø"):
+            (callout.annotation.kind=="CENTER_DISTANCE"?QStringLiteral("C-C "):
+            (callout.annotation.kind=="CENTER_X"?QStringLiteral("X="):
+            (callout.annotation.kind=="CENTER_Y"?QStringLiteral("Y="):
+            (callout.annotation.kind=="CENTER_Z"?QStringLiteral("Z="):QString()))));
+        QString dimensionLabel=prefix+QString::number(callout.lengthMm,'f',3);
+        if(callout.annotation.upperToleranceMm>0||callout.annotation.lowerToleranceMm>0)
+            dimensionLabel+=QStringLiteral(" +%1/-%2").arg(callout.annotation.upperToleranceMm,0,'f',3)
+                .arg(callout.annotation.lowerToleranceMm,0,'f',3);
+        dimensionLabel+=QStringLiteral(" mm");
         out << "<g data-drawing-annotation=\"selected-edge-dimension\" data-annotation-id=\"" << xml(callout.annotation.id)
             << "\" data-source-body-id=\"" << xml(callout.annotation.sourceBodyId)
             << "\" data-source-geometry-token=\"" << xml(callout.annotation.sourceGeometryToken)
             << "\" data-edge-index=\"" << callout.annotation.edgeIndex
+            << "\" data-kind=\"" << xml(callout.annotation.kind)
+            << "\" data-upper-tolerance-mm=\"" << QString::number(callout.annotation.upperToleranceMm,'f',3)
+            << "\" data-lower-tolerance-mm=\"" << QString::number(callout.annotation.lowerToleranceMm,'f',3)
             << "\" data-value-mm=\"" << QString::number(callout.lengthMm,'f',3)
             << "\"><path fill=\"none\" stroke=\"#1f2937\" stroke-width=\"0.18\" d=\"M"
             << anchorX << ' ' << anchorY << 'L' << textX << ' ' << textY
             << "\"/><text x=\"" << textX+1.0 << "\" y=\"" << textY
             << "\" font-family=\"Arial,sans-serif\" font-size=\"3\" fill=\"#111827\">"
-            << QString::number(callout.lengthMm,'f',3) << " mm</text></g>\n";
+            << xml(dimensionLabel) << "</text></g>\n";
     }
     out << "<text x=\"" << QString::number(cx, 'f', 2) << "\" y=\""
         << QString::number(cy + std::max(4.0, height(view) * scale * 0.5 + 23.0), 'f', 2)
@@ -423,7 +443,8 @@ bool buildOrthographicDrawingSvg(const Part& part, QByteArray* svg, QString* err
                                  const QVector<DrawingDetailAnnotation>& detailAnnotations,
                                  const QVector<DrawingSectionAnnotation>& sectionAnnotations,
                                  const QVector<DrawingEdgeDimensionAnnotation>& edgeDimensionAnnotations,
-                                 const QVector<Part>& sourceBodies) {
+                                 const QVector<Part>& sourceBodies,
+                                 const QVector<DrawingGdtFrameAnnotation>& gdtFrames) {
     if (!svg) { fail(error, "Provide an output buffer for the drawing SVG."); return false; }
     if (part.shape.IsNull()) { fail(error, "The selected body has no geometry to project."); return false; }
     QStringList drawingSourceIds=sourceBodyIds;
@@ -479,10 +500,52 @@ bool buildOrthographicDrawingSvg(const Part& part, QByteArray* svg, QString* err
         if(dimension.id.trimmed().isEmpty()||edgeDimensionIds.contains(dimension.id)||
            !drawingSourceIds.contains(dimension.sourceBodyId)||dimension.sourceGeometryToken.trimmed().isEmpty()||
            dimension.edgeIndex<1||!QSet<QString>{"TOP","FRONT","RIGHT"}.contains(dimension.view)||
+           (!dimension.edgeAnchor.isEmpty()&&!validDrawingEdgeWitness(dimension.edgeAnchor))||
+           !QSet<QString>{"LENGTH","DIAMETER","CENTER_DISTANCE","CENTER_X","CENTER_Y","CENTER_Z"}.contains(dimension.kind)||
+           (dimension.kind!="LENGTH"&&dimension.kind!="CENTER_DISTANCE"&&!validDrawingEdgeWitness(dimension.edgeAnchor))||
+           (dimension.kind=="CENTER_DISTANCE"&&(dimension.secondEdgeIndex<1||
+                !validDrawingEdgeWitness(dimension.edgeAnchor)||!validDrawingEdgeWitness(dimension.secondEdgeAnchor)))||
+           (dimension.kind!="CENTER_DISTANCE"&&(dimension.secondEdgeIndex!=0||!dimension.secondEdgeAnchor.isEmpty()))||
+           ((dimension.kind=="CENTER_Z"&&dimension.view=="TOP")||
+            (dimension.kind=="CENTER_Y"&&dimension.view=="FRONT")||
+            (dimension.kind=="CENTER_X"&&dimension.view=="RIGHT"))||
+           !std::isfinite(dimension.upperToleranceMm)||!std::isfinite(dimension.lowerToleranceMm)||
+           dimension.upperToleranceMm<0||dimension.lowerToleranceMm<0||
+           dimension.upperToleranceMm>1000||dimension.lowerToleranceMm>1000||
            !std::isfinite(dimension.offsetMm)||dimension.offsetMm<5||dimension.offsetMm>60){
             fail(error,"Invalid selected-edge drawing dimension reference, view, or offset.");return false;
         }
         edgeDimensionIds.insert(dimension.id);
+    }
+    // Frames are manual design-intent annotations, not computed geometric tolerances.
+    // A changed source body must be reviewed rather than silently acknowledged.
+    if(gdtFrames.size()>8){fail(error,"At most eight manual geometric-tolerance frames are supported.");return false;}
+    QSet<QString> gdtIds;
+    const QSet<QString> gdtNames={"POSITION","FLATNESS","PARALLELISM","PERPENDICULARITY","PROFILE","CIRCULARITY"};
+    for(const DrawingGdtFrameAnnotation& frame:gdtFrames){
+        auto datumValid=[](const QString& value){return value.isEmpty()||
+            (value.size()==1&&value.front()>=QLatin1Char('A')&&value.front()<=QLatin1Char('Z'));};
+        if(frame.id.trimmed().isEmpty()||frame.id.size()>64||gdtIds.contains(frame.id)||
+           edgeDimensionIds.contains(frame.id)||!drawingSourceIds.contains(frame.sourceBodyId)||
+           frame.sourceGeometryToken.trimmed().isEmpty()||!gdtNames.contains(frame.characteristic)||
+           !std::isfinite(frame.toleranceMm)||frame.toleranceMm<=0||frame.toleranceMm>1000||
+           !datumValid(frame.datumA)||!datumValid(frame.datumB)||!datumValid(frame.datumC)||
+           (!frame.datumB.isEmpty()&&frame.datumA.isEmpty())||
+           (!frame.datumC.isEmpty()&&frame.datumB.isEmpty())||
+           (!frame.datumA.isEmpty()&&(frame.datumA==frame.datumB||frame.datumA==frame.datumC))||
+           (!frame.datumB.isEmpty()&&frame.datumB==frame.datumC)||
+           !std::isfinite(frame.xMm)||!std::isfinite(frame.yMm)||
+           frame.xMm<10||frame.xMm>notePageWidth-75||frame.yMm<20||frame.yMm>notePageHeight-12){
+            fail(error,"Invalid geometric tolerance frame, datum sequence, or sheet position.");return false;
+        }
+        // No silent rebinding of manual GD&T after a source B-rep edit.
+        const Part* matched=nullptr;
+        for(const Part& body:sourceBodies)if(body.id==frame.sourceBodyId){matched=&body;break;}
+        if(!matched&&part.id==frame.sourceBodyId)matched=&part;
+        if(!matched||matched->geometryToken!=frame.sourceGeometryToken){
+            fail(error,"A saved geometric-tolerance frame is stale or its source body is absent. Re-author it after reviewing the geometry.");return false;
+        }
+        gdtIds.insert(frame.id);
     }
     if(partsListAnnotation.visible&&
        (partsListAnnotation.id.trimmed().isEmpty()||!std::isfinite(partsListAnnotation.xMm)||!std::isfinite(partsListAnnotation.yMm)||
@@ -563,26 +626,122 @@ bool buildOrthographicDrawingSvg(const Part& part, QByteArray* svg, QString* err
             const Part* source=nullptr;
             for(const Part& candidate:sourceBodies)if(candidate.id==annotation.sourceBodyId){source=&candidate;break;}
             if(!source&&annotation.sourceBodyId==part.id)source=&part;
-            if(!source||source->geometryToken!=annotation.sourceGeometryToken){
-                fail(error,"A selected-edge dimension refers to changed or missing source geometry. Re-select that edge or remove the dimension.");return false;
+            if(!source){fail(error,"A drawing edge dimension refers to a missing source body.");return false;}
+            TopoDS_Edge edge;
+            DrawingEdgeDimensionAnnotation remeasured=annotation;
+            if(!annotation.edgeAnchor.isEmpty()){
+                // Resolve even if tokens match: corrupted or misbound witnesses
+                // must never become an index-based false measurement.
+                if(!validDrawingEdgeWitness(annotation.edgeAnchor)){
+                    fail(error,"A drawing edge dimension has an invalid stored witness.");return false;
+                }
+                int uniqueIndex=0;
+                // A legitimate hole-diameter edit changes the radial witness.
+                // Drawing-only radius recovery is permitted for full circles;
+                // machining and general edge references remain strict.
+                QString strictReason;
+                if(!resolveStableEdgeAnchor(source->shape,annotation.edgeAnchor,&uniqueIndex,&strictReason)){
+                    if(annotation.kind=="LENGTH"||
+                       !resolveResizedFullCircleForDrawing(source->shape,annotation.edgeAnchor,
+                                                           &uniqueIndex,error)){
+                        if(annotation.kind=="LENGTH")fail(error,strictReason);
+                        return false;
+                    }
+                }
+                TopTools_IndexedMapOfShape unique;
+                TopExp::MapShapes(source->shape,TopAbs_EDGE,unique);
+                if(uniqueIndex<1||uniqueIndex>unique.Extent()){
+                    fail(error,"The witnessed drawing edge no longer exists.");return false;
+                }
+                edge=TopoDS::Edge(unique.FindKey(uniqueIndex));
+                // Output metadata reflects the actual body and edge used in
+                // this rendering, rather than the old saved revision token.
+                remeasured.sourceGeometryToken=source->geometryToken;
+                remeasured.edgeIndex=uniqueIndex;
+            }else{
+                if(source->geometryToken!=annotation.sourceGeometryToken){
+                    fail(error,"Legacy index-only drawing dimension is stale because source geometry changed; reselect that edge.");return false;
+                }
+                TopExp_Explorer explorer(source->shape,TopAbs_EDGE);
+                for(int index=1;index<annotation.edgeIndex&&explorer.More();++index)explorer.Next();
+                if(!explorer.More()){fail(error,"A drawing edge dimension refers to an edge that no longer exists.");return false;}
+                edge=TopoDS::Edge(explorer.Current());
             }
-            TopExp_Explorer explorer(source->shape,TopAbs_EDGE);
-            for(int index=1;index<annotation.edgeIndex&&explorer.More();++index)explorer.Next();
-            if(!explorer.More()){fail(error,"A selected-edge dimension refers to an edge that no longer exists.");return false;}
-            const TopoDS_Edge edge=TopoDS::Edge(explorer.Current());
             BRepAdaptor_Curve curve(edge);const double first=curve.FirstParameter(),last=curve.LastParameter();
             if(!std::isfinite(first)||!std::isfinite(last)||last<=first){fail(error,"A selected drawing edge cannot be measured.");return false;}
             GProp_GProps properties;BRepGProp::LinearProperties(edge,properties);
             const double length=properties.Mass();
             if(!std::isfinite(length)||length<=1e-9){fail(error,"A selected drawing edge has invalid length.");return false;}
             gp_Pnt midpoint;curve.D0((first+last)*0.5,midpoint);
+            // Length is valid for any supported trimmed curve. Diameter and
+            // center distance must come from complete circular edges, not
+            // fitted arcs, bounding boxes, or similarly shaped splines.
+            double measured=length;
+            gp_Pnt marker=midpoint;
+            const auto fullCircle=[](const BRepAdaptor_Curve& c){
+                return c.GetType()==GeomAbs_Circle&&
+                    std::abs((c.LastParameter()-c.FirstParameter())-6.2831853071795864769)<1e-4;
+            };
+            if(annotation.kind!="LENGTH"){
+                if(!fullCircle(curve)){
+                    fail(error,"Diameter and center-distance drawing callouts require full circular edges.");return false;
+                }
+                const auto firstCircle=curve.Circle();
+                marker=firstCircle.Location();
+                measured=2.0*firstCircle.Radius();
+                if(annotation.kind=="CENTER_DISTANCE"){
+                    int secondIndex=0;
+                    QString secondReason;
+                    if(!resolveStableEdgeAnchor(source->shape,annotation.secondEdgeAnchor,&secondIndex,&secondReason)&&
+                       !resolveResizedFullCircleForDrawing(source->shape,annotation.secondEdgeAnchor,
+                                                           &secondIndex,error))return false;
+                    TopTools_IndexedMapOfShape candidates;
+                    TopExp::MapShapes(source->shape,TopAbs_EDGE,candidates);
+                    if(secondIndex<1||secondIndex>candidates.Extent()||
+                       candidates.FindKey(secondIndex).IsSame(edge)){
+                        fail(error,"Center-distance references must identify two distinct circular edges.");return false;
+                    }
+                    const BRepAdaptor_Curve secondCurve(TopoDS::Edge(candidates.FindKey(secondIndex)));
+                    if(!fullCircle(secondCurve)){
+                        fail(error,"The second center-distance reference is not a full circle.");return false;
+                    }
+                    const auto otherCircle=secondCurve.Circle();
+                    const gp_Vec axis(firstCircle.Axis().Direction());
+                    if(std::abs(axis.Dot(gp_Vec(otherCircle.Axis().Direction())))<0.99999||
+                       std::abs(gp_Vec(firstCircle.Location(),otherCircle.Location()).Dot(axis))>1e-4){
+                        fail(error,"Center-distance circles must be coplanar with parallel axes.");return false;
+                    }
+                    marker.SetCoord((firstCircle.Location().X()+otherCircle.Location().X())/2.0,
+                                    (firstCircle.Location().Y()+otherCircle.Location().Y())/2.0,
+                                    (firstCircle.Location().Z()+otherCircle.Location().Z())/2.0);
+                    measured=firstCircle.Location().Distance(otherCircle.Location());
+                    remeasured.secondEdgeIndex=secondIndex;
+                }else if(annotation.kind=="CENTER_X"){
+                    measured=firstCircle.Location().X();
+                }else if(annotation.kind=="CENTER_Y"){
+                    measured=firstCircle.Location().Y();
+                }else if(annotation.kind=="CENTER_Z"){
+                    measured=firstCircle.Location().Z();
+                }
+            }
             const gp_Dir normal=annotation.view=="TOP"?gp_Dir(0,0,1):(annotation.view=="RIGHT"?gp_Dir(1,0,0):gp_Dir(0,-1,0));
+            if((annotation.kind=="CENTER_X"&&annotation.view=="RIGHT")||
+               (annotation.kind=="CENTER_Y"&&annotation.view=="FRONT")||
+               (annotation.kind=="CENTER_Z"&&annotation.view=="TOP")){
+                fail(error,"Hole-center ordinate refers to the hidden axis of the selected view.");return false;
+            }
+            if(annotation.kind!="LENGTH"){
+                const gp_Vec axis(curve.Circle().Axis().Direction());
+                if(std::abs(axis.Dot(gp_Vec(normal)))<0.99999){
+                    fail(error,"A circular drawing dimension requires a normal view of the circles.");return false;
+                }
+            }
             const gp_Dir xDirection=annotation.view=="RIGHT"?gp_Dir(0,-1,0):gp_Dir(1,0,0);
             const gp_Dir yDirection=normal.Crossed(xDirection);
-            const Point2 center{midpoint.X()*xDirection.X()+midpoint.Y()*xDirection.Y()+midpoint.Z()*xDirection.Z(),
-                                midpoint.X()*yDirection.X()+midpoint.Y()*yDirection.Y()+midpoint.Z()*yDirection.Z()};
+            const Point2 center{marker.X()*xDirection.X()+marker.Y()*xDirection.Y()+marker.Z()*xDirection.Z(),
+                                marker.X()*yDirection.X()+marker.Y()*yDirection.Y()+marker.Z()*yDirection.Z()};
             ViewGeometry& view=annotation.view=="TOP"?top:(annotation.view=="RIGHT"?right:front);
-            view.edgeLengths.append({annotation,center,length});
+            view.edgeLengths.append({remeasured,center,measured});
         }
         const ViewGeometry isometric = project(part, gp_Dir(1, -1, 1), gp_Dir(1, 1, 0));
         double sectionY = 0.0;
@@ -649,6 +808,24 @@ bool buildOrthographicDrawingSvg(const Part& part, QByteArray* svg, QString* err
             ? QString("SCALE %1:1").arg(actualScale, 0, 'f', 2)
             : QString("SCALE 1:%1").arg(1.0 / actualScale, 0, 'f', 2);
 
+        // A drawing may become stale without changing shape geometry (BOM,
+        // assigned material, part revision). Embed the SAME metadata digest
+        // used by SceneDocument's persisted source-data revision.
+        QString drawingDataToken;
+        QVector<const Part*> metadataSources;
+        QSet<QString> metadataIds;
+        for(const Part& source:sourceBodies){
+            if(metadataIds.contains(source.id))break;
+            metadataIds.insert(source.id);metadataSources.append(&source);
+        }
+        if(metadataSources.isEmpty()&&drawingSourceIds.size()==1&&part.id==drawingSourceIds.first()){
+            metadataSources.append(&part);metadataIds.insert(part.id);
+        }
+        if(metadataIds.size()==drawingSourceIds.size()&&
+           std::all_of(drawingSourceIds.cbegin(),drawingSourceIds.cend(),
+               [&](const QString& id){return metadataIds.contains(id);})){ 
+            drawingDataToken=drawingSourceMetadataFingerprint(metadataSources);
+        }
         QByteArray bytes;
         QTextStream out(&bytes, QIODevice::WriteOnly);
         out.setLocale(QLocale::c());
@@ -659,6 +836,8 @@ bool buildOrthographicDrawingSvg(const Part& part, QByteArray* svg, QString* err
             << "\" data-cadworkbench-source-body-ids=\"" << xml(drawingSourceIds.join(','))
             << "\" data-cadworkbench-source-geometry-token=\"" << xml(part.geometryToken)
             << "\" data-cadworkbench-link-status=\"export-snapshot\"";
+        if(!drawingDataToken.isEmpty())
+            out << " data-cadworkbench-source-data-token=\"" << xml(drawingDataToken) << "\"";
         if(!sheetId.isEmpty())out << " data-cadworkbench-sheet-id=\"" << xml(sheetId) << "\"";
         out << ">\n"
             << "<rect x=\"0\" y=\"0\" width=\"" << sheetWidth << "\" height=\"" << sheetHeight << "\" fill=\"white\"/>\n"
@@ -814,6 +993,25 @@ bool buildOrthographicDrawingSvg(const Part& part, QByteArray* svg, QString* err
                 << "<circle cx=\"" << bx << "\" cy=\"" << by << "\" r=\"4\" stroke-width=\"0.3\"/>"
                 << "<text x=\"" << bx << "\" y=\"" << by+1.0 << "\" text-anchor=\"middle\" font-size=\"2.8\" stroke=\"none\" fill=\"#111827\">" << itemNumber << "</text></g>\n";
         }
+        for(const DrawingGdtFrameAnnotation& frame:gdtFrames){
+            const double x=frame.xMm/sheetScale,y=frame.yMm/sheetScale;
+            // Readable, explicitly authored text-frame representation. No claim
+            // of complete ISO 1101 / ASME Y14.5 symbol or datum validation.
+            const QString label=frame.characteristic+QStringLiteral(" | ")+
+                QString::number(frame.toleranceMm,'f',3)+QStringLiteral(" mm")+
+                (frame.datumA.isEmpty()?QString():QStringLiteral(" | ")+frame.datumA)+
+                (frame.datumB.isEmpty()?QString():QStringLiteral(" | ")+frame.datumB)+
+                (frame.datumC.isEmpty()?QString():QStringLiteral(" | ")+frame.datumC);
+            out << "<g data-drawing-annotation=\"geometric-tolerance-frame\" data-annotation-id=\""
+                << xml(frame.id) << "\" data-source-body-id=\"" << xml(frame.sourceBodyId)
+                << "\" data-source-geometry-token=\"" << xml(frame.sourceGeometryToken)
+                << "\" data-link-status=\"reviewed-snapshot\">"
+                << "<rect x=\"" << x << "\" y=\"" << y-4.6
+                << "\" width=\"67\" height=\"6.2\" fill=\"white\" stroke=\"#111827\" stroke-width=\"0.25\"/>"
+                << "<text x=\"" << x+1.3 << "\" y=\"" << y-0.25
+                << "\" font-family=\"Arial,sans-serif\" font-size=\"2.35\" fill=\"#111827\">"
+                << xml(label) << "</text></g>\n";
+        }
         out << "</g>\n</svg>\n";
         out.flush();
         if (out.status() != QTextStream::Ok || bytes.isEmpty()) { fail(error, "Could not format the drawing SVG."); return false; }
@@ -830,6 +1028,101 @@ bool buildOrthographicDrawingSvg(const Part& part, QByteArray* svg, QString* err
     return false;
 }
 
+bool validateDrawingEdgeDimensionPreview(const Part& source,
+                                         const DrawingEdgeDimensionAnnotation& dimension,
+                                         QString* error,double* nominalMm) {
+    if(source.id!=dimension.sourceBodyId){
+        fail(error,"The dimension source does not match the chosen model body.");
+        return false;
+    }
+    if(dimension.id.trimmed().isEmpty()||dimension.sourceGeometryToken.trimmed().isEmpty()||
+       dimension.edgeIndex<1||dimension.offsetMm<5.0||dimension.offsetMm>60.0||
+       !std::isfinite(dimension.offsetMm)||
+       !std::isfinite(dimension.upperToleranceMm)||!std::isfinite(dimension.lowerToleranceMm)||
+       dimension.upperToleranceMm<0.0||dimension.lowerToleranceMm<0.0||
+       dimension.upperToleranceMm>1000.0||dimension.lowerToleranceMm>1000.0){
+        fail(error,"Invalid stored drawing dimension, offset or manual tolerance.");
+        return false;
+    }
+    // Export preflight intentionally omits other annotations: a user may
+    // repair one dimension even when unrelated annotations are stale.
+    QByteArray preview;
+    if(!buildOrthographicDrawingSvg(source,&preview,error,nullptr,nullptr,nullptr,
+        OrthographicProjection::ThirdAngle,DrawingSheetSize::A4Landscape,
+        DrawingAuxiliaryView::Isometric,0.5,{}, {}, {}, {}, {}, {}, {}, {},
+        {}, {source.id}, {}, {}, {}, {dimension}, {source}))return false;
+    if(nominalMm){
+        double candidate=0.0;
+        if(!drawing_measurement::extractSelectedEdgeNominal(preview,dimension.id,&candidate,error))
+            return false;
+        *nominalMm=candidate;
+    }
+    return true;
+}
+
+bool auditDrawingDimensionLinks(const QVector<Part>& currentSources,
+                                const DrawingSheetSettings& saved,
+                                DrawingDimensionAudit* report,QString* error){
+    if(!report||saved.edgeDimensionAnnotations.size()>20||currentSources.size()>50){
+        fail(error,"Drawing link audit requires a report, at most 20 dimensions and at most 50 sources.");
+        return false;
+    }
+    QMap<QString,const Part*> sourceIndex;
+    for(const Part& source:currentSources){
+        if(source.id.trimmed().isEmpty()||sourceIndex.contains(source.id)){
+            fail(error,"Duplicate or empty source body ID in drawing dimension audit.");return false;
+        }
+        sourceIndex.insert(source.id,&source);
+    }
+    DrawingDimensionAudit pending;
+    QSet<QString> seen;
+    for(const DrawingEdgeDimensionAnnotation& dimension:saved.edgeDimensionAnnotations){
+        if(dimension.id.trimmed().isEmpty()||seen.contains(dimension.id)){
+            fail(error,"Duplicate or empty annotation ID in drawing dimension audit.");return false;
+        }
+        seen.insert(dimension.id);
+        DrawingDimensionAuditEntry item;
+        item.annotationId=dimension.id;
+        item.sourceId=dimension.sourceBodyId;
+        item.kind=dimension.kind;
+        item.view=dimension.view;
+        const Part* source=sourceIndex.value(dimension.sourceBodyId,nullptr);
+        if(!source){
+            item.status="MISSING_SOURCE";
+            item.detail="The saved source body is not present in the current scene.";
+            ++pending.missing;
+        }else{
+            QString detail;
+            double currentNominal=0.0;
+            if(!validateDrawingEdgeDimensionPreview(*source,dimension,&detail,&currentNominal)){
+                item.status="BROKEN_REFERENCE";
+                item.detail=detail.isEmpty()?QStringLiteral("Edge witness or projection is invalid."):detail;
+                ++pending.broken;
+            }else if(dimension.sourceGeometryToken!=source->geometryToken){
+                item.hasMeasurement=true;
+                item.nominalMm=currentNominal;
+                item.minimumMm=currentNominal-dimension.lowerToleranceMm;
+                item.maximumMm=currentNominal+dimension.upperToleranceMm;
+                item.status="REGENERATE_REVIEW";
+                item.detail="The changed source geometry resolves uniquely, but its issued drawing revision has not been refreshed.";
+                ++pending.needsRegeneration;
+            }else{
+                item.hasMeasurement=true;
+                item.nominalMm=currentNominal;
+                item.minimumMm=currentNominal-dimension.lowerToleranceMm;
+                item.maximumMm=currentNominal+dimension.upperToleranceMm;
+                item.status="CURRENT";
+                item.detail="Referenced geometry and recorded source token are current.";
+                ++pending.current;
+            }
+        }
+        pending.entries.append(std::move(item));
+    }
+    *report=std::move(pending);
+    if(error)error->clear();
+    return true;
+}
+
 bool exportOrthographicDrawingSvg(const Part& part, const QString& path, QString* error,
                                   OrthographicProjection projection, DrawingSheetSize sheetSize,
                                   DrawingAuxiliaryView auxiliaryView, double sectionDepthFraction,
@@ -842,12 +1135,13 @@ bool exportOrthographicDrawingSvg(const Part& part, const QString& path, QString
                                   const QVector<DrawingDetailAnnotation>& detailAnnotations,
                                   const QVector<DrawingSectionAnnotation>& sectionAnnotations,
                                   const QVector<DrawingEdgeDimensionAnnotation>& edgeDimensionAnnotations,
-                                  const QVector<Part>& sourceBodies) {
+                                  const QVector<Part>& sourceBodies,
+                                 const QVector<DrawingGdtFrameAnnotation>& gdtFrames) {
     if (path.trimmed().isEmpty()) { fail(error, "Provide an output path for the drawing SVG."); return false; }
     QByteArray bytes;
     if (!buildOrthographicDrawingSvg(part, &bytes, error, nullptr, nullptr, nullptr,
                                      projection, sheetSize, auxiliaryView, sectionDepthFraction, generalNotes, titleBlock,
-                                     viewCenters,viewIds,sheetId,noteAnnotations,dimensionAnnotations,partsListAnnotation,bomRows,sourceBodyIds,balloonAnnotations,detailAnnotations,sectionAnnotations,edgeDimensionAnnotations,sourceBodies)) return false;
+                                     viewCenters,viewIds,sheetId,noteAnnotations,dimensionAnnotations,partsListAnnotation,bomRows,sourceBodyIds,balloonAnnotations,detailAnnotations,sectionAnnotations,edgeDimensionAnnotations,sourceBodies,gdtFrames)) return false;
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly)) { fail(error, QStringLiteral("Could not create drawing file: %1").arg(file.errorString())); return false; }
     if (file.write(bytes) != bytes.size()) { fail(error, QStringLiteral("Could not write drawing file: %1").arg(file.errorString())); file.cancelWriting(); return false; }
@@ -1110,7 +1404,7 @@ StandardsCheckReport checkDrawingSourceSnapshot(const QVector<Part>& currentPart
     };
     if(currentParts.isEmpty()||currentParts.size()>50){add(FindingSeverity::Error,"DRAWING_SOURCE_SELECTION_INVALID","Select between one and fifty current source bodies to compare with this drawing.");return report;}
     if(svg.trimmed().isEmpty()){add(FindingSeverity::Error,"DRAWING_SOURCE_EMPTY","The drawing file is empty.");return report;}
-    QXmlStreamReader reader(svg);QString sourceId,sourceToken,linkStatus,sourceIdsAttribute;bool foundRoot=false;
+    QXmlStreamReader reader(svg);QString sourceId,sourceToken,sourceDataToken,linkStatus,sourceIdsAttribute;bool foundRoot=false;
     while(!reader.atEnd()){
         reader.readNext();if(!reader.isStartElement()||foundRoot)continue;
         foundRoot=true;
@@ -1119,6 +1413,7 @@ StandardsCheckReport checkDrawingSourceSnapshot(const QVector<Part>& currentPart
         sourceId=attributes.value(QStringLiteral("data-cadworkbench-source-body-id")).toString();
         sourceIdsAttribute=attributes.value(QStringLiteral("data-cadworkbench-source-body-ids")).toString();
         sourceToken=attributes.value(QStringLiteral("data-cadworkbench-source-geometry-token")).toString();
+        sourceDataToken=attributes.value(QStringLiteral("data-cadworkbench-source-data-token")).toString();
         linkStatus=attributes.value(QStringLiteral("data-cadworkbench-link-status")).toString();
     }
     if(!foundRoot||reader.hasError()){add(FindingSeverity::Error,"DRAWING_SOURCE_INVALID","The selected file is not a readable SVG snapshot.");return report;}
@@ -1136,7 +1431,18 @@ StandardsCheckReport checkDrawingSourceSnapshot(const QVector<Part>& currentPart
     else if(currentParts.size()==1&&sourceToken==currentParts.first().geometryToken)currentToken=currentParts.first().geometryToken;
     else {Part composite;QString error;if(!buildDrawingAssemblyPart(currentParts,&composite,&error)){add(FindingSeverity::Error,"DRAWING_SOURCE_SELECTION_INVALID",error);return report;}currentToken=composite.geometryToken;}
     if(sourceToken!=currentToken){add(FindingSeverity::Warning,"DRAWING_SOURCE_GEOMETRY_STALE","One or more source bodies changed after this drawing snapshot was exported; regenerate the SVG.");return report;}
-    add(FindingSeverity::Info,"DRAWING_SOURCE_CURRENT","The export snapshot matches the selected source body set and current geometry. It does not update live when the model changes.");
+    // Legacy SVG snapshots without metadata digests remain readable. For newly
+    // exported drawings, compare BOM/material revision as well as geometry.
+    if(!sourceDataToken.isEmpty()){
+        QVector<const Part*> selected;selected.reserve(currentParts.size());
+        for(const Part& body:currentParts)selected.append(&body);
+        if(sourceDataToken!=drawingSourceMetadataFingerprint(selected)){
+            add(FindingSeverity::Warning,"DRAWING_SOURCE_METADATA_STALE",
+                "The part number, revision, BOM, or material source changed after the drawing was exported; regenerate the SVG.");
+            return report;
+        }
+    }
+    add(FindingSeverity::Info,"DRAWING_SOURCE_CURRENT","The export snapshot matches the selected source body set, geometry, and available metadata revision. It does not update live when the model changes.");
     return report;
 }
 } // namespace cad

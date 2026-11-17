@@ -1,5 +1,7 @@
 # Persistent assemblies, joints, and motion studies (v1.46)
 
+> Current source addendum (3 November 2026): Free occurrences now store roll, pitch, and yaw. Pairwise motion scans report both overlap and sampled clearance; all-pairs scans cover up to 20 solid bodies and export contact rows as CSV. Both scans include in-range saved keyframe times in addition to the requested uniform positions, with a 256-position cap. Older sections below describe earlier release stages; see `CONTINUE_HERE.md` for current boundaries.
+
 ## Reusable components and occurrences
 
 Use **Assembly → Make selected body a component** to assign a persistent definition ID and first occurrence ID. **Insert component occurrence** creates another placed occurrence with its own body ID, occurrence ID, and XYZ translation. Occurrences persist in `.cadscene`, participate in undo/redo, and can be grouped in the BOM. STEP XDE import/export preserves names, reusable definitions, nested paths, occurrence identities, and placement when represented in the STEP file.

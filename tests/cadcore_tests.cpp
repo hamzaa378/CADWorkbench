@@ -1,7 +1,20 @@
 #include "core/SceneDocument.h"
+#include "machining_transaction_v170_tests.h"
 #include "core/DrawingSheet.h"
+#include "core/DrawingDimensionMeasurement.h"
+#include "core/HoleTable.h"
+#include "core/DrillingWorksheet.h"
+#include "core/DrawingEdgeAnchors.h"
+#include "core/ShapeFeatureTree.h" // declarations for captured and resized edge anchors
 #include "core/SheetMetal.h"
+#include "core/SheetMetalBendSequenceAudit.h"
 #include <BRepAlgoAPI_Cut.hxx>
+#include <BRepAdaptor_Curve.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
+#include <BRep_Builder.hxx>
+#include <TopoDS_Compound.hxx>
+#include <TopoDS.hxx>
+#include <GeomAbs_CurveType.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
@@ -17,7 +30,11 @@
 #include <GProp_GProps.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopExp.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 #include <QFile>
+#include <QDir>
+#include <QCryptographicHash>
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QJsonArray>
@@ -33,6 +50,7 @@
 #include <limits>
 #include <numbers>
 #include <stdexcept>
+#include <string>
 #include <sstream>
 
 namespace {
@@ -40,6 +58,9 @@ int checks = 0;
 void require(bool condition, const char* message) {
     ++checks;
     if (!condition) throw std::runtime_error(message);
+}
+void require(bool condition, const std::string& message) {
+    require(condition, message.c_str());
 }
 void closeTo(double actual, double expected, double tolerance = 1e-5) {
     require(std::isfinite(actual) && std::abs(actual-expected) <= tolerance*std::max(1.,std::abs(expected)),
@@ -330,11 +351,11 @@ void testMultiEdgeBlends() {
 
 void testOrientedExtrusion() {
     QString error;
-    struct PlaneCase { cad::SketchPlane plane;double xmin,xmax,ymin,ymax,zmin,zmax; };
+    struct PlaneCase { cad::ExtrusionSketchPlane plane;double xmin,xmax,ymin,ymax,zmin,zmax; };
     const PlaneCase cases[]={
-        {cad::SketchPlane::XY,5,45,-4,26,0,20},
-        {cad::SketchPlane::XZ,5,45,-20,0,-4,26},
-        {cad::SketchPlane::YZ,0,20,5,45,-4,26}
+        {cad::ExtrusionSketchPlane::XY,5,45,-4,26,0,20},
+        {cad::ExtrusionSketchPlane::XZ,5,45,-20,0,-4,26},
+        {cad::ExtrusionSketchPlane::YZ,0,20,5,45,-4,26}
     };
     for(const auto& test:cases){
         cad::SceneDocument doc;cad::ExtrusionCommand command;
@@ -355,9 +376,9 @@ void testOrientedExtrusion() {
         require(doc.redo()&&doc.parts().size()==1,"Oriented extrusion redo failed");
     }
       const PlaneCase offsetCases[]={
-          {cad::SketchPlane::XY,5,45,-4,26,7,27},
-          {cad::SketchPlane::XZ,5,45,-27,-7,-4,26},
-          {cad::SketchPlane::YZ,7,27,5,45,-4,26}
+          {cad::ExtrusionSketchPlane::XY,5,45,-4,26,7,27},
+          {cad::ExtrusionSketchPlane::XZ,5,45,-27,-7,-4,26},
+          {cad::ExtrusionSketchPlane::YZ,7,27,5,45,-4,26}
       };
       for(const auto& test:offsetCases){
           cad::SceneDocument offsetDoc;cad::ExtrusionCommand command;
@@ -374,9 +395,9 @@ void testOrientedExtrusion() {
           closeTo(ymax,test.ymax);closeTo(zmin,test.zmin);closeTo(zmax,test.zmax);
       }
       const PlaneCase reverseCases[]={
-          {cad::SketchPlane::XY,5,45,-4,26,-13,7},
-          {cad::SketchPlane::XZ,5,45,-7,13,-4,26},
-          {cad::SketchPlane::YZ,-13,7,5,45,-4,26}
+          {cad::ExtrusionSketchPlane::XY,5,45,-4,26,-13,7},
+          {cad::ExtrusionSketchPlane::XZ,5,45,-7,13,-4,26},
+          {cad::ExtrusionSketchPlane::YZ,-13,7,5,45,-4,26}
       };
       for(const auto& test:reverseCases){
           cad::SceneDocument reverseDoc;cad::ExtrusionCommand command;
@@ -393,9 +414,9 @@ void testOrientedExtrusion() {
           closeTo(ymax,test.ymax);closeTo(zmin,test.zmin);closeTo(zmax,test.zmax);
       }
       const PlaneCase symmetricCases[]={
-          {cad::SketchPlane::XY,5,45,-4,26,-3,17},
-          {cad::SketchPlane::XZ,5,45,-17,3,-4,26},
-          {cad::SketchPlane::YZ,-3,17,5,45,-4,26}
+          {cad::ExtrusionSketchPlane::XY,5,45,-4,26,-3,17},
+          {cad::ExtrusionSketchPlane::XZ,5,45,-17,3,-4,26},
+          {cad::ExtrusionSketchPlane::YZ,-3,17,5,45,-4,26}
       };
       for(const auto& test:symmetricCases){
           cad::SceneDocument symmetricDoc;cad::ExtrusionCommand command;
@@ -423,9 +444,9 @@ void testOrientedExtrusion() {
           closeTo(rymax,ymax);closeTo(rzmin,zmin);closeTo(rzmax,zmax);
       }
       const PlaneCase circleCases[]={
-          {cad::SketchPlane::XY,-7,13,-14,6,2,7},
-          {cad::SketchPlane::XZ,-7,13,-7,-2,-14,6},
-          {cad::SketchPlane::YZ,2,7,-7,13,-14,6}
+          {cad::ExtrusionSketchPlane::XY,-7,13,-14,6,2,7},
+          {cad::ExtrusionSketchPlane::XZ,-7,13,-7,-2,-14,6},
+          {cad::ExtrusionSketchPlane::YZ,2,7,-7,13,-14,6}
       };
       for(const auto& test:circleCases){
           cad::SceneDocument circleDoc;cad::ExtrusionCommand command;
@@ -442,14 +463,14 @@ void testOrientedExtrusion() {
           closeTo(xmin,test.xmin);closeTo(xmax,test.xmax);closeTo(ymin,test.ymin);
           closeTo(ymax,test.ymax);closeTo(zmin,test.zmin);closeTo(zmax,test.zmax);
       }
-      struct ThroughAllCase { cad::SketchPlane plane;double u,v,offset,removed;bool reverse; };
+      struct ThroughAllCase { cad::ExtrusionSketchPlane plane;double u,v,offset,removed;bool reverse; };
       const ThroughAllCase throughAllCases[]={
-          {cad::SketchPlane::XY,10,10,0,500,false},
-          {cad::SketchPlane::XZ,10,5,-30,750,false},
-          {cad::SketchPlane::YZ,10,5,0,1000,false},
-          {cad::SketchPlane::XY,10,10,20,500,true},
-          {cad::SketchPlane::XZ,10,5,0,750,true},
-          {cad::SketchPlane::YZ,10,5,40,1000,true}
+          {cad::ExtrusionSketchPlane::XY,10,10,0,500,false},
+          {cad::ExtrusionSketchPlane::XZ,10,5,-30,750,false},
+          {cad::ExtrusionSketchPlane::YZ,10,5,0,1000,false},
+          {cad::ExtrusionSketchPlane::XY,10,10,20,500,true},
+          {cad::ExtrusionSketchPlane::XZ,10,5,0,750,true},
+          {cad::ExtrusionSketchPlane::YZ,10,5,40,1000,true}
       };
       for(const auto& test:throughAllCases){
           cad::SceneDocument cutDoc;
@@ -469,9 +490,9 @@ void testOrientedExtrusion() {
           closeTo(volume(cutDoc.parts().first().shape),24000,1e-5);
       }
       const PlaneCase reverseTaperCases[]={
-          {cad::SketchPlane::XY,0,40,0,30,-13,7},
-          {cad::SketchPlane::XZ,0,40,-7,13,0,30},
-          {cad::SketchPlane::YZ,-13,7,0,40,0,30}
+          {cad::ExtrusionSketchPlane::XY,0,40,0,30,-13,7},
+          {cad::ExtrusionSketchPlane::XZ,0,40,-7,13,0,30},
+          {cad::ExtrusionSketchPlane::YZ,-13,7,0,40,0,30}
       };
       for(const auto& test:reverseTaperCases){
           cad::SceneDocument taperDoc;cad::ExtrusionCommand command;
@@ -490,7 +511,7 @@ void testOrientedExtrusion() {
     cad::ExtrusionCommand invalid;
     cad::SceneDocument doc;
     require(doc.prepareExtrusion(cad::SketchProfile::Rectangle,0,0,10,8,5,&invalid,&error),"Invalid-plane fixture failed");
-    invalid.sketchPlane=static_cast<cad::SketchPlane>(4);
+    invalid.sketchPlane=static_cast<cad::ExtrusionSketchPlane>(4);
     require(cad::SceneDocument::buildExtrusionPreview(invalid).shape.IsNull(),"Invalid sketch plane accepted");
       require(doc.prepareExtrusion(cad::SketchProfile::Rectangle,0,0,10,8,5,&invalid,&error),"Offset invalid-case fixture failed");
       invalid.planeOffset=std::numeric_limits<double>::quiet_NaN();
@@ -545,7 +566,7 @@ void testCustomPlaneExtrusion() {
     cad::ExtrusionCommand command;
     require(doc.prepareExtrusion(cad::SketchProfile::Rectangle,2,3,8,4,6,&command,&error),
             "Custom-plane extrusion preparation failed");
-    command.sketchPlane=cad::SketchPlane::Custom;
+    command.sketchPlane=cad::ExtrusionSketchPlane::Custom;
     command.customOriginX=10;command.customOriginY=20;command.customOriginZ=30;
     command.customNormalX=1;command.customNormalY=2;command.customNormalZ=2;
     command.customUAxisX=1;command.customUAxisY=0;command.customUAxisZ=0;
@@ -588,7 +609,7 @@ void testCustomPlaneExtrusion() {
     require(target.prepareExtrusion(cad::SketchProfile::Rectangle,-100,-100,200,200,1,
                 cad::ExtrusionMode::Cut,targetId,&cut,&error),
             "Custom through-all cut preparation failed");
-    cut.sketchPlane=cad::SketchPlane::Custom;cut.customOriginX=20;cut.customOriginY=15;cut.customOriginZ=10;
+    cut.sketchPlane=cad::ExtrusionSketchPlane::Custom;cut.customOriginX=20;cut.customOriginY=15;cut.customOriginZ=10;
     cut.customNormalX=1;cut.customNormalY=1;cut.customNormalZ=1;
     cut.customUAxisX=1;cut.customUAxisY=-1;cut.customUAxisZ=0;cut.throughAll=true;
     const auto cutPreview=cad::SceneDocument::buildExtrusionPreview(cut);
@@ -1220,7 +1241,7 @@ void testBomPartsStandards() {
             "Project drawing requirements did not redo");
     require(doc.saveAs(scene,&error),"BOM metadata save failed");
     const QJsonObject root=QJsonDocument::fromJson(readBytes(scene)).object();
-    require(root.value("schema").toString()=="cadworkbench.scene.v22","New scenes did not use schema v22");
+    require(root.value("schema").toString()=="cadworkbench.scene.v24","New scenes did not use schema v23");
     cad::SceneDocument drawingXmlFixture;
     QString drawingXmlError;
     require(drawingXmlFixture.addPrimitive(cad::Primitive::Box,{5,6,7},&drawingXmlError),
@@ -1408,7 +1429,7 @@ void testFreeOccurrenceYawPlacement() {
     const QString file=dir.filePath("yaw.cadscene");
     require(doc.saveAs(file,&error),"Could not save yawed occurrence");
     const QJsonObject saved=QJsonDocument::fromJson(readBytes(file)).object();
-    require(saved.value("schema").toString()=="cadworkbench.scene.v22",
+    require(saved.value("schema").toString()=="cadworkbench.scene.v24",
             "Yawed occurrence scene did not use the latest schema");
     cad::SceneDocument reopened;
     require(reopened.load(file,&error),"Could not reload yawed occurrence");
@@ -2083,7 +2104,7 @@ void testPersistentAssemblyOccurrences() {
     const QString scene=dir.filePath("assembly.cadscene");
     require(doc.saveAs(scene,&error),"Assembly scene save failed");
     QJsonObject root=QJsonDocument::fromJson(readBytes(scene)).object();
-    require(root.value("schema").toString()=="cadworkbench.scene.v22","New project did not use scene schema v22");
+    require(root.value("schema").toString()=="cadworkbench.scene.v24","New project did not use scene schema v23");
     QJsonObject schema13Root=root;schema13Root.insert("schema","cadworkbench.scene.v13");
     QJsonArray schema13Parts=schema13Root.value("parts").toArray();
     for(int i=0;i<schema13Parts.size();++i){
@@ -2384,6 +2405,314 @@ void testSelectedEdgeDrawingDimension() {
             0.5,{}, {}, {}, {},saved.sheetId,saved.noteAnnotations,saved.dimensionAnnotations,saved.partsListAnnotation,
             {},saved.sourceBodyIds,{}, {}, {},revised.edgeDimensionAnnotations,{*loaded.find(id)}),
             "Drawing accepted an out-of-range linked edge index");
+
+    // Native end-to-end regression: a v2/v3 witnessed drawing annotation
+    // survives a geometry revision, is measured against the CURRENT edge,
+    // and is persisted without relying on the old traversal index.
+    cad::SceneDocument witnessedDoc;
+    require(witnessedDoc.addPrimitive(cad::Primitive::Box,{40,30,20},&error),
+            "Could not create witnessed drawing fixture");
+    const auto witnessedId=witnessedDoc.parts().first().id;
+    const cad::Part baseline=*witnessedDoc.find(witnessedId);
+    QMap<QString,double> witness;
+    require(cad::captureStableEdgeAnchor(baseline.shape,1,&witness,&error)&&
+            cad::validDrawingEdgeWitness(witness),
+            "Selected drawing edge has no valid persistent witness");
+    cad::DrawingSheetSettings linked;
+    linked.edgeDimensionAnnotations.append({{},witnessedId,baseline.geometryToken,
+                                            1,"TOP",12.0,witness});
+    require(witnessedDoc.setDrawingSheetSettings(witnessedId,linked,&error),
+            "Could not persist witnessed drawing dimension");
+    const QString witnessFile=directory.filePath("witnessed-edge.cadscene");
+    require(witnessedDoc.saveAs(witnessFile,&error),"Could not save witnessed drawing");
+    cad::SceneDocument opened;
+    require(opened.load(witnessFile,&error),"Could not reopen witnessed drawing");
+    const auto reopenedDimension=opened.find(witnessedId)->drawingSettings.edgeDimensionAnnotations.first();
+    require(reopenedDimension.edgeAnchor==witness,"Save/reopen discarded selected-edge witness");
+    // New batch audit does not acknowledge revisions. It validates the real
+    // OCCT edge witness using exactly the export preview path.
+    cad::DrawingDimensionAudit linkHealth;
+    require(cad::auditDrawingDimensionLinks({*opened.find(witnessedId)},
+        opened.find(witnessedId)->drawingSettings,&linkHealth,&error),
+        "Cannot preflight a witnessed drawing dimension");
+    require(linkHealth.current==1&&linkHealth.needsRegeneration==0&&
+            linkHealth.broken==0&&linkHealth.missing==0&&linkHealth.readyForRegeneration(),
+        "Saved current drawing witness was incorrectly classified");
+    require(linkHealth.entries.size()==1&&linkHealth.entries.first().hasMeasurement&&
+            std::isfinite(linkHealth.entries.first().nominalMm)&&
+            linkHealth.entries.first().nominalMm>0.0&&
+            linkHealth.entries.first().minimumMm==linkHealth.entries.first().nominalMm,
+        "Current linked dimension must report its measured nominal from the SVG engine");
+    const double baselineNominal=linkHealth.entries.first().nominalMm;
+    double parsedNominal=-91.0;
+    const QByteArray sampleSvg=R"(<svg xmlns="http://www.w3.org/2000/svg"><g data-drawing-annotation="selected-edge-dimension" data-annotation-id="d1" data-value-mm="12.345"/></svg>)";
+    require(cad::drawing_measurement::extractSelectedEdgeNominal(sampleSvg,"d1",&parsedNominal,&error)&&
+            std::abs(parsedNominal-12.345)<1e-9,
+            "Measurement helper did not extract export source nominal");
+    const QByteArray duplicatedSvg=R"(<svg><g data-drawing-annotation="selected-edge-dimension" data-annotation-id="d1" data-value-mm="12.345"/><g data-drawing-annotation="selected-edge-dimension" data-annotation-id="d1" data-value-mm="12.345"/></svg>)";
+    require(!cad::drawing_measurement::extractSelectedEdgeNominal(duplicatedSvg,"d1",&parsedNominal,&error)&&
+            std::abs(parsedNominal-12.345)<1e-9,
+            "Ambiguous export dimension must fail without replacing the last nominal");
+    const QByteArray nonfiniteSvg=R"(<svg><g data-drawing-annotation="selected-edge-dimension" data-annotation-id="d1" data-value-mm="nan"/></svg>)";
+    require(!cad::drawing_measurement::extractSelectedEdgeNominal(nonfiniteSvg,"d1",&parsedNominal,&error),
+            "Nonfinite rendered nominal must be rejected");
+    require(!cad::drawing_measurement::extractSelectedEdgeNominal(sampleSvg,"unknown",&parsedNominal,&error),
+            "Unrendered dimension must not be assigned a numeric value");
+
+    require(opened.translate(witnessedId,4,0,0,&error),
+            "Could not change witnessed source body revision");
+    const auto current=*opened.find(witnessedId);
+    require(current.geometryToken!=baseline.geometryToken,"Test body revision did not change");
+    auto witnessedSettings=opened.find(witnessedId)->drawingSettings;
+    require(cad::auditDrawingDimensionLinks({current},witnessedSettings,&linkHealth,&error),
+        "Cannot audit dimension after source edit");
+    require(linkHealth.needsRegeneration==1&&linkHealth.broken==0&&
+            linkHealth.readyForRegeneration(),
+        "Resolvable source edit must require review, not silently mark drawing current");
+    require(linkHealth.entries.first().hasMeasurement&&
+            std::abs(linkHealth.entries.first().nominalMm-baselineNominal)<0.002,
+            "Rigid translation must preserve current length dimension nominal");
+    require(cad::auditDrawingDimensionLinks({},witnessedSettings,&linkHealth,&error)&&
+            linkHealth.missing==1&&!linkHealth.readyForRegeneration(),
+            "Missing drawing dimension source must be explicitly blocked");
+    require(linkHealth.entries.size()==1&&!linkHealth.entries.first().hasMeasurement,
+            "Missing drawing source must never claim a measured nominal");
+    require(cad::auditDrawingDimensionLinks({current},witnessedSettings,&linkHealth,&error),
+            "Restoring live source must fix missing-source audit state");
+    auto brokenHealth=witnessedSettings;
+    brokenHealth.edgeDimensionAnnotations.first().edgeAnchor["edge_witness_x"]=1e8;
+    require(cad::auditDrawingDimensionLinks({current},brokenHealth,&linkHealth,&error)&&
+            linkHealth.broken==1&&!linkHealth.readyForRegeneration(),
+            "Broken selected-edge witness must block batch drawing readiness");
+    require(!linkHealth.entries.first().hasMeasurement,
+            "Ambiguous or broken drawing references must not expose stale measurements");
+    QByteArray currentSvg;
+    require(cad::buildOrthographicDrawingSvg(current,&currentSvg,&error,nullptr,nullptr,nullptr,
+            cad::OrthographicProjection::ThirdAngle,cad::DrawingSheetSize::A4Landscape,
+            cad::DrawingAuxiliaryView::Isometric,0.5,{}, {}, {}, {},witnessedSettings.sheetId,
+            witnessedSettings.noteAnnotations,witnessedSettings.dimensionAnnotations,
+            witnessedSettings.partsListAnnotation,{},witnessedSettings.sourceBodyIds,
+            {}, {}, {},witnessedSettings.edgeDimensionAnnotations,{current}),
+            "Witnessed dimension did not follow a translated source body");
+    require(currentSvg.contains("data-source-geometry-token=\""+current.geometryToken.toUtf8()+"\""),
+            "Exported linked dimension retained a stale geometry token");
+    auto destroyed=witnessedSettings.edgeDimensionAnnotations;
+    destroyed.first().edgeAnchor.insert("edge_witness_x",1e8);
+    error.clear();
+    require(!cad::buildOrthographicDrawingSvg(current,&currentSvg,&error,nullptr,nullptr,nullptr,
+            cad::OrthographicProjection::ThirdAngle,cad::DrawingSheetSize::A4Landscape,
+            cad::DrawingAuxiliaryView::Isometric,0.5,{}, {}, {}, {},witnessedSettings.sheetId,
+            witnessedSettings.noteAnnotations,witnessedSettings.dimensionAnnotations,
+            witnessedSettings.partsListAnnotation,{},witnessedSettings.sourceBodyIds,
+            {}, {}, {},destroyed,{current}),
+            "Drawing falsely accepted a missing geometric witness");
+
+    // Manufacturing dimensions: a full-circle diameter is remeasured from
+    // the current kernel curve and user-entered tolerances survive reopen.
+    cad::SceneDocument diameterDoc;
+    require(diameterDoc.addPrimitive(cad::Primitive::Cylinder,{5.0,12.0},&error),
+            "Could not construct circular manufacturing-dimension fixture");
+    const auto diameterPart=*diameterDoc.find(diameterDoc.parts().first().id);
+    TopTools_IndexedMapOfShape edges;TopExp::MapShapes(diameterPart.shape,TopAbs_EDGE,edges);
+    int topCircle=0;
+    for(int i=1;i<=edges.Extent();++i){
+        const BRepAdaptor_Curve curve(TopoDS::Edge(edges.FindKey(i)));
+        if(curve.GetType()==GeomAbs_Circle&&std::abs(curve.Circle().Location().Z()-12.0)<1e-6){
+            topCircle=i;break;
+        }
+    }
+    require(topCircle>0,"Cylinder has no top circular edge");
+    QMap<QString,double> diameterWitness;
+    require(cad::captureStableEdgeAnchor(diameterPart.shape,topCircle,&diameterWitness,&error),
+            "Could not capture circular diameter witness");
+    cad::DrawingEdgeDimensionAnnotation diameter{{},diameterPart.id,diameterPart.geometryToken,
+        topCircle,"TOP",10.0,diameterWitness};
+    diameter.kind="DIAMETER";diameter.upperToleranceMm=0.10;diameter.lowerToleranceMm=0.05;
+    cad::DrawingSheetSettings diameterSheet;
+    diameterSheet.edgeDimensionAnnotations.append(diameter);
+    require(diameterDoc.setDrawingSheetSettings(diameterPart.id,diameterSheet,&error),
+            "Could not save circular manufacturing tolerance");
+    const auto savedDiameter=diameterDoc.find(diameterPart.id)->drawingSettings;
+    const QString diameterPath=directory.filePath("linked-circular-diameter.cadscene");
+    require(diameterDoc.saveAs(diameterPath,&error),"Could not save toleranced diameter drawing");
+    cad::SceneDocument restoredDiameter;
+    require(restoredDiameter.load(diameterPath,&error),"Could not reopen toleranced diameter drawing");
+    require(restoredDiameter.find(diameterPart.id)->drawingSettings.edgeDimensionAnnotations==
+            savedDiameter.edgeDimensionAnnotations,"Tolerances or circular witness lost during save/reopen");
+    QByteArray diameterSvg;
+    require(cad::buildOrthographicDrawingSvg(*restoredDiameter.find(diameterPart.id),&diameterSvg,&error,
+            nullptr,nullptr,nullptr,cad::OrthographicProjection::ThirdAngle,
+            cad::DrawingSheetSize::A4Landscape,cad::DrawingAuxiliaryView::Isometric,0.5,
+            {},{},{},{},savedDiameter.sheetId,{},savedDiameter.dimensionAnnotations,
+            {},{},savedDiameter.sourceBodyIds,{},{},{},savedDiameter.edgeDimensionAnnotations,
+            {*restoredDiameter.find(diameterPart.id)}),
+            ("Could not render circular tolerance: "+error.toStdString()).c_str());
+    require(diameterSvg.contains("data-kind=\"DIAMETER\"")&&
+            diameterSvg.contains("data-value-mm=\"10.000\"")&&
+            diameterSvg.contains("data-upper-tolerance-mm=\"0.100\"")&&
+            diameterSvg.contains("data-lower-tolerance-mm=\"0.050\""),
+            "Rendered diameter does not report the current exact radius and manual tolerances");
+    // In-place linked-dimension editing must preserve persistent references,
+    // support current-value render preflight and reject invalid view changes
+    // before consuming a history checkpoint.
+    auto dimensionEdit=restoredDiameter.find(diameterPart.id)->drawingSettings;
+    const auto originalDimension=dimensionEdit.edgeDimensionAnnotations.first();
+    auto editedDimension=originalDimension;
+    editedDimension.offsetMm=14.25;
+    editedDimension.upperToleranceMm=0.12;
+    editedDimension.lowerToleranceMm=0.07;
+    require(cad::validateDrawingEdgeDimensionPreview(*restoredDiameter.find(diameterPart.id),
+            editedDimension,&error),"Valid in-place manufacturing-dimension edit failed preview");
+    dimensionEdit.edgeDimensionAnnotations[0]=editedDimension;
+    require(restoredDiameter.setDrawingSheetSettings(diameterPart.id,dimensionEdit,&error),
+            "Could not commit in-place manufacturing-dimension edit");
+    require(restoredDiameter.find(diameterPart.id)->drawingSettings.edgeDimensionAnnotations.first().id==
+            originalDimension.id &&
+            restoredDiameter.find(diameterPart.id)->drawingSettings.edgeDimensionAnnotations.first().edgeAnchor==
+            originalDimension.edgeAnchor &&
+            restoredDiameter.find(diameterPart.id)->drawingSettings.sourceGeometryToken==savedDiameter.sourceGeometryToken,
+            "In-place dimension edit lost ID, geometric witness or source revision");
+    require(restoredDiameter.undo()&&
+            restoredDiameter.find(diameterPart.id)->drawingSettings.edgeDimensionAnnotations.first()==originalDimension&&
+            restoredDiameter.redo()&&
+            restoredDiameter.find(diameterPart.id)->drawingSettings.edgeDimensionAnnotations.first()==editedDimension,
+            "In-place dimension edit did not round-trip through undo and redo");
+    const QString dimensionEditPath=directory.filePath("edited-linked-diameter.cadscene");
+    require(restoredDiameter.saveAs(dimensionEditPath,&error),"Could not persist edited dimension");
+    cad::SceneDocument reopenedDimensionEdit;
+    require(reopenedDimensionEdit.load(dimensionEditPath,&error)&&
+            reopenedDimensionEdit.find(diameterPart.id)->drawingSettings.edgeDimensionAnnotations.first()==editedDimension,
+            "Edited dimension did not preserve its identity and tolerance through save/reopen");
+    auto invalidEdit=editedDimension;
+    invalidEdit.view="RIGHT";
+    error.clear();
+    require(!cad::validateDrawingEdgeDimensionPreview(*restoredDiameter.find(diameterPart.id),
+            invalidEdit,&error)&&!error.isEmpty(),
+            "Drawing preflight accepted a circular diameter viewed edge-on");
+    invalidEdit=editedDimension;invalidEdit.upperToleranceMm=-0.1;
+    error.clear();
+    require(!cad::validateDrawingEdgeDimensionPreview(*restoredDiameter.find(diameterPart.id),
+            invalidEdit,&error)&&!error.isEmpty(),
+            "Drawing preflight accepted a negative manually entered tolerance");
+    require(restoredDiameter.find(diameterPart.id)->drawingSettings.edgeDimensionAnnotations.first()==editedDimension,
+            "Failed dimension previews changed the committed scene");
+
+    // v1.70 drawing-only radius edit: a legitimate hole-diameter change
+    // relocates the on-edge witness, but does not change circle center/axis.
+    // This must never fall back to the old topology index for machining.
+    cad::Part resizedDiameter=diameterPart;
+    resizedDiameter.shape=BRepPrimAPI_MakeCylinder(5.5,12.0).Shape();
+    resizedDiameter.geometryToken="diameter-revised-to-11mm";
+    int resizedEdgeIndex=0;
+    require(cad::resolveResizedFullCircleForDrawing(resizedDiameter.shape,diameterWitness,
+            &resizedEdgeIndex,&error)&&resizedEdgeIndex>0,
+            "A coaxial complete-circle diameter edit lost its drawing reference");
+    QByteArray resizedDrawing;
+    require(cad::buildOrthographicDrawingSvg(resizedDiameter,&resizedDrawing,&error,
+            nullptr,nullptr,nullptr,cad::OrthographicProjection::ThirdAngle,
+            cad::DrawingSheetSize::A4Landscape,cad::DrawingAuxiliaryView::Isometric,0.5,
+            {},{},{},{},savedDiameter.sheetId,{},savedDiameter.dimensionAnnotations,
+            {},{},savedDiameter.sourceBodyIds,{},{},{},savedDiameter.edgeDimensionAnnotations,
+            {resizedDiameter}),
+            ("Could not regenerate the resized linked diameter: "+error.toStdString()).c_str());
+    require(resizedDrawing.contains("data-value-mm=\"11.000\"")&&
+            resizedDrawing.contains("data-source-geometry-token=\"diameter-revised-to-11mm\""),
+            "Resized diameter drawing used the old radius or geometry revision");
+    cad::Part excessiveResize=diameterPart;
+    excessiveResize.shape=BRepPrimAPI_MakeCylinder(7,12.0).Shape();
+    int previousSelection=resizedEdgeIndex;
+    error.clear();
+    require(!cad::resolveResizedFullCircleForDrawing(excessiveResize.shape,diameterWitness,
+            &resizedEdgeIndex,&error)&&resizedEdgeIndex==previousSelection,
+            "A large radius change was falsely accepted or corrupted the output");
+    TopoDS_Compound ambiguousCircles;BRep_Builder ambiguityBuilder;
+    ambiguityBuilder.MakeCompound(ambiguousCircles);
+    ambiguityBuilder.Add(ambiguousCircles,BRepPrimAPI_MakeCylinder(5.3,12).Shape());
+    ambiguityBuilder.Add(ambiguousCircles,BRepPrimAPI_MakeCylinder(5.7,12).Shape());
+    error.clear();
+    require(!cad::resolveResizedFullCircleForDrawing(ambiguousCircles,diameterWitness,
+            &resizedEdgeIndex,&error)&&error.contains("More than one"),
+            "Two concentric successor circles were incorrectly auto-selected");
+
+    // v1.70 manufacturing location dimensions retain the same circular witness,
+    // measure absolute signed model-origin coordinates, and round-trip as
+    // explicit annotation types rather than stale text labels.
+    cad::DrawingEdgeDimensionAnnotation holeX=diameter;
+    holeX.id.clear();holeX.kind="CENTER_X";
+    holeX.upperToleranceMm=0.02;holeX.lowerToleranceMm=0.03;
+    cad::DrawingSheetSettings holeSheet=savedDiameter;
+    holeSheet.edgeDimensionAnnotations.append(holeX);
+    require(diameterDoc.setDrawingSheetSettings(diameterPart.id,holeSheet,&error),
+            "Could not save model-origin hole-location annotation");
+    const auto savedHole=diameterDoc.find(diameterPart.id)->drawingSettings;
+    require(savedHole.edgeDimensionAnnotations.size()==2,"Missing location annotation");
+    const QString holePath=directory.filePath("hole-location.cadscene");
+    require(diameterDoc.saveAs(holePath,&error),"Could not persist hole location");
+    cad::SceneDocument reopenedHole;
+    require(reopenedHole.load(holePath,&error),"Could not reopen hole location");
+    require(reopenedHole.find(diameterPart.id)->drawingSettings.edgeDimensionAnnotations==
+            savedHole.edgeDimensionAnnotations,"Hole-location type or witness was lost on save/reopen");
+    QByteArray locationSvg;
+    require(cad::buildOrthographicDrawingSvg(*reopenedHole.find(diameterPart.id),&locationSvg,&error,
+            nullptr,nullptr,nullptr,cad::OrthographicProjection::ThirdAngle,
+            cad::DrawingSheetSize::A4Landscape,cad::DrawingAuxiliaryView::Isometric,0.5,
+            {},{},{},{},savedHole.sheetId,{},savedHole.dimensionAnnotations,
+            {},{},savedHole.sourceBodyIds,{},{},{},savedHole.edgeDimensionAnnotations,
+            {*reopenedHole.find(diameterPart.id)}),"Could not export hole location from saved witnessed edge");
+    require(locationSvg.contains("data-kind=\"CENTER_X\"")&&
+            locationSvg.contains("X=0.000")&&
+            locationSvg.contains("data-upper-tolerance-mm=\"0.020\""),
+            "Hole location was not resolved from the circular center and tolerance");
+    auto invalidHole=savedHole;
+    invalidHole.edgeDimensionAnnotations.last().kind="CENTER_Z";
+    require(!diameterDoc.setDrawingSheetSettings(diameterPart.id,invalidHole,&error),
+            "A hole Z ordinate was incorrectly allowed in a TOP view");
+
+    auto rejectedDiameter=savedDiameter;
+    rejectedDiameter.edgeDimensionAnnotations.first().lowerToleranceMm=-0.1;
+    error.clear();
+    require(!diameterDoc.setDrawingSheetSettings(diameterPart.id,rejectedDiameter,&error),
+            "Invalid negative manufacturing tolerance was accepted");
+
+    // The same current-result resolver can measure center-to-center spacing
+    // across two distinct cylinders, never an arbitrary old edge index.
+    gp_Trsf shift;shift.SetTranslation(gp_Vec(25,0,0));
+    const TopoDS_Shape secondCylinder=BRepBuilderAPI_Transform(diameterPart.shape,shift,true).Shape();
+    TopoDS_Compound pair;BRep_Builder pairBuilder;pairBuilder.MakeCompound(pair);
+    pairBuilder.Add(pair,diameterPart.shape);pairBuilder.Add(pair,secondCylinder);
+    cad::Part twoCenters=diameterPart;twoCenters.shape=pair;
+    TopTools_IndexedMapOfShape pairEdges;TopExp::MapShapes(twoCenters.shape,TopAbs_EDGE,pairEdges);
+    QVector<int> topCircles;
+    for(int i=1;i<=pairEdges.Extent();++i){
+        const BRepAdaptor_Curve curve(TopoDS::Edge(pairEdges.FindKey(i)));
+        if(curve.GetType()==GeomAbs_Circle&&std::abs(curve.Circle().Location().Z()-12.0)<1e-6)
+            topCircles.append(i);
+    }
+    require(topCircles.size()==2,"Two-cylinder fixture must expose two top circular edges");
+    QMap<QString,double> firstCircleWitness,secondCircleWitness;
+    require(cad::captureStableEdgeAnchor(twoCenters.shape,topCircles[0],&firstCircleWitness,&error)&&
+            cad::captureStableEdgeAnchor(twoCenters.shape,topCircles[1],&secondCircleWitness,&error),
+            "Could not capture both circle center witnesses");
+    cad::DrawingEdgeDimensionAnnotation centers{"two-circle-centers",twoCenters.id,twoCenters.geometryToken,
+        topCircles[0],"TOP",10.0,firstCircleWitness};
+    centers.kind="CENTER_DISTANCE";centers.secondEdgeIndex=topCircles[1];
+    centers.secondEdgeAnchor=secondCircleWitness;
+    QByteArray pairSvg;
+    require(cad::buildOrthographicDrawingSvg(twoCenters,&pairSvg,&error,
+            nullptr,nullptr,nullptr,cad::OrthographicProjection::ThirdAngle,
+            cad::DrawingSheetSize::A4Landscape,cad::DrawingAuxiliaryView::Isometric,0.5,
+            {},{},{},{},{},{},{},{},{},{twoCenters.id},{},{},{},{centers},{twoCenters}),
+            ("Two-circle center distance export failed: "+error.toStdString()).c_str());
+    require(pairSvg.contains("data-kind=\"CENTER_DISTANCE\"")&&
+            pairSvg.contains("data-value-mm=\"25.000\""),
+            "Center distance was not calculated from the two actual circle centers");
+    centers.secondEdgeAnchor=firstCircleWitness;
+    error.clear();
+    require(!cad::buildOrthographicDrawingSvg(twoCenters,&pairSvg,&error,
+            nullptr,nullptr,nullptr,cad::OrthographicProjection::ThirdAngle,
+            cad::DrawingSheetSize::A4Landscape,cad::DrawingAuxiliaryView::Isometric,0.5,
+            {},{},{},{},{},{},{},{},{},{twoCenters.id},{},{},{},{centers},{twoCenters}),
+            "Center distance accepted two witnesses to the same circular edge");
 }
 
 void testOrthographicDrawingExport() {
@@ -2598,6 +2927,15 @@ void testOrthographicDrawingExport() {
     require(currentSourceCheck.errors==0&&currentSourceCheck.warnings==0&&
             std::any_of(currentSourceCheck.findings.cbegin(),currentSourceCheck.findings.cend(),[](const auto& finding){return finding.code=="DRAWING_SOURCE_CURRENT";}),
             "Model-linked snapshot identity did not report the current source geometry");
+    require(svg.contains("data-cadworkbench-source-data-token=\""),
+            "A single-part drawing must record the BOM/material revision fingerprint");
+    cad::Part metadataChanged=*doc.find(id);
+    metadataChanged.revision=QStringLiteral("new-manufacturing-revision");
+    const auto changedMetadataCheck=cad::checkDrawingSourceSnapshot(metadataChanged,svg);
+    require(changedMetadataCheck.errors==0&&changedMetadataCheck.warnings==1&&
+            std::any_of(changedMetadataCheck.findings.cbegin(),changedMetadataCheck.findings.cend(),
+                [](const auto& finding){return finding.code=="DRAWING_SOURCE_METADATA_STALE";}),
+            "Drawing source check missed an unchanged-geometry BOM/revision modification");
     cad::Part wrongSource=*doc.find(id);wrongSource.id="different-body";
     require(cad::checkDrawingSourceSnapshot(wrongSource,svg).errors==1,"Drawing source check accepted a different selected body");
     cad::Part staleSource=*doc.find(id);staleSource.geometryToken="changed-geometry-token";
@@ -3758,7 +4096,88 @@ void testRoundedSlotPattern(){
     require(stale.translate(stale.parts().first().id,1,0,0,&error),"Stale pattern mutation failed");
     require(!stale.commitRoundedSlotPattern(staleCommand,stalePreview.shape,&error),"Stale rounded-slot pattern was committed");
 }
+// UI workflow guarantee: isolate/hide/show changes are atomic, undoable and
+// never partially applied when any selected object ID has become invalid.
+void testAtomicBatchRenameWorkflow() {
+    cad::SceneDocument doc; QString issue;
+    for(int i=0;i<3;++i)require(doc.addPrimitive(cad::Primitive::Box,{10,10,10},&issue),"rename fixture");
+    const QString first=doc.parts()[0].id,second=doc.parts()[1].id,third=doc.parts()[2].id;
+    const QString n1=doc.find(first)->name,n2=doc.find(second)->name,n3=doc.find(third)->name;
+    require(doc.renameBatch({{first,"Bracket A"},{second,"Bracket B"}},&issue),"initial atomic batch rename");
+    require(doc.find(first)->name=="Bracket A"&&doc.find(second)->name=="Bracket B", "batch rename values");
+    require(doc.renameBatch({{first,"Bracket B"},{second,"Bracket A"}},&issue),"swap names atomically");
+    require(doc.find(first)->name=="Bracket B"&&doc.find(second)->name=="Bracket A","swapped names");
+    const auto before=doc.parts();
+    require(!doc.renameBatch({{first,"UNIQUE"},{second,"unique"}},&issue),"case collision accepted");
+    require(!doc.renameBatch({{first,"x\ny"}},&issue),"newline accepted");
+    require(!doc.renameBatch({{first,"A"},{"missing-body","Z"}},&issue),"missing body accepted");
+    require(!doc.renameBatch({{first,n3}},&issue),"untouched body name collision accepted");
+    for(int i=0;i<3;++i)require(doc.parts()[i].name==before[i].name,"failed batch renamed a body");
+    require(doc.undo()&&doc.find(first)->name=="Bracket A"&&doc.find(second)->name=="Bracket B",
+        "one undo must restore previous batch");
+    require(doc.redo()&&doc.find(first)->name=="Bracket B"&&doc.find(second)->name=="Bracket A",
+        "one redo must replay previous batch");
+    QTemporaryDir dir;require(dir.isValid(),"rename tempdir");
+    const QString file=dir.filePath("renamed.cadscene");
+    require(doc.saveAs(file,&issue),"save renamed scene");
+    cad::SceneDocument loaded;require(loaded.load(file,&issue),"load renamed scene");
+    require(loaded.find(first)->name=="Bracket B"&&loaded.find(second)->name=="Bracket A"&&
+        loaded.find(third)->name==n3,"batch rename save/reopen");
+    require(doc.renameBatch({{first," Bracket B "}},&issue),"no-op after trim");
+    require(doc.find(first)->name=="Bracket B","no-op must preserve names");
+    (void)n1;(void)n2;
+}
+
+void testAtomicVisibilityWorkflow() {
+    cad::SceneDocument scene;
+    QString issue;
+    require(scene.addPrimitive(cad::Primitive::Box,{15,10,10},&issue),"Visibility fixture A failed");
+    require(scene.addPrimitive(cad::Primitive::Cylinder,{3,10},&issue),"Visibility fixture B failed");
+    require(scene.addPrimitive(cad::Primitive::Sphere,{5},&issue),"Visibility fixture C failed");
+    const QString first=scene.parts()[0].id,second=scene.parts()[1].id,third=scene.parts()[2].id;
+    QTemporaryDir folder;
+    require(folder.isValid(),"Visibility fixture folder unavailable");
+    require(scene.saveAs(folder.filePath("visibility.cadscene"),&issue),"Visibility fixture save failed");
+    require(!scene.dirty(),"Saved visibility fixture should be clean");
+    require(scene.isolateBodies({first,third},&issue),"Isolate selected bodies failed");
+    require(scene.find(first)->visible&&!scene.find(second)->visible&&scene.find(third)->visible,
+            "Isolate selected produced incorrect visibility set");
+    require(scene.undo()&&scene.find(first)->visible&&scene.find(second)->visible&&scene.find(third)->visible,
+            "One undo did not restore all visibility changes");
+    require(!scene.dirty(),"Undo isolation should recover saved revision");
+    require(scene.redo()&&!scene.find(second)->visible,"Redo isolation failed");
+    const auto oldRevisionState=scene.find(second)->visible;
+    require(!scene.setVisibilityBatch({{first,false},{QStringLiteral("absent"),true}},&issue),
+            "Invalid batch with a missing body was accepted");
+    require(scene.find(first)->visible&&scene.find(second)->visible==oldRevisionState,
+            "Rejected visibility batch partly mutated document");
+    require(!scene.isolateBodies({},&issue),"Empty isolate should be rejected");
+    require(!scene.isolateBodies({first,QStringLiteral("absent")},&issue),
+            "Unknown isolate body ID was accepted");
+    require(scene.find(first)->visible&&!scene.find(second)->visible,
+            "Rejected isolate altered visibility");
+    require(scene.showAllBodies(&issue),"Show all bodies failed");
+    require(scene.find(first)->visible&&scene.find(second)->visible&&scene.find(third)->visible,
+            "Show all failed to restore every body");
+    require(scene.undo()&&!scene.find(second)->visible,"Show-all must be one undoable step");
+    require(scene.redo()&&scene.find(second)->visible,"Show-all redo failed");
+    require(scene.setVisibilityBatch({{first,false},{third,false}},&issue),"Hide multiple failed");
+    require(!scene.find(first)->visible&&!scene.find(third)->visible,
+            "Hide selected failed for one of the bodies");
+    require(scene.undo()&&scene.find(first)->visible&&scene.find(third)->visible,
+            "Hide multi-body undo was not atomic");
+    require(scene.saveAs(folder.filePath("visibility-final.cadscene"),&issue),"Visibility save failed");
+    cad::SceneDocument reloaded;
+    require(reloaded.load(folder.filePath("visibility-final.cadscene"),&issue),
+            "Visibility re-open failed");
+    for(const auto& part:scene.parts())
+        require(reloaded.find(part.id)&&reloaded.find(part.id)->visible==part.visible,
+                "Visibility changed across save/re-open");
+}
+
 void execute() {
+    testAtomicVisibilityWorkflow();
+    testAtomicBatchRenameWorkflow();
     QTemporaryDir dir;
     require(dir.isValid(),"Temporary directory unavailable");
     QString error;
@@ -4825,6 +5244,145 @@ f -7 -6 -2 -3
     require(!doc.importOBJ(malformedPath,0.01,&error)&&doc.parts().size()==1,"Malformed OBJ index was accepted or changed the scene");
     require(!doc.importOBJ(dir.filePath("missing.obj"),0.01,&error)&&doc.parts().size()==1,"Missing OBJ input changed the scene");
 }
+void testCoordinatedDimensionSuppressionV170(){
+    QString issue;cad::SceneDocument doc;
+    require(doc.addParametricRectangularExtrusion(70,30,15,&issue),
+        "Combined revision first source");
+    const QString first=doc.parts().last().id;
+    require(doc.addParametricRectangularExtrusion(65,30,15,&issue),
+        "Combined revision second source");
+    const QString second=doc.parts().last().id;
+    require(doc.addParametricThroughHole(first,8,20,15,&issue)&&
+            doc.addParametricThroughHole(second,8,20,15,&issue),
+        "Combined revision authoring both dependent hole features");
+    const QString t1=doc.find(first)->geometryToken;
+    const QString t2=doc.find(second)->geometryToken;
+    // The requested smaller width cannot preserve the original hole center.
+    // A dimension-only change should fail; the combined FINAL state removes
+    // the hole and is valid, avoiding an invalid intermediate B-rep.
+    require(!doc.setNamedParameters(first,{{"width",12.0}},&issue)&&
+            doc.find(first)->geometryToken==t1,
+        "A dimension-only edit unexpectedly kept an out-of-bounds hole");
+    const QMap<QString,QMap<QString,double>> dimensions{
+        {first,{{"width",12.0}}},{second,{{"width",14.0}}}};
+    const QMap<QString,QStringList> suppression{
+        {first,{"through_hole"}},{second,{"through_hole"}}};
+    QString report="preserved";
+    require(doc.previewCoordinatedParametricRevision(dimensions,suppression,
+            &report,&issue)&&report.contains("FEATURE-SUPPRESSION PREVIEW")&&
+            doc.find(first)->geometryToken==t1&&doc.find(second)->geometryToken==t2,
+        "Detached combined revision changed source geometry");
+    const QString goodReport=report;
+    auto invalid=suppression;invalid[second]={"unknown-feature"};
+    require(!doc.previewCoordinatedParametricRevision(dimensions,invalid,
+            &report,&issue)&&report==goodReport&&
+            doc.find(first)->geometryToken==t1,
+        "Invalid combined revision damaged caller report or live geometry");
+    require(!doc.setCoordinatedParametricRevision(dimensions,invalid,&issue)&&
+            doc.find(first)->geometryToken==t1&&doc.find(second)->geometryToken==t2,
+        "Invalid second source partially committed the combined revision");
+    require(doc.setCoordinatedParametricRevision(dimensions,suppression,&issue),
+        ("Combined dimension/suppression change failed: "+issue.toStdString()).c_str());
+    closeTo(volume(doc.find(first)->shape),12.0*30.0*15.0);
+    closeTo(volume(doc.find(second)->shape),14.0*30.0*15.0);
+    require(doc.suppressedParametricFeatures(first).contains("through_hole")&&
+            doc.suppressedParametricFeatures(second).contains("through_hole"),
+        "Combined revision omitted requested optional-feature suppression");
+    require(doc.undo()&&doc.find(first)->geometryToken==t1&&
+            doc.find(second)->geometryToken==t2&&
+            doc.suppressedParametricFeatures(first).isEmpty(),
+        "Combined revision did not undo atomically");
+    require(doc.redo()&&doc.namedParameters(first).value("width")==12&&
+            doc.suppressedParametricFeatures(second).contains("through_hole"),
+        "Combined revision did not redo atomically");
+    QTemporaryDir dir;require(dir.isValid(),"Combined revision persistence temporary directory");
+    const QString file=dir.filePath("combined-revision.cadscene");
+    require(doc.saveAs(file,&issue),"Save combined revision");
+    cad::SceneDocument reopened;
+    require(reopened.load(file,&issue)&&
+            reopened.namedParameters(first).value("width")==12&&
+            reopened.suppressedParametricFeatures(first).contains("through_hole")&&
+            reopened.suppressedParametricFeatures(second).contains("through_hole"),
+        ("Combined dimensions and optional features did not survive save/reopen: " + issue.toStdString()).c_str());
+    const QString restoredToken=reopened.find(first)->geometryToken;
+    require(!reopened.setParametricFeatureSuppressed(first,"through_hole",false,&issue)&&
+            reopened.find(first)->geometryToken==restoredToken,
+            "Reactivating an out-of-bounds hole after load must fail atomically");
+}
+
+void testCoordinatedParametricBatchV170(){
+    QString issue;cad::SceneDocument scene;
+    require(scene.addParametricRectangularExtrusion(40,30,10,&issue),
+            "coordinated batch source A");
+    const QString first=scene.parts().last().id;
+    require(scene.addParametricRectangularExtrusion(30,40,12,&issue),
+            "coordinated batch source B");
+    const QString second=scene.parts().last().id;
+    require(scene.addLinkedBooleanBody(cad::BooleanOp::Fuse,first,second,&issue),
+            "coordinated batch transitive linked solid");
+    const QString linked=scene.parts().last().id;
+    const QString linkedToken=scene.find(linked)->geometryToken;
+    const QString firstToken=scene.find(first)->geometryToken;
+    const QString secondToken=scene.find(second)->geometryToken;
+    const QMap<QString,QMap<QString,double>> batch{
+        {first,{{"width",60.0}}},{second,{{"height",55.0}}}};
+    QString preview="preserved preview";
+    require(scene.previewNamedParameterBatch(batch,&preview,&issue)&&
+            preview.contains("COORDINATED PARAMETRIC")&&
+            preview.contains("Total rebuilt")&&
+            scene.find(first)->geometryToken==firstToken&&
+            scene.find(second)->geometryToken==secondToken&&
+            scene.find(linked)->geometryToken==linkedToken,
+            "coordinated preview mutated source or linked solids");
+    const QString goodPreview=preview;
+    // Compare independent fully regenerated design alternatives. One rejected
+    // candidate must not poison valid rows or modify the committed scene.
+    QVector<cad::ParametricDesignAlternative> options{
+        {"Compact",{{first,{{"width",32.0}}},{second,{{"height",35.0}}}}},
+        {"Baseline",{}},
+        {"Expanded",{{first,{{"width",60.0}}},{second,{{"height",55.0}}}}},
+        {"Impossible",{{first,{{"width",0.0}}}}}};
+    QVector<cad::ParametricDesignAlternativeResult> alternatives;
+    require(scene.evaluateParametricDesignAlternatives(options,&alternatives,&issue)&&
+            alternatives.size()==4&&alternatives[0].valid&&alternatives[1].valid&&
+            alternatives[2].valid&&!alternatives[3].valid&&
+            alternatives[0].volumeChangePercent<0.0&&
+            alternatives[2].volumeChangePercent>0.0&&
+            alternatives[2].rebuiltBodies>=2&&
+            scene.find(first)->geometryToken==firstToken&&
+            scene.find(linked)->geometryToken==linkedToken,
+            "what-if comparison did not rebuild independent alternatives read-only");
+    const auto recordedAlternatives=alternatives;
+    require(!scene.evaluateParametricDesignAlternatives(
+            {{"Duplicated",{}},{"Duplicated",{}}},&alternatives,&issue)&&
+            alternatives.size()==recordedAlternatives.size(),
+            "invalid design study overwrote the last valid comparison");
+    require(!scene.previewNamedParameterBatch({{first,{{"width",65.0}}},
+            {second,{{"depth",-1.0}}}},&preview,&issue)&&preview==goodPreview&&
+            scene.find(first)->geometryToken==firstToken,
+            "invalid second source changed output or first body");
+    require(scene.setNamedParameterBatch(batch,&issue),
+            "coordinated parameter transaction failed");
+    require(scene.namedParameters(first).value("width")==60&&
+            scene.namedParameters(second).value("height")==55&&
+            scene.find(linked)->geometryToken!=linkedToken,
+            "coordinated batch did not rebuild both sources and their linked descendant");
+    closeTo(volume(scene.find(first)->shape),60.0*30.0*10.0);
+    closeTo(volume(scene.find(second)->shape),30.0*55.0*12.0);
+    require(scene.undo()&&scene.namedParameters(first).value("width")==40&&
+            scene.namedParameters(second).value("height")==40&&
+            scene.find(linked)->geometryToken==linkedToken,
+            "coordinated batch did not roll back sources and linked descendant in one undo");
+    require(scene.redo()&&scene.namedParameters(first).value("width")==60&&
+            scene.namedParameters(second).value("height")==55,
+            "redo did not restore both parametric edits");
+    const QString editedToken=scene.find(first)->geometryToken;
+    require(!scene.setNamedParameterBatch({{first,{{"width",80.0}}},
+            {second,{{"height",0.0}}}},&issue)&&
+            scene.find(first)->geometryToken==editedToken,
+            "rejected coordinated edit partly committed a source body");
+}
+
 void testParametricFoundation() {
     QString error;QTemporaryDir dir;require(dir.isValid(),"Parametric test folder failed");
     cad::SceneDocument doc;
@@ -5226,6 +5784,96 @@ void testParametricFoundation() {
                 "An out-of-bounds archived offset sketch loaded or changed the open scene");
     }
 }
+void testAssociativeManufacturingPackageV170(){
+    QString issue;QTemporaryDir dir;require(dir.isValid(),"manufacturing package root");
+    cad::SceneDocument scene;
+    require(scene.addFoldedSheetMetal({30.0,20.0,30.0},25.0,1.0,
+            {{90.0,2.0},{-90.0,2.0}},&issue),"manufacturing source folded solid");
+    const QString folded=scene.parts().last().id;
+    require(scene.addLinkedFoldedFlatBlank(folded,{0.40,0.45},{2.0,2.0},&issue),
+            "manufacturing linked neutral blank");
+    const QString blank=scene.parts().last().id;
+    const QString package=dir.filePath("new-manufacturing-package");
+    require(scene.exportLinkedFlatManufacturingPackage(blank,package,&issue),
+            ("cannot export associated manufacturing package: "+issue.toStdString()).c_str());
+    const QJsonDocument manifest=QJsonDocument::fromJson(readBytes(package+"/manifest.json"));
+    require(manifest.isObject()&&manifest.object().value("flat_body_id").toString()==blank&&
+            manifest.object().value("folded_source_id").toString()==folded&&
+            manifest.object().value("bends").toArray().size()==2,
+            "manufacturing manifest lost flat-source provenance and bend data");
+    require(readBytes(package+"/flat-pattern.svg").contains("<svg")&&
+            readBytes(package+"/flat-pattern.dxf").contains("SECTION")&&
+            readBytes(package+"/bend-schedule.csv").startsWith("bend_index,direction"),
+            "manufacturing package does not contain all three real export types");
+    const QJsonObject hashes=manifest.object().value("sha256").toObject();
+    for(const QString& name:{QStringLiteral("flat-pattern.svg"),
+             QStringLiteral("flat-pattern.dxf"),QStringLiteral("bend-schedule.csv")}){
+        const QByteArray digest=QCryptographicHash::hash(readBytes(package+"/"+name),
+             QCryptographicHash::Sha256).toHex();
+        require(hashes.value(name).toString().toLatin1()==digest,
+                "manufacturing manifest checksum does not match exported data");
+    }
+    require(!scene.exportLinkedFlatManufacturingPackage(blank,package,&issue)&&
+            readBytes(package+"/manifest.json")==manifest.toJson(QJsonDocument::Indented),
+            "existing manufacturing package was overwritten");
+    require(!scene.exportLinkedFlatManufacturingPackage("missing",dir.filePath("failed-package"),&issue)&&
+            !QDir(dir.filePath("failed-package")).exists(),
+            "invalid manufacturing package left a partial directory");
+    require(scene.addLinkedFoldedFlatBlank(folded,{0.35,0.40},{2.0,2.0},&issue),
+            "second valid associative flat for a combined manufacturing job");
+    const QString secondBlank=scene.parts().last().id;
+    const QString batchPath=dir.filePath("new-multi-part-job");
+    require(scene.exportLinkedFlatManufacturingBatch({blank,secondBlank},batchPath,&issue),
+            ("combined manufacturing job failed: "+issue.toStdString()).c_str());
+    const QJsonDocument job=QJsonDocument::fromJson(readBytes(batchPath+"/batch-manifest.json"));
+    require(job.isObject()&&job.object().value("part_count").toInt()==2&&
+            job.object().value("parts").toArray().size()==2&&
+            readBytes(batchPath+"/batch-index.csv").contains("folded_source_id"),
+            "published multi-part manufacturing job omitted indexed provenance");
+    for(const auto& value:job.object().value("parts").toArray()){
+        const QString folder=batchPath+"/"+value.toObject().value("package_directory").toString();
+        require(!readBytes(folder+"/flat-pattern.svg").isEmpty()&&
+                !readBytes(folder+"/flat-pattern.dxf").isEmpty()&&
+                !readBytes(folder+"/bend-schedule.csv").isEmpty()&&
+                !readBytes(folder+"/manifest.json").isEmpty(),
+                "published multi-part package was missing source-linked files");
+    }
+    require(!scene.exportLinkedFlatManufacturingBatch({blank,blank},
+            dir.filePath("bad-duplicate-job"),&issue)&&
+            !QDir(dir.filePath("bad-duplicate-job")).exists(),
+            "duplicate flat body created a partial manufacturing job");
+    require(!scene.exportLinkedFlatManufacturingBatch({blank,"missing"},
+            dir.filePath("bad-missing-job"),&issue)&&
+            !QDir(dir.filePath("bad-missing-job")).exists(),
+            "invalid later source created a partial manufacturing job");
+    require(!scene.exportLinkedFlatManufacturingBatch({blank,secondBlank},batchPath,&issue),
+            "multi-part exporter overwrote an existing published job");
+    cad::StockLayoutSettings stock;stock.enabled=true;
+    stock.stockWidthMm=300;stock.stockHeightMm=200;
+    stock.gapMm=2;stock.allowRotation=true;
+    const QString reliefJob=dir.filePath("relief-aware-stock-job");
+    require(scene.exportLinkedFlatManufacturingBatch({blank,secondBlank},
+            reliefJob,&issue,stock),
+        ("Contour-aware batch stock planning failed: "+issue.toStdString()).c_str());
+    const auto stockManifest=QJsonDocument::fromJson(
+        readBytes(reliefJob+"/batch-manifest.json")).object()
+        .value("stock_layout").toObject();
+    require(stockManifest.value("relief_aware_contour_placement").toBool()&&
+            stockManifest.value("net_contour_material_area_mm2").toDouble()>0.0&&
+            readBytes(reliefJob+"/stock-layout.svg").contains("#d9e4f4")&&
+            readBytes(reliefJob+"/stock-layout.csv").contains("flat_body_id"),
+        "Relief-aware stock plan did not publish actual contour layout metadata");
+    const QByteArray cutLengths=readBytes(reliefJob+"/cut-length-summary.csv");
+    require(cutLengths.startsWith("flat_body_id,material_area_mm2")&&
+            cutLengths.contains(blank.toUtf8())&&
+            cutLengths.contains(secondBlank.toUtf8())&&
+            stockManifest.value("total_exposed_neutral_cut_length_mm").toDouble()>0.0&&
+            stockManifest.value("cut_length_csv_sha256").toString()==
+                QString::fromLatin1(QCryptographicHash::hash(cutLengths,
+                    QCryptographicHash::Sha256).toHex()),
+            "Manufacturing batch omitted or mismatched its actual neutral contour cut-length evidence");
+}
+
 void testSheetMetalFlatPattern() {
     QString error;cad::SheetMetalRule rule{2.0,2.0,0.33};cad::SheetMetalFlatPattern result;
     QVector<double> numericValues{7.0};
@@ -5486,6 +6134,7 @@ void testFoldedSheetMetal() {
     QVector<QPointF> outline{{-9,-9}};
     require(cad::buildFoldedSheetOutline(flanges,25.0,1.0,bends,&outline,&error)&&outline.size()>30,
             "Could not develop a radiused one-bend cross-section");
+    std::cerr << "[folded phase] initial folded model\n" << std::flush;
     cad::SceneDocument doc;
     require(doc.addFoldedSheetMetal(flanges,25.0,1.0,bends,&error)&&doc.parts().size()==1,
             "Could not add folded sheet-metal solid to the scene");
@@ -5517,11 +6166,32 @@ void testFoldedSheetMetal() {
             savedFlanges==flanges&&savedWidth==25.0&&savedThickness==1.0&&savedBends.size()==1&&
             savedBends.first().angleDegrees==90.0&&savedBends.first().insideRadiusMm==2.0,
             "Folded sheet-metal edit definition did not persist or match the body");
+    require(cad::validateFoldedSheetShopLimits(savedFlanges,savedWidth,savedThickness,savedBends,{2.0,30.0},&error),
+            "Folded sheet rejected shop limits exactly at the radius and flange boundaries");
+    require(!cad::validateFoldedSheetShopLimits(savedFlanges,savedWidth,savedThickness,savedBends,{2.01,0.0},&error)&&
+            error.contains("bend 1",Qt::CaseInsensitive),
+            "Folded sheet missed an undersized inside radius");
+    require(!cad::validateFoldedSheetShopLimits(savedFlanges,savedWidth,savedThickness,savedBends,{0.0,30.01},&error)&&
+            error.contains("flange 2",Qt::CaseInsensitive),
+            "Folded sheet missed an undersized straight flange");
+    require(!cad::validateFoldedSheetShopLimits(savedFlanges,savedWidth,savedThickness,savedBends,{-1.0,0.0},&error),
+            "Folded sheet accepted a negative shop limit");
+    // The independent manufacturing review must match the same saved folded
+    // geometry and DXF bend-station math, without changing the scene.
+    cad::sheet::BendSequenceReport sequence;
+    std::string sequenceIssue;
+    require(cad::sheet::inspectBendSequence({40.0,30.0},1.0,{{90.0,2.0,.33}},
+            &sequence,&sequenceIssue),"folded sheet bend-sequence audit failed");
+    require(sequence.stations.size()==1&&sequence.reverseDirectionCount==0,
+            "single-bend sequence metadata mismatch");
     cad::MultiBendFlatPattern developed;const double expectedAllowance=std::numbers::pi/2.0*(2.0+0.33);
     require(cad::calculateFoldedSheetFlatPattern(savedFlanges,savedWidth,savedThickness,savedBends,0.33,&developed,&error)&&
             std::abs(developed.flatLengthMm-(70.0+expectedAllowance))<1e-9&&
             std::abs(developed.bendLinePositionsMm.first()-(40.0+expectedAllowance/2.0))<1e-9,
             "Folded-body flat pattern did not conserve the straight neutral path and bend allowance");
+    require(std::abs(developed.flatLengthMm-sequence.developedLengthMm)<1e-9&&
+            std::abs(developed.bendLinePositionsMm.front()-sequence.stations.front().stationMm)<1e-9,
+            "independent bend sequence does not agree with kernel DXF stations");
     QByteArray foldedDxf;require(cad::buildFoldedSheetFlatPatternDxf(savedFlanges,savedWidth,savedThickness,savedBends,0.33,&foldedDxf,&developed,&error)&&
             foldedDxf.contains("$INSUNITS\n70\n4")&&foldedDxf.count("0\nLINE\n8\nBEND\n")==1&&
             foldedDxf.count("0\nLINE\n8\nOUTLINE\n")==4,
@@ -5531,12 +6201,17 @@ void testFoldedSheetMetal() {
             readBytes(foldedDxfPath)==foldedDxf,
             "Folded-body flat-pattern DXF export did not match its generated geometry");
     const QByteArray validFoldedDxf=foldedDxf;const double validFlatLength=developed.flatLengthMm;
+    require(!cad::exportFoldedSheetFlatPatternDxf(savedFlanges,savedWidth,savedThickness,savedBends,0.33,
+                directory.filePath("missing/folded.dxf"),&developed,&error)&&
+            developed.flatLengthMm==validFlatLength,
+            "Failed folded-sheet file write changed the previous flat-pattern result");
     require(!cad::buildFoldedSheetFlatPatternDxf(savedFlanges,savedWidth,savedThickness,savedBends,1.01,&foldedDxf,&developed,&error)&&
             foldedDxf==validFoldedDxf&&developed.flatLengthMm==validFlatLength,
             "Rejected folded-body K-factor changed previously valid DXF or calculation outputs");
     require(!cad::exportFoldedSheetFlatPatternDxf(savedFlanges,savedWidth,savedThickness,savedBends,1.01,foldedDxfPath,&developed,&error)&&
             readBytes(foldedDxfPath)==validFoldedDxf,
             "Rejected folded-body K-factor overwrote an existing valid DXF file");
+    std::cerr << "[folded phase] signed neutral development\n" << std::flush;
     const QVector<cad::FoldedSheetBend> signedBends{{90.0,1.0},{-90.0,1.5}};
     require(cad::calculateFoldedSheetFlatPattern({30.0,30.0,30.0},20.0,1.2,signedBends,0.4,&developed,&error)&&
             developed.bendAllowancesMm.size()==2&&developed.bendLinePositionsMm.size()==2&&
@@ -5568,6 +6243,44 @@ void testFoldedSheetMetal() {
             relievedFoldedDxf.count("0\nLINE\n8\nOUTLINE\n")==20&&
             relievedFoldedDxf.count("0\nLINE\n8\nBEND\n")==2,
             "Multi-bend folded DXF omitted independent end relief notches");
+    QByteArray foldedPreviewSvg;
+    cad::MultiBendFlatPattern previewPattern;
+    require(cad::buildFoldedSheetFlatPatternSvg({30.0,30.0,30.0},20.0,1.2,
+                signedBends,individualK,foldedRelief,&foldedPreviewSvg,&previewPattern,&error)&&
+            foldedPreviewSvg.startsWith("<svg ")&&
+            foldedPreviewSvg.contains("folded-sheet-flat-preview")&&
+            foldedPreviewSvg.count("id=\"bend-")==2&&
+            foldedPreviewSvg.contains("data-angle-degrees=\"-90\"")&&
+            foldedPreviewSvg.contains("L")&&
+            std::abs(previewPattern.flatLengthMm-developed.flatLengthMm)<1e-9&&
+            previewPattern.bendLinePositionsMm==developed.bendLinePositionsMm,
+            "Relieved SVG preview did not match the validated multi-bend DXF");
+    require(cad::equivalentFoldedSheetDevelopment(previewPattern,developed,&error),
+            "Equal SVG/DXF bend patterns were rejected by developed-geometry comparison");
+    auto mismatchedPattern=developed;
+    mismatchedPattern.bendLinePositionsMm[0]+=0.05;
+    require(!cad::equivalentFoldedSheetDevelopment(previewPattern,mismatchedPattern,&error),
+            "Changed bend station escaped linked-development consistency review");
+    mismatchedPattern=developed;mismatchedPattern.widthMm+=0.1;
+    require(!cad::equivalentFoldedSheetDevelopment(previewPattern,mismatchedPattern,&error),
+            "Changed developed width escaped linked-development consistency review");
+    mismatchedPattern=developed;mismatchedPattern.bendAllowancesMm[0]+=0.02;
+    require(!cad::equivalentFoldedSheetDevelopment(previewPattern,mismatchedPattern,&error),
+            "Changed bend allowance escaped linked-development consistency review");
+    mismatchedPattern=developed;mismatchedPattern.bendDeductionsMm.clear();
+    require(!cad::equivalentFoldedSheetDevelopment(previewPattern,mismatchedPattern,&error),
+            "Different bend deduction inventories escaped consistency review");
+    const QByteArray savedPreview=foldedPreviewSvg;
+    require(!cad::buildFoldedSheetFlatPatternSvg({30.0,30.0,30.0},20.0,1.2,
+                signedBends,individualK,cad::SheetMetalRelief{4.0,10.0},
+                &foldedPreviewSvg,&previewPattern,&error)&&
+            foldedPreviewSvg==savedPreview&&
+            std::abs(previewPattern.flatLengthMm-developed.flatLengthMm)<1e-9,
+            "Rejected SVG relief mutated saved preview bytes or pattern");
+    require(!cad::buildFoldedSheetFlatPatternSvg({30.0,30.0,30.0},20.0,1.2,
+                signedBends,QVector<double>{0.2},foldedRelief,
+                &foldedPreviewSvg,&previewPattern,&error)&&foldedPreviewSvg==savedPreview,
+            "Wrong K-factor count silently changed folded-sheet SVG preview");
     const QString relievedFoldedPath=directory.filePath("folded-relieved.dxf");
     require(cad::exportFoldedSheetFlatPatternDxf({30.0,30.0,30.0},20.0,1.2,signedBends,individualK,
                 foldedRelief,relievedFoldedPath,&developed,&error)&&readBytes(relievedFoldedPath)==relievedFoldedDxf,
@@ -5604,21 +6317,220 @@ void testFoldedSheetMetal() {
     require(!cad::buildFoldedSheetFlatPatternDxf({30.0,30.0,30.0},20.0,1.2,signedBends,QVector<double>{0.2,1.01},&foldedDxf,&developed,&error)&&
             std::abs(developed.flatLengthMm-individualLength)<1e-9,
             "Out-of-range per-bend K-factor changed the prior flat-pattern result");
+    std::cerr << "[folded phase] editable folded geometry\n" << std::flush;
+    // Source-level edit preview must use the real OCCT folded solid, compute
+    // neutral development, and never create an undo entry or modify outputs
+    // on a rejected edit.
+    double candidateVolume=-1.0,candidateFlat=-1.0;
+    const QString originalFoldToken=reopened.find(reopenedId)->geometryToken;
+    std::cerr << "[folded edit] preview accepted: before\n" << std::flush;
+    require(reopened.previewFoldedSheetMetalEdit(reopenedId,{42.0,30.0},25.0,1.0,
+                {{90.0,2.0}},&candidateVolume,&candidateFlat,&error)&&
+            candidateVolume>firstVolume&&candidateFlat>42.0+30.0&&
+            reopened.find(reopenedId)->geometryToken==originalFoldToken,
+            "folded edit preview should validate solid and neutral development without mutation");
+    std::cerr << "[folded edit] preview accepted: after\n" << std::flush;
+    const double safeVolume=candidateVolume,safeFlat=candidateFlat;
+    std::cerr << "[folded edit] preview rejected: before\n" << std::flush;
+    require(!reopened.previewFoldedSheetMetalEdit(reopenedId,{20.0,5.0,20.0},25.0,2.0,
+                {{165.0,1.0},{165.0,1.0}},&candidateVolume,&candidateFlat,&error)&&
+            candidateVolume==safeVolume&&candidateFlat==safeFlat&&
+            reopened.find(reopenedId)->geometryToken==originalFoldToken,
+            "rejected folded edit preview mutated outputs or saved model");
+    std::cerr << "[folded edit] commit edited solid: before\n" << std::flush;
     require(reopened.editFoldedSheetMetal(reopenedId,{42.0,30.0},25.0,1.0,{{90.0,2.0}},&error)&&
             reopened.diagnoseBody(reopenedId,&reopenedDiagnostics,&error)&&reopenedDiagnostics.volume>firstVolume,
             "Editing folded sheet-metal parameters did not rebuild the solid");
+    std::cerr << "[folded edit] undo/redo: before\n" << std::flush;
     require(reopened.undo()&&reopened.foldedSheetMetalDefinition(reopenedId,&savedFlanges,&savedWidth,&savedThickness,&savedBends,&current)&&
             current&&savedFlanges==flanges&&reopened.redo()&&
             reopened.foldedSheetMetalDefinition(reopenedId,&savedFlanges,&savedWidth,&savedThickness,&savedBends,&current)&&
             current&&savedFlanges.first()==42.0,
             "Folded sheet-metal edit was not undoable and redoable with its definition");
+    std::cerr << "[folded edit] undo/redo: after\n" << std::flush;
     const QString editedScenePath=directory.filePath("folded-sheet-edited.cadscene");
+    std::cerr << "[folded edit] save edited scene: before\n" << std::flush;
     require(reopened.saveAs(editedScenePath,&error),"Could not save edited folded sheet-metal body");
+    std::cerr << "[folded edit] save edited scene: after\n" << std::flush;
     cad::SceneDocument editedReopened;
+    std::cerr << "[folded edit] load edited scene: before\n" << std::flush;
     require(editedReopened.load(editedScenePath,&error)&&
             editedReopened.foldedSheetMetalDefinition(reopenedId,&savedFlanges,&savedWidth,&savedThickness,&savedBends,&current)&&
             current&&savedFlanges.first()==42.0,
             "Edited folded sheet-metal definition did not survive save and reopen");
+    std::cerr << "[folded edit] load edited scene: after\n" << std::flush;
+    std::cerr << "[folded phase] linked blank regeneration\n" << std::flush;
+    // True bounded associativity: a linked neutral flat blank is a separate
+    // stable-ID solid, but changing any folded flange or bend regenerates it
+    // from the same saved multi-flange definition in ONE undo transaction.
+    cad::SceneDocument linkedFlat;
+    require(linkedFlat.addFoldedSheetMetal({30.0,20.0,30.0},25.0,1.0,
+                {{90.0,2.0},{-90.0,2.0}},&error),"create three-flange linked source");
+    const QString foldedSource=linkedFlat.parts().last().id;
+    require(linkedFlat.addLinkedFoldedFlatBlank(foldedSource,&error)&&
+            linkedFlat.parts().size()==2,"create associative neutral flat blank");
+    const QString blankId=linkedFlat.parts().last().id;
+    cad::BodyDiagnostics oldBlank;
+    require(linkedFlat.diagnoseBody(blankId,&oldBlank,&error)&&oldBlank.volume>0,
+            "associated neutral blank has a valid solid volume");
+    // The saved linked development is also a source for a reproducible bend
+    // schedule, with no manual re-entry of its per-bend rules.
+    const auto* savedLinked=linkedFlat.find(blankId);
+    const auto* savedFolded=linkedFlat.find(foldedSource);
+    QByteArray linkedBendSchedule;
+    const QVector<double> scheduleK=savedLinked->linkedFoldedFlatKFactors.isEmpty()?
+        QVector<double>(savedFolded->foldedSheetBends.size(),0.33):
+        savedLinked->linkedFoldedFlatKFactors;
+    require(cad::buildFoldedSheetBendTableCsv(savedFolded->foldedSheetFlangesMm,
+        savedFolded->foldedSheetWidthMm,savedFolded->foldedSheetThicknessMm,
+        savedFolded->foldedSheetBends,scheduleK,&linkedBendSchedule,&error)&&
+        linkedBendSchedule.startsWith("bend_index,direction,angle_degrees")&&
+        linkedBendSchedule.count('\n')==savedFolded->foldedSheetBends.size()+1,
+        "saved linked flat did not regenerate its complete bend table");
+    const QString oldBlankToken=linkedFlat.find(blankId)->geometryToken;
+    require(!linkedFlat.scale(blankId,2.0,&error)&&
+            linkedFlat.find(blankId)->geometryToken==oldBlankToken,
+            "direct scaling of associated neutral blank bypassed dependency guard");
+    require(linkedFlat.editFoldedSheetMetal(foldedSource,{35.0,20.0,30.0},25.0,1.0,
+                {{90.0,2.0},{-90.0,2.0}},&error),
+            "update multi-flange source and linked neutral blank");
+    cad::BodyDiagnostics updatedBlank;
+    require(linkedFlat.parts().size()==2&&
+            linkedFlat.diagnoseBody(blankId,&updatedBlank,&error)&&
+            updatedBlank.volume>oldBlank.volume&&
+            linkedFlat.find(blankId)->geometryToken!=oldBlankToken,
+            "linked blank did not regenerate with changed folded flange");
+    const QString linkedBeforeInvalid=linkedFlat.find(blankId)->geometryToken;
+    require(!linkedFlat.editFoldedSheetMetal(foldedSource,{20.0,5.0,20.0},25.0,2.0,
+                {{165.0,1.0},{165.0,1.0}},&error)&&
+            linkedFlat.find(blankId)->geometryToken==linkedBeforeInvalid,
+            "invalid folded edit changed linked blank or model");
+    require(!linkedFlat.erase(foldedSource,&error),
+            "source deletion orphaned an associative flat blank");
+    require(linkedFlat.undo()&&linkedFlat.find(blankId)->geometryToken==oldBlankToken,
+            "source edit and flat blank did not undo atomically");
+    require(linkedFlat.redo()&&
+            linkedFlat.find(blankId)->geometryToken==linkedBeforeInvalid,
+            "source edit and flat blank did not redo atomically");
+    std::cerr << "[folded phase] structural linked flange change\n" << std::flush;
+    // Structural source edit: adding a fourth flange and a third bend must
+    // explicitly supply new per-bend development factors for the linked blank.
+    // Both bodies change in one undoable document transaction, and no bad
+    // K-factor mapping may orphan the existing flat blank.
+    const QVector<cad::FoldedSheetBend> expandedBends{
+        {90.0,2.0},{-90.0,2.0},{90.0,2.0}};
+    const QVector<double> expandedFlanges{35.0,20.0,30.0,25.0};
+    const QVector<double> expandedK{0.35,0.40,0.45};
+    const QString beforeExpandedSource=linkedFlat.find(foldedSource)->geometryToken;
+    const QString beforeExpandedBlank=linkedFlat.find(blankId)->geometryToken;
+    require(!linkedFlat.editFoldedSheetMetalWithDevelopments(foldedSource,
+        expandedFlanges,25.0,1.0,expandedBends,{{blankId,{0.35,0.40}}},&error)&&
+        linkedFlat.find(foldedSource)->geometryToken==beforeExpandedSource&&
+        linkedFlat.find(blankId)->geometryToken==beforeExpandedBlank,
+        "incomplete bend-factor mapping changed source or linked blank");
+    require(!linkedFlat.editFoldedSheetMetalWithDevelopments(foldedSource,
+        expandedFlanges,25.0,1.0,expandedBends,{{blankId,{0.35,1.20,0.45}}},&error)&&
+        linkedFlat.find(blankId)->geometryToken==beforeExpandedBlank,
+        "invalid K-factor in structural edit was committed");
+    require(!linkedFlat.editFoldedSheetMetalWithDevelopments(foldedSource,
+        expandedFlanges,25.0,1.0,expandedBends,{{"missing-flat",expandedK}},&error)&&
+        linkedFlat.find(blankId)->geometryToken==beforeExpandedBlank,
+        "unknown flat-blank target was allowed to modify the source");
+    require(linkedFlat.editFoldedSheetMetalWithDevelopments(foldedSource,
+        expandedFlanges,25.0,1.0,expandedBends,{{blankId,expandedK}},&error),
+        "adding fourth flange failed to regenerate linked three-bend blank");
+    require(linkedFlat.find(blankId)->linkedFoldedFlatKFactors==expandedK&&
+        linkedFlat.find(blankId)->linkedFoldedFlatSourceToken==
+            linkedFlat.find(foldedSource)->geometryToken&&
+        linkedFlat.find(blankId)->geometryToken!=beforeExpandedBlank,
+        "structural source edit did not persist or regenerate linked development");
+    require(linkedFlat.undo()&&
+        linkedFlat.find(blankId)->geometryToken==beforeExpandedBlank&&
+        linkedFlat.find(foldedSource)->geometryToken==beforeExpandedSource,
+        "structural source/blank edit did not undo together");
+    require(linkedFlat.redo()&&
+        linkedFlat.find(blankId)->linkedFoldedFlatKFactors==expandedK,
+        "structural source/blank edit did not redo together");
+    const QString linkedFile=directory.filePath("linked-multi-flange.cadscene");
+    require(linkedFlat.saveAs(linkedFile,&error),"save associated folded development");
+    cad::SceneDocument persistedFlat;
+    require(persistedFlat.load(linkedFile,&error)&&persistedFlat.parts().size()==2&&
+            persistedFlat.find(blankId)->linkedFoldedFlatSourceId==foldedSource&&
+            persistedFlat.find(blankId)->linkedFoldedFlatSourceToken==
+                persistedFlat.find(foldedSource)->geometryToken,
+            "linked flat blank did not survive save/reopen and provenance checks");
+    require(persistedFlat.eraseMany({foldedSource,blankId},&error)&&
+            persistedFlat.parts().isEmpty(),
+            "deleting source together with its dependent failed");
+
+    std::cerr << "[folded phase] relief cut B-rep and exports\n" << std::flush;
+    // Developed linked flat blank now uses the exact same bend stations and
+    // rectangular relief dimensions as the exported DXF, as a real 3-D solid.
+    cad::SceneDocument notched;
+    require(notched.addFoldedSheetMetal({30.0,20.0,30.0},25.0,1.0,
+                {{90.0,2.0},{-90.0,2.0}},&error),"create folded relief source");
+    const QString notchedSource=notched.parts().last().id;
+    const QVector<double> developmentK{0.40,0.45};
+    const cad::SheetMetalRelief developmentRelief{3.0,2.5};
+    cad::MultiBendFlatPattern developmentPattern;
+    require(cad::calculateFoldedSheetFlatPattern({30.0,20.0,30.0},25.0,1.0,
+                {{90.0,2.0},{-90.0,2.0}},developmentK,&developmentPattern,&error),
+            "develop linked relief pattern");
+    require(notched.addLinkedFoldedFlatBlank(notchedSource,developmentK,developmentRelief,&error),
+            "create notched associated 3-D flat blank");
+    const QString notchedId=notched.parts().last().id;
+    cad::BodyDiagnostics notchedDiagnostics;
+    const double expectedNotchedVolume=developmentPattern.flatLengthMm*25.0-
+            2.0*developmentPattern.bendLinePositionsMm.size()*developmentRelief.widthMm*developmentRelief.depthMm;
+    require(notched.diagnoseBody(notchedId,&notchedDiagnostics,&error)&&
+            std::abs(notchedDiagnostics.volume-expectedNotchedVolume)<1e-5,
+            "relieved linked solid volume disagrees with developed DXF stations");
+    // SVG, DXF and bend-table outputs come from one committed source/blank
+    // definition; invalid callers or IDs cannot partly overwrite buffers.
+    QByteArray linkedSvg="previous svg",linkedDxf="previous dxf",linkedCsv="previous csv";
+    require(notched.buildLinkedFlatDevelopmentSet(notchedId,&linkedSvg,&linkedDxf,&linkedCsv,&error)&&
+            linkedSvg.contains("<svg")&&linkedDxf.contains("SECTION")&&
+            linkedCsv.startsWith("bend_index,direction"),
+            "associated flat bundle was not regenerated from saved bend rules");
+    const QByteArray validSvg=linkedSvg,validDxf=linkedDxf,validCsv=linkedCsv;
+    require(!notched.buildLinkedFlatDevelopmentSet("missing-flat",&linkedSvg,&linkedDxf,
+            &linkedCsv,&error)&&linkedSvg==validSvg&&linkedDxf==validDxf&&
+            linkedCsv==validCsv,
+            "invalid linked-development request partly overwrote successful output");
+    require(!notched.buildLinkedFlatDevelopmentSet(notchedId,&linkedSvg,&linkedSvg,
+            &linkedCsv,&error)&&linkedSvg==validSvg&&linkedCsv==validCsv,
+            "linked-development outputs accepted aliasing buffers");
+    const QString notchedToken=notched.find(notchedId)->geometryToken;
+    require(!notched.editLinkedFoldedFlatDevelopment(notchedId,developmentK,{3.0,13.0},&error)&&
+            notched.find(notchedId)->geometryToken==notchedToken,
+            "overdeep relief modified committed associated flat blank");
+    require(!notched.editLinkedFoldedFlatDevelopment(notchedId,{1.25,0.4},developmentRelief,&error)&&
+            notched.find(notchedId)->geometryToken==notchedToken,
+            "invalid K-factor modified committed associated flat blank");
+    require(notched.editLinkedFoldedFlatDevelopment(notchedId,developmentK,developmentRelief,&error)&&
+            notched.find(notchedId)->geometryToken==notchedToken,
+            "unchanged flat development incorrectly created a revision");
+    require(notched.editLinkedFoldedFlatDevelopment(notchedId,developmentK,{4.0,2.5},&error)&&
+            notched.diagnoseBody(notchedId,&notchedDiagnostics,&error)&&
+            std::abs(notchedDiagnostics.volume-(expectedNotchedVolume-10.0))<1e-5,
+            "editing relief width did not rebuild matching 3-D solid");
+    require(notched.undo()&&notched.find(notchedId)->geometryToken==notchedToken&&
+            notched.redo()&&notched.find(notchedId)->linkedFoldedFlatRelief.widthMm==4.0,
+            "relief edit failed atomic undo/redo");
+    require(notched.editFoldedSheetMetal(notchedSource,{35.0,20.0,30.0},25.0,1.0,
+                {{90.0,2.0},{-90.0,2.0}},&error)&&
+            notched.find(notchedId)->linkedFoldedFlatSourceToken==notched.find(notchedSource)->geometryToken,
+            "source flange edit did not regenerate associated notched flat solid");
+    const QString developedPath=directory.filePath("linked-relieved-multi-flange.cadscene");
+    require(notched.saveAs(developedPath,&error),"save linked relieved blank");
+    cad::SceneDocument developedLoaded;
+    require(developedLoaded.load(developedPath,&error)&&
+            developedLoaded.find(notchedId)->linkedFoldedFlatKFactors==developmentK&&
+            developedLoaded.find(notchedId)->linkedFoldedFlatRelief.widthMm==4.0&&
+            developedLoaded.diagnoseBody(notchedId,&notchedDiagnostics,&error),
+            "developed blank K-factor/relief lost after save and reopen");
+
+    std::cerr << "[folded phase] stale definition rejection\n" << std::flush;
     cad::SceneDocument stale;
     require(stale.addFoldedSheetMetal(flanges,25.0,1.0,bends,&error),"Could not create stale-definition fixture");
     const QString staleId=stale.parts().first().id;
@@ -5626,10 +6538,32 @@ void testFoldedSheetMetal() {
             stale.foldedSheetMetalDefinition(staleId,&savedFlanges,&savedWidth,&savedThickness,&savedBends,&current)&&!current&&
             !stale.editFoldedSheetMetal(staleId,{42.0,30.0},25.0,1.0,bends,&error),
             "A direct geometry edit did not make the folded definition safely read-only");
+    require(!stale.previewFoldedSheetMetalEdit(staleId,{42.0,30.0},25.0,1.0,bends,
+                &candidateVolume,&candidateFlat,&error)&&
+            candidateVolume==safeVolume&&candidateFlat==safeFlat,
+            "stale folded definition must reject read-only editing preview");
     require(doc.addFoldedSheetMetal({30.0,30.0,30.0},20.0,1.2,
                                     {{90.0,1.0},{-90.0,1.5}},&error)&&doc.parts().size()==2,
             "Opposite-direction bends did not create a folded Z-profile");
     const QVector<QPointF> preserved=outline;
+    std::cerr << "[folded phase] self-intersection rejection\n" << std::flush;
+    // Tight 165-degree return bends make this otherwise finite and dimensionally
+    // plausible profile intersect itself. Reject before it reaches OCCT.
+    const QVector<double> foldedOverlapFlanges{20.0,5.0,20.0};
+    const QVector<cad::FoldedSheetBend> foldedOverlapBends{{165.0,1.0},{165.0,1.0}};
+    require(!cad::buildFoldedSheetOutline(foldedOverlapFlanges,25.0,2.0,
+               foldedOverlapBends,&outline,&error)&&outline==preserved&&
+            (error.contains("overlap",Qt::CaseInsensitive)||error.contains("intersect",Qt::CaseInsensitive)),
+            "Self-overlapping folded outline was accepted or replaced the last valid outline");
+    const int beforeBadFold=doc.parts().size();
+    require(!doc.addFoldedSheetMetal(foldedOverlapFlanges,25.0,2.0,foldedOverlapBends,&error)&&
+            doc.parts().size()==beforeBadFold,
+            "A self-overlapping folded body was committed to the scene");
+    const QString beforeBadEditToken=doc.parts().first().geometryToken;
+    require(!doc.editFoldedSheetMetal(doc.parts().first().id,foldedOverlapFlanges,25.0,2.0,
+                                     foldedOverlapBends,&error)&&
+            doc.parts().first().geometryToken==beforeBadEditToken,
+            "A self-overlapping folded edit altered the previously valid solid");
     require(!cad::buildFoldedSheetOutline(flanges,25.0,1.0,{{0.0,2.0}},&outline,&error)&&
             outline==preserved,
             "Rejected fold angles changed the prior outline result");
@@ -5762,8 +6696,8 @@ void testParametricLinks() {
             "Chained offset-driven geometry did not undo and redo atomically");
     const QString affinePath=dir.filePath("affine-parameter-links.cadscene");
     require(affine.saveAs(affinePath,&error),"Could not save affine parameter links");
-    require(QJsonDocument::fromJson(readBytes(affinePath)).object().value("schema").toString()=="cadworkbench.scene.v22",
-            "Offset parameter links did not trigger the new scene schema");
+    require(QJsonDocument::fromJson(readBytes(affinePath)).object().value("schema").toString()=="cadworkbench.scene.v24",
+            "Offset parameter links did not trigger the current scene schema");
     cad::SceneDocument affineLoaded;
     require(affineLoaded.load(affinePath,&error)&&
             affineLoaded.parameterLinks(affineId).value("height").offset==5.0&&
@@ -5852,6 +6786,57 @@ void testParametricLinks() {
             "Stale parametric history permitted link edits");
 }
 
+void testCoordinatedFeatureSuppressionBatch(){
+    QString error;cad::SceneDocument doc;
+    require(doc.addParametricRectangularExtrusion(70,30,20,&error),
+        "First coordinated feature-history source unavailable");
+    const QString first=doc.parts().last().id;
+    require(doc.addParametricRectangularExtrusion(65,30,20,&error),
+        "Second coordinated feature-history source unavailable");
+    const QString second=doc.parts().last().id;
+    require(doc.addParametricThroughHole(first,8,20,15,&error)&&
+            doc.addParametricThroughHole(second,8,20,15,&error),
+        "Could not author optional features for two source bodies");
+    const double firstCut=volume(doc.find(first)->shape);
+    const double secondCut=volume(doc.find(second)->shape);
+    const QString firstToken=doc.find(first)->geometryToken;
+    QMap<QString,QStringList> selected;
+    selected.insert(first,QStringList{"through_hole"});
+    selected.insert(second,QStringList{"through_hole"});
+    QString report;
+    require(doc.previewParametricFeaturesSuppressedBatch(selected,&report,&error)&&
+            report.contains("edited source")&&doc.find(first)->geometryToken==firstToken,
+        "Detached multi-body suppression preview changed live source identity");
+    const QString firstSaved=doc.find(first)->geometryToken;
+    QMap<QString,QStringList> invalid=selected;
+    invalid[second]=QStringList{"unavailable-feature"};
+    require(!doc.setParametricFeaturesSuppressedBatch(invalid,&error)&&
+            doc.find(first)->geometryToken==firstSaved&&
+            doc.suppressedParametricFeatures(second).isEmpty(),
+        "Invalid second source caused a partial feature-history transaction");
+    require(doc.setParametricFeaturesSuppressedBatch(selected,&error),
+        ("Coordinated feature-history rebuild failed: "+error.toStdString()).c_str());
+    require(volume(doc.find(first)->shape)>firstCut&&
+            volume(doc.find(second)->shape)>secondCut&&
+            doc.suppressedParametricFeatures(first).contains("through_hole")&&
+            doc.suppressedParametricFeatures(second).contains("through_hole"),
+        "Both feature suppressions did not regenerate together");
+    require(doc.undo()&&doc.suppressedParametricFeatures(first).isEmpty()&&
+            doc.suppressedParametricFeatures(second).isEmpty(),
+        "Coordinated history edit did not undo as one transaction");
+    require(doc.redo()&&doc.suppressedParametricFeatures(first).contains("through_hole")&&
+            doc.suppressedParametricFeatures(second).contains("through_hole"),
+        "Coordinated history edit did not redo consistently");
+    QTemporaryDir dir;require(dir.isValid(),"Multi-body history test directory unavailable");
+    const QString path=dir.filePath("multi-body-history.cadscene");
+    require(doc.saveAs(path,&error),"Coordinated history save failed");
+    cad::SceneDocument loaded;
+    require(loaded.load(path,&error)&&
+            loaded.suppressedParametricFeatures(first).contains("through_hole")&&
+            loaded.suppressedParametricFeatures(second).contains("through_hole"),
+        "Coordinated feature history did not survive save and reopen");
+}
+
 void testParametricBlindHolePattern() {
     QString error;cad::SceneDocument doc;
     require(doc.addParametricRectangularExtrusion(70,30,20,&error),"Could not create blind-pattern base");
@@ -5928,8 +6913,8 @@ void testParametricBlindHole() {
     const QString path=dir.filePath("parametric-blind-hole.cadscene");
     require(doc.saveAs(path,&error),"Could not save blind-hole feature history");
     const QJsonObject root=QJsonDocument::fromJson(readBytes(path)).object();
-    require(root.value("schema").toString()=="cadworkbench.scene.v22",
-            "Blind-hole history did not use schema v22");
+    require(root.value("schema").toString()=="cadworkbench.scene.v24",
+            "Blind-hole history did not use schema v23");
     cad::SceneDocument loaded;
     require(loaded.load(path,&error)&&loaded.featureHistory(id)==doc.featureHistory(id)&&
             loaded.sketchConstraints(id)==doc.sketchConstraints(id)&&loaded.namedParameters(id)==doc.namedParameters(id)&&
@@ -6478,13 +7463,157 @@ void testMotionInterferenceScan() {
             std::abs(samples[3].overlapVolumeMm3-125)<1e-4&&
             std::abs(samples[4].overlapVolumeMm3-500)<1e-4,
             "Motion scan missed sampled collisions or reported wrong overlap volumes");
+    require(std::abs(samples[0].clearanceMm-10)<1e-4&&
+            std::abs(samples[1].clearanceMm-6.25)<1e-4&&
+            std::abs(samples[2].clearanceMm-2.5)<1e-4&&
+            samples[3].clearanceMm<1e-5&&samples[4].clearanceMm<1e-5,
+            "Motion scan missed sampled clearance or contact distances");
+    require(std::abs(std::hypot(samples[0].secondX-samples[0].firstX,
+                                samples[0].secondY-samples[0].firstY,
+                                samples[0].secondZ-samples[0].firstZ)-samples[0].clearanceMm)<1e-5,
+            "Motion scan closest-point coordinates do not match its clearance");
+    require(std::abs(samples[0].firstX-10)<1e-5&&std::abs(samples[0].secondX-20)<1e-5,
+            "Motion scan closest points were not associated with the selected bodies");
     require(doc.find(child)->geometryToken==originalToken&&doc.find(child)->jointTranslationMm==0,
             "Read-only motion interference scan changed the assembly pose");
     const auto validSamples=samples;
+    // A coarse two-pose check misses the transition to overlap. Adaptive
+    // sampling must discover the collision without changing the live scene.
+    QVector<cad::MotionInterferenceSample> adaptive;
+    bool incomplete=true;
+    require(doc.scanAssemblyMotionAdaptive(root,child,0,1,18,1.0,0.25,0.0625,
+                                           &adaptive,&incomplete,&error),
+            ("Adaptive motion geometry scan failed: "+error.toStdString()).c_str());
+    require(adaptive.size()>2&&adaptive.size()<=18&&
+            std::any_of(adaptive.begin(),adaptive.end(),[](const auto& observation){
+                return observation.timeSeconds>0.6&&observation.interfering;
+            }),"Adaptive scan did not refine a colliding motion interval");
+    for(int i=1;i<adaptive.size();++i)
+        require(adaptive[i].timeSeconds>adaptive[i-1].timeSeconds,
+                "Adaptive motion results must be sorted and unique");
+    require(doc.find(child)->geometryToken==originalToken&&doc.find(child)->jointTranslationMm==0,
+            "Read-only adaptive scan mutated the current assembly pose");
+    // A user-declared speed bound is only a conditional guarantee. An
+    // impossible stationary-bound declaration must be rejected atomically.
+    bool boundedClearance=true;
+    QVector<cad::MotionClearanceInterval> intervalAudit;
+    const auto adaptiveBeforeBound=adaptive;
+    intervalAudit.append({42,43,5,0,false,false,false,false});
+    const auto auditBeforeBound=intervalAudit;
+    require(!doc.scanAssemblyMotionAdaptive(root,child,0,1,18,1.0,0.25,0.0625,
+                                            &adaptive,&incomplete,&error,0.0,&boundedClearance,nullptr,&intervalAudit)&&
+            adaptive==adaptiveBeforeBound&&boundedClearance&&intervalAudit==auditBeforeBound,
+            "Motion scan accepted a stationary speed bound contradicted by actual moving geometry");
+    // A deliberately generous bound is consistent with measured motion, but
+    // cannot claim safety because this scene has sampled interference.
+    require(doc.scanAssemblyMotionAdaptive(root,child,0,1,18,1.0,0.25,0.0625,
+                                           &adaptive,&incomplete,&error,1e6,&boundedClearance,nullptr,&intervalAudit)&&
+            !boundedClearance&&intervalAudit.size()==adaptive.size()-1&&
+            std::all_of(intervalAudit.begin(),intervalAudit.end(),[](const auto& item){
+                return item.speedBoundAvailable&&!item.provenAboveMargin;
+            }),
+            "Motion scan incorrectly declared a colliding assembly safely separated");
+        const auto safeAdaptive=adaptive;
+    const auto safeAudit=intervalAudit;
+    QTemporaryDir auditDirectory;require(auditDirectory.isValid(),"Motion interval audit directory unavailable");
+    const QString auditPath=auditDirectory.filePath("motion-intervals.csv");
+    require(doc.exportMotionClearanceIntervalsCsv(root,child,intervalAudit,auditPath,&error),
+            "Could not export the assembly motion interval audit");
+    const QByteArray auditBytes=readBytes(auditPath);
+    require(auditBytes.contains("Conditionally above margin")&&
+            auditBytes.contains("Sampled overlap")&&
+            auditBytes.count('\n')==intervalAudit.size()+1,
+            "Motion interval audit omitted interval statuses");
+    auto invalidAudit=intervalAudit;
+    invalidAudit[0].endSeconds=invalidAudit[0].startSeconds;
+    require(!doc.exportMotionClearanceIntervalsCsv(root,child,invalidAudit,auditPath,&error)&&
+            readBytes(auditPath)==auditBytes,
+            "Invalid interval-audit export overwrote the previous good CSV");
+    require(!doc.scanAssemblyMotionAdaptive(root,child,1,0,18,1.0,0.25,0.0625,
+                                            &adaptive,&incomplete,&error,-1.0,nullptr,nullptr,&intervalAudit)&&
+            adaptive==safeAdaptive&&intervalAudit==safeAudit,
+            "Invalid adaptive motion scan replaced the last successful report");
+    require(!doc.scanAssemblyMotionAdaptive(root,child,0,1,1,1.0,0.25,0.0625,
+                                            &adaptive,&incomplete,&error)&&adaptive==safeAdaptive,
+            "Adaptive scan accepted an impossible sample budget");
+    require(!doc.scanAssemblyMotionAdaptive(root,child,0,1,18,1.0,0.025,0.25,
+                                            &adaptive,&incomplete,&error)&&adaptive==safeAdaptive,
+            "Adaptive scan accepted inverted refinement intervals");
     require(!doc.scanAssemblyMotionInterference(root,child,1,0,5,&samples,&error)&&samples==validSamples,
             "Invalid motion scan changed its output");
     require(!doc.scanAssemblyMotionInterference(root,child,0,1,1,&samples,&error)&&samples==validSamples,
             "One-sample motion scan was accepted");
+    require(doc.scanAssemblyMotionInterference(root,child,0,1e-10,2,&samples,&error)&&
+            samples.size()==2&&samples[0].timeSeconds==0&&samples[1].timeSeconds==1e-10,
+            "Pairwise scan merged distinct positions in a short interval");
+    QTemporaryDir pairReportFolder;require(pairReportFolder.isValid(),"Pairwise motion report folder unavailable");
+    const QString pairReportPath=pairReportFolder.filePath("motion-samples.csv");
+    require(doc.exportMotionSamplesCsv(root,child,validSamples,pairReportPath,&error),
+            "Could not export sampled pairwise motion clearance");
+    const QByteArray pairReportBytes=readBytes(pairReportPath);
+    require(pairReportBytes.contains("Clearance (mm),Interfering")&&
+            pairReportBytes.contains("First X (mm)")&&pairReportBytes.contains("Second Z (mm)")&&
+            pairReportBytes.contains(root.toUtf8())&&pairReportBytes.contains(child.toUtf8())&&
+            pairReportBytes.count('\n')==validSamples.size()+1,
+            "Pairwise motion CSV lost the clearance series or body identities");
+    auto invalidSamples=validSamples;invalidSamples[1].clearanceMm=-1;
+    require(!doc.exportMotionSamplesCsv(root,child,invalidSamples,pairReportPath,&error)&&
+            readBytes(pairReportPath)==pairReportBytes,
+            "Rejected pairwise motion CSV changed a previous valid report");
+    require(doc.addPrimitive(cad::Primitive::Box,{2,2,2},&error),"Could not add a remote assembly-scan body");
+    const QString remote=doc.parts().last().id;
+    require(doc.translate(remote,100,0,0,&error),"Could not separate the remote assembly-scan body");
+    QVector<cad::MotionInterferenceContact> contacts;
+    require(doc.scanAssemblyMotionAllPairs(0,1,5,&contacts,&error),
+            ("All-pairs motion scan failed: "+error.toStdString()).c_str());
+    require(contacts.size()==2&&contacts[0].firstBodyId==root&&contacts[0].secondBodyId==child&&
+            contacts[1].firstBodyId==root&&contacts[1].secondBodyId==child&&
+            std::abs(contacts[0].timeSeconds-0.75)<1e-9&&
+            std::abs(contacts[1].timeSeconds-1.0)<1e-9&&
+            std::abs(contacts[0].overlapVolumeMm3-125)<1e-4,
+            "All-pairs motion scan missed contacts or reported a remote false positive");
+    require(doc.find(child)->geometryToken==originalToken&&doc.find(child)->jointTranslationMm==0,
+            "All-pairs motion scan changed the assembly pose");
+    const auto preservedContacts=contacts;
+    require(!doc.scanAssemblyMotionAllPairs(1,0,5,&contacts,&error)&&contacts==preservedContacts,
+            "Invalid all-pairs scan changed its prior output");
+    require(!doc.scanAssemblyMotionAllPairs(0,1,1,&contacts,&error)&&contacts==preservedContacts,
+            "One-sample all-pairs scan was accepted");
+    require(doc.scanAssemblyMotionAllPairs(0,1e-10,2,&contacts,&error)&&contacts.isEmpty(),
+            "All-pairs scan rejected distinct positions in a short interval");
+    require(doc.setJointMotionKeyframes(child,{{0,0},{0.37,-15},{1,0}},&error),
+            "Could not prepare a short keyframe collision");
+    require(doc.scanAssemblyMotionInterference(root,child,0,1,2,&samples,&error)&&
+            samples.size()==3&&std::abs(samples[1].timeSeconds-0.37)<1e-9&&
+            samples[1].interfering&&!samples[0].interfering&&!samples[2].interfering,
+            "Uniform scan skipped a collision at a saved joint keyframe");
+    require(doc.scanAssemblyMotionAllPairs(0,1,2,&contacts,&error)&&contacts.size()==1&&
+            std::abs(contacts.first().timeSeconds-0.37)<1e-9,
+            "All-pairs scan skipped a collision at a saved joint keyframe");
+    require(doc.rename(root,"Bracket, \"Left\"",&error),"Could not set a quoted motion-contact body name");
+    QTemporaryDir reportFolder;require(reportFolder.isValid(),"Motion-contact report folder unavailable");
+    const QString reportPath=reportFolder.filePath("motion-contacts.csv");
+    require(doc.exportMotionContactsCsv(contacts,reportPath,&error),
+            "Could not export sampled all-pairs motion contacts");
+    QFile report(reportPath);require(report.open(QIODevice::ReadOnly),"Could not read the exported motion-contact report");
+    const QByteArray reportBytes=report.readAll();report.close();
+    require(reportBytes.contains("Time (s),First body ID")&&reportBytes.contains(root.toUtf8())&&
+            reportBytes.contains(child.toUtf8())&&reportBytes.contains("\"Bracket, \"\"Left\"\"\"")&&
+            reportBytes.count('\n')==2,
+            "Motion-contact CSV lost the sample time, body identities, or overlap row");
+    auto invalidContacts=contacts;invalidContacts[0].firstBodyId="missing";
+    require(!doc.exportMotionContactsCsv(invalidContacts,reportPath,&error),
+            "Motion-contact export accepted a missing body identity");
+    require(report.open(QIODevice::ReadOnly)&&report.readAll()==reportBytes,
+            "Rejected motion-contact export changed the previous report");
+    cad::SceneDocument oversizedAssembly;
+    for(int index=0;index<21;++index)
+        require(oversizedAssembly.addPrimitive(cad::Primitive::Box,{1,1,1},&error),
+                "Could not prepare the all-pairs body-limit fixture");
+    const auto previousContacts=contacts;
+    require(!oversizedAssembly.scanAssemblyMotionAllPairs(0,1,2,&contacts,&error)&&
+            contacts==previousContacts&&error.contains("20 solid bodies"),
+            "All-pairs scan ignored its body limit or changed a prior result");
 }
 
 void testAssemblyJoints() {
@@ -6908,6 +8037,406 @@ void testSurfaceBodyPersistence() {
             loaded.parts().first().shape.ShapeType()==TopAbs_FACE&&BRepCheck_Analyzer(loaded.parts().first().shape).IsValid(),
             "Scene round trip lost surface-body type, identity, name, visibility, or valid geometry");
 }
+void testConservativeAxialHoleTable(){
+    QString error;
+    cad::SceneDocument document;
+    require(document.addPrimitive(cad::Primitive::Box,{30,30,10},&error),"hole audit base box");
+    cad::Part source=document.parts().last();
+    cad::AxialHoleAudit initial;
+    require(cad::inspectAxialHoles(source,&initial,&error)&&initial.holes.isEmpty(),
+            "a box should not contain any cylindrical drill holes");
+    const TopoDS_Shape cutter=BRepPrimAPI_MakeCylinder(
+        gp_Ax2(gp_Pnt(10,12,-1),gp_Dir(0,0,1)),3,12).Shape();
+    BRepAlgoAPI_Cut cut(source.shape,cutter);cut.Build();
+    require(cut.IsDone()&&BRepCheck_Analyzer(cut.Shape()).IsValid(),"hole audit cut fixture");
+    source.shape=cut.Shape();
+    cad::AxialHoleAudit result;
+    require(cad::inspectAxialHoles(source,&result,&error),"round through-hole recognition failed");
+    require(result.holes.size()==1,"through-hole inspection missed or duplicated the bore");
+    const auto hole=result.holes.first();
+    closeTo(hole.xMm,10);closeTo(hole.yMm,12);closeTo(hole.diameterMm,6);
+    closeTo(hole.zMinMm,0);closeTo(hole.zMaxMm,10);
+    require(hole.throughEnvelope,"through bore not marked as envelope spanning");
+    QByteArray output;
+    require(cad::buildAxialHoleTableCsv(result,&output,&error),"build bore CSV");
+    require(output.contains("H1,10.0000,12.0000,6.0000")&&
+            output.contains(source.geometryToken.toUtf8()),"bore CSV lost measured geometry or revision");
+    QTemporaryDir directory;require(directory.isValid(),"hole CSV temp directory");
+    const QString file=directory.filePath("hole-report.csv");
+    require(cad::exportAxialHoleTableCsv(source,file,&error),"atomic hole CSV export");
+    require(readBytes(file)==output,"exported audit differs from built CSV");
+    // A valid exterior cylinder does not constitute a bore.
+    cad::Part shaft=source;shaft.shape=BRepPrimAPI_MakeCylinder(3,10).Shape();
+    cad::AxialHoleAudit exterior;
+    require(cad::inspectAxialHoles(shaft,&exterior,&error)&&exterior.holes.isEmpty(),
+            "exterior shaft was incorrectly called an internal bore");
+    // Blind holes have a shorter axial extent than the full stock envelope.
+    BRepAlgoAPI_Cut blind(document.parts().first().shape,
+        BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(10,12,4),gp_Dir(0,0,1)),3,8).Shape());
+    blind.Build();require(blind.IsDone(),"blind bore fixture");
+    cad::Part blindPart=source;blindPart.shape=blind.Shape();
+    cad::AxialHoleAudit blindAudit;
+    require(cad::inspectAxialHoles(blindPart,&blindAudit,&error),"blind bore audit");
+    require(blindAudit.holes.size()==1&&!blindAudit.holes.first().throughEnvelope,
+            "a blind hole must not be labelled as envelope spanning");
+    // Multi-solid compounds cannot be assigned one machining envelope.
+    // Failure must not erase an earlier successful inspection result.
+    BRep_Builder builder;TopoDS_Compound compound;builder.MakeCompound(compound);
+    builder.Add(compound,source.shape);
+    builder.Add(compound,BRepPrimAPI_MakeBox(gp_Pnt(50,0,0),5,5,5).Shape());
+    cad::Part multiSolid=source;multiSolid.shape=compound;
+    const QString verifiedRevision=result.sourceGeometryToken;
+    const int verifiedRows=result.holes.size();
+    require(!cad::inspectAxialHoles(multiSolid,&result,&error),
+            "hole inspector accepted ambiguous multi-solid stock");
+    require(result.sourceGeometryToken==verifiedRevision&&result.holes.size()==verifiedRows,
+            "failed hole inspection changed previous successful result");
+    // CSV sources can be attacker-controlled project fields: prevent formula injection.
+    result.sourceBodyId="=unsafe_sheet_formula";
+    require(cad::buildAxialHoleTableCsv(result,&output,&error)&&
+            output.contains("'="),"CSV source metadata was not spreadsheet-safe");
+}
+
+
+// Release-consolidation regression: formulas, drilling review and manual GD&T.
+// These are included in existing native CTest cases to preserve the 130-test gate.
+void testV170Rc5NativeConfigurations(){
+    QString error;QTemporaryDir dir;
+    require(dir.isValid(),"RC5 configuration temp folder unavailable");
+    cad::SceneDocument document;
+    require(document.addParametricRectangularExtrusion(40,30,20,&error),
+            "RC5 parametric baseline failed");
+    const QString id=document.parts().first().id;
+    const QVector<cad::SavedDesignConfiguration> presets{
+        {"Compact",{{"width","25 mm"},{"height","width/2"}}},
+        {"Tall",{{"width","50 mm"},{"height","width*2"}}}
+    };
+    require(document.setDesignConfigurations(id,presets,&error),
+            "RC5 catalog could not be stored: "+error.toStdString());
+    require(document.designConfigurations(id)==presets&&
+            document.parts().first().activeDesignConfiguration.isEmpty(),
+            "RC5 catalog was not stored without changing active geometry");
+    require(document.undo()&&document.designConfigurations(id).isEmpty(),
+            "RC5 catalog creation did not undo");
+    require(document.redo()&&document.designConfigurations(id)==presets,
+            "RC5 catalog creation did not redo");
+    const QString previousRevision=document.parts().first().geometryToken;
+    require(document.applyDesignConfiguration(id,"Tall",&error),
+            "RC5 named configuration did not rebuild: "+error.toStdString());
+    closeTo(document.namedParameters(id).value("width"),50);
+    closeTo(document.namedParameters(id).value("height"),100);
+    closeTo(volume(document.parts().first().shape),100000);
+    require(document.parts().first().geometryToken!=previousRevision&&
+            document.parts().first().activeDesignConfiguration=="Tall",
+            "RC5 preset was not committed with updated geometry");
+    require(document.undo()&&document.parts().first().geometryToken==previousRevision&&
+            document.parts().first().activeDesignConfiguration.isEmpty(),
+            "RC5 preset did not undo atomically");
+    require(document.redo()&&document.parts().first().activeDesignConfiguration=="Tall",
+            "RC5 preset did not redo atomically");
+    // Compare complete, independently rebuilt design states, not only the
+    // formulas' proposed values. No report generation may mutate the model.
+    QVector<cad::ConfigurationBomComparison> comparisons;
+    const QString beforeCompare=document.find(id)->geometryToken;
+    require(document.compareDesignConfigurations(id,&comparisons,&error),
+            "Project-native configuration/BOM comparison failed: "+error.toStdString());
+    require(comparisons.size()==3&&comparisons[0].current&&
+            comparisons[1].name=="Compact"&&comparisons[2].name=="Tall",
+            "Configuration comparison omitted the current state or saved presets");
+    closeTo(comparisons[0].targetVolumeMm3,100000);
+    closeTo(comparisons[1].targetVolumeMm3,6250);
+    closeTo(comparisons[2].targetVolumeMm3,100000);
+    require(comparisons[1].bomLines>=1&&comparisons[1].componentQuantity>=1&&
+            !comparisons[1].allMassesKnown&&document.find(id)->geometryToken==beforeCompare&&
+            document.find(id)->activeDesignConfiguration=="Tall",
+            "Variant comparison lost BOM information, invented material density or edited geometry");
+    QByteArray comparisonCsv;
+    require(document.buildConfigurationComparisonCsv(id,&comparisonCsv,&error)&&
+            comparisonCsv.contains("Compact")&&comparisonCsv.contains("Current geometry revision") == false&&
+            comparisonCsv.contains("Source geometry revision"),
+            "Configuration comparison CSV is incomplete");
+    const QString comparisonPath=dir.filePath("variants-bom.csv");
+    require(document.exportConfigurationComparisonCsv(id,comparisonPath,&error)&&
+            readBytes(comparisonPath)==comparisonCsv,
+            "Configuration/BOM CSV could not be written atomically");
+    require(!document.exportConfigurationComparisonCsv(id,QString(),&error)&&
+            readBytes(comparisonPath)==comparisonCsv,
+            "A rejected configuration export damaged the last successful report");
+    require(!document.setDesignConfigurations(id,{{"Bad",{{"invalid","3 mm"}}}},&error)&&
+            document.designConfigurations(id)==presets,
+            "RC5 catalog accepted an unknown feature dimension");
+    require(!document.setDesignConfigurations(id,{{"Cycle",{{"width","height"},{"height","width"}}}},&error)&&
+            document.designConfigurations(id)==presets,
+            "RC5 catalog accepted a cyclic expression");
+    require(!document.setDesignConfigurations(id,{{"Repeat",{{"width","40 mm"}}},
+            {"repeat",{{"height","20 mm"}}}},&error)&&
+            document.designConfigurations(id)==presets,
+            "RC5 catalog accepted duplicate names with different case");
+    require(!document.applyDesignConfiguration(id,"Nonexistent",&error)&&
+            document.parts().first().activeDesignConfiguration=="Tall",
+            "RC5 missing preset modified the committed selection");
+    const QString path=dir.filePath("rc5-presets.cadscene");
+    require(document.saveAs(path,&error),"RC5 native scene save failed");
+    cad::SceneDocument reopened;
+    require(reopened.load(path,&error),"RC5 native scene reopen failed: "+error.toStdString());
+    require(reopened.designConfigurations(id)==presets&&
+            reopened.find(id)->activeDesignConfiguration=="Tall",
+            "RC5 catalog or active preset lost on reopen");
+    QJsonObject root=QJsonDocument::fromJson(readBytes(path)).object();
+    QJsonArray parts=root.value("parts").toArray();
+    QJsonObject first=parts.at(0).toObject();
+    require(first.value("design_configurations").isArray()&&
+            first.value("active_design_configuration").toString()=="Tall",
+            "RC5 expected project-native configuration JSON was not written");
+    const auto rejectChanged=[&](QJsonObject corrupt,const QString& filename){
+        QJsonObject copy=root;QJsonArray array=copy.value("parts").toArray();
+        array[0]=corrupt;copy.insert("parts",array);
+        const QString bad=dir.filePath(filename);
+        writeBytes(bad,QJsonDocument(copy).toJson());
+        const QString before=reopened.find(id)->geometryToken;
+        require(!reopened.load(bad,&error)&&reopened.find(id)->geometryToken==before&&
+                reopened.designConfigurations(id)==presets,
+                "RC5 corrupt configuration loaded or partially replaced the document");
+    };
+    QJsonObject corrupted=first;
+    QJsonArray names=corrupted.value("design_configurations").toArray();
+    QJsonObject duplicate=names[1].toObject();duplicate.insert("name","compact");
+    names[1]=duplicate;corrupted.insert("design_configurations",names);
+    rejectChanged(corrupted,"rc5-duplicate.cadscene");
+    corrupted=first;corrupted.insert("active_design_configuration","Missing");
+    rejectChanged(corrupted,"rc5-missing-active.cadscene");
+    corrupted=first;
+    names=corrupted.value("design_configurations").toArray();
+    QJsonObject badExpression=names[0].toObject();
+    QJsonObject expressions=badExpression.value("expressions").toObject();
+    expressions.insert("width",true);badExpression.insert("expressions",expressions);
+    names[0]=badExpression;corrupted.insert("design_configurations",names);
+    rejectChanged(corrupted,"rc5-malformed-expression.cadscene");
+    require(reopened.setNamedParameter(id,"width",65,&error)&&
+            reopened.find(id)->activeDesignConfiguration.isEmpty()&&
+            reopened.designConfigurations(id)==presets,
+            "RC5 manual parameter edit did not clear only the active preset label");
+    require(reopened.applyDesignConfiguration(id,"Compact",&error)&&
+            reopened.find(id)->activeDesignConfiguration=="Compact",
+            "RC5 catalog could not reapply after a manual edit");
+    // Backward compatibility: RC4 files omit these optional project fields.
+    QJsonObject legacy=root;QJsonArray legacyParts=legacy.value("parts").toArray();
+    QJsonObject old=legacyParts.at(0).toObject();
+    old.remove("design_configurations");old.remove("active_design_configuration");
+    legacyParts[0]=old;legacy.insert("parts",legacyParts);
+    const QString oldPath=dir.filePath("rc4-compatible.cadscene");
+    writeBytes(oldPath,QJsonDocument(legacy).toJson());
+    cad::SceneDocument oldDocument;
+    require(oldDocument.load(oldPath,&error)&&oldDocument.designConfigurations(id).isEmpty(),
+            "RC5 could not read a valid scene without configuration fields");
+}
+
+void testV170Rc4ParametricFormulas(){
+    QString error;QTemporaryDir dir;require(dir.isValid(),"RC4 formula temp directory");
+    cad::SceneDocument doc;
+    require(doc.addParametricRectangularExtrusion(40,30,10,&error),"RC4 formula base extrusion");
+    const QString id=doc.parts().first().id;
+    const QMap<QString,QString> formulas={{"height","width / 2"},{"width","40 mm"}};
+    const QString beforeFormulaPreview=doc.find(id)->geometryToken;
+    const auto beforeFormulas=doc.namedParameterFormulas(id);
+    QString formulaReport="keep me";
+    require(doc.previewNamedParameterFormulas(id,formulas,&formulaReport,&error)&&
+            formulaReport.contains("READ-ONLY PARAMETRIC FORMULA PREFLIGHT")&&
+            formulaReport.contains("new volume")&&
+            doc.find(id)->geometryToken==beforeFormulaPreview&&
+            doc.namedParameterFormulas(id)==beforeFormulas,
+            "Parametric formula preflight altered the saved definition or skipped real geometry");
+    const QString acceptedFormulaReport=formulaReport;
+    require(!doc.previewNamedParameterFormulas(id,{{"height","width"},{"width","height"}},
+                 &formulaReport,&error)&&
+            formulaReport==acceptedFormulaReport&&
+            doc.find(id)->geometryToken==beforeFormulaPreview,
+            "Cyclic formula preflight overwrote the report or changed committed geometry");
+    require(!doc.previewNamedParameterFormulas(id,formulas,nullptr,&error),
+            "Null formula-preview report was incorrectly accepted");
+    require(doc.setNamedParameterFormulas(id,formulas,&error),
+            ("Could not save persistent dimensional formulas: "+error.toStdString()).c_str());
+    closeTo(doc.namedParameters(id).value("height"),20);
+    require(doc.namedParameterFormulas(id)==formulas,"Persistent formulas not retained in document");
+    require(doc.setNamedParameter(id,"width",60,&error),
+            ("Driving dimension edit did not regenerate the dependent formula: "+error.toStdString()).c_str());
+    closeTo(doc.namedParameters(id).value("height"),30);
+    require(!doc.namedParameterFormulas(id).contains("width")&&
+            doc.namedParameterFormulas(id).value("height")==QStringLiteral("width / 2"),
+            "Editing a driving dimension removed the dependent formula or retained a stale constant");
+    const QString stableToken=doc.find(id)->geometryToken;
+    const auto stableFormulas=doc.namedParameterFormulas(id);
+    require(!doc.setNamedParameterFormulas(id,{{"width","height"},{"height","width"}},&error)&&
+            doc.find(id)->geometryToken==stableToken&&doc.namedParameterFormulas(id)==stableFormulas,
+            "Cyclic dimension dependency mutated geometry or the formula map");
+    require(!doc.setNamedParameterFormulas(id,{{"height","missing_parameter + 3 mm"}},&error)&&
+            doc.find(id)->geometryToken==stableToken,
+            "Unresolved dimension expression changed a committed B-rep");
+    const QString path=dir.filePath("persistent-formulas.cadscene");
+    require(doc.saveAs(path,&error),"Saving persistent formulas failed");
+    cad::SceneDocument reopened;
+    require(reopened.load(path,&error)&&reopened.namedParameterFormulas(id)==stableFormulas,
+            "Save/reopen lost the full persistent dimension formula graph");
+    closeTo(reopened.namedParameters(id).value("height"),30);
+    require(reopened.setNamedParameter(id,"width",80,&error),"Formula after load did not regenerate");
+    closeTo(reopened.namedParameters(id).value("height"),40);
+    require(reopened.undo()&&reopened.namedParameters(id).value("width")==60&&
+            reopened.redo()&&reopened.namedParameters(id).value("width")==80,
+            "Formula edits did not preserve atomic undo/redo");
+    QJsonObject invalid=QJsonDocument::fromJson(readBytes(path)).object();
+    QJsonArray sourceParts=invalid.value("parts").toArray();
+    QJsonObject part=sourceParts[0].toObject();
+    QJsonObject definition=part.value("parametric_definition").toObject();
+    definition.insert("dimension_formulas",QJsonObject{{"width","height"},{"height","width"}});
+    part.insert("parametric_definition",definition);sourceParts[0]=part;invalid.insert("parts",sourceParts);
+    const QString malformed=dir.filePath("cyclic-dimensions.cadscene");
+    writeBytes(malformed,QJsonDocument(invalid).toJson());
+    require(!reopened.load(malformed,&error)&&reopened.namedParameters(id).value("width")==80,
+            "Corrupted formula graph loaded or replaced the open document");
+}
+
+void testV170Rc4DrillingAndGdt(){
+    QString error;QTemporaryDir dir;require(dir.isValid(),"RC4 manufacturing temp directory");
+    cad::SceneDocument doc;
+    require(doc.addPrimitive(cad::Primitive::Box,{30,30,10},&error),"RC4 manufacturing base solid");
+    const QString id=doc.parts().first().id;
+    cad::Part drilled=*doc.find(id);
+    BRepAlgoAPI_Cut cut(drilled.shape,BRepPrimAPI_MakeCylinder(
+        gp_Ax2(gp_Pnt(10,12,-1),gp_Dir(0,0,1)),3,12).Shape());
+    cut.Build();require(cut.IsDone(),"RC4 axial bore boolean construction failed");
+    drilled.shape=cut.Shape();
+    cad::DrillingReviewSettings settings;
+    settings.toolCatalog="6:30";
+    settings.clearanceAboveStockMm=5;
+    settings.diameterToleranceMm=0.05;
+    QByteArray csv;
+    require(cad::buildDrillingWorksheetCsv(drilled,settings,&csv,&error),
+            ("RC4 drilling worksheet failed: "+error.toStdString()).c_str());
+    require(csv.contains(drilled.geometryToken.toUtf8())&&csv.contains("H1")&&
+            csv.contains("NOT machine instructions"),
+            "Drilling worksheet lost source revision, recognized bore, or safety disclaimer");
+    const QString sheet=dir.filePath("drilling-review.csv");
+    require(cad::exportDrillingWorksheetCsv(drilled,settings,sheet,&error)&&readBytes(sheet)==csv,
+            "Atomic drilling review export did not match validated preview");
+    settings.toolCatalog="0:1";
+    const QByteArray saved=readBytes(sheet);
+    require(!cad::exportDrillingWorksheetCsv(drilled,settings,sheet,&error)&&readBytes(sheet)==saved,
+            "Invalid drilling inputs overwrote the last valid review worksheet");
+    cad::DrawingSheetSettings drawing;
+    drawing.gdtFrames.append({"gdt-position-1",id,doc.find(id)->geometryToken,
+                              "POSITION",0.15,"A","B","C",18,24});
+    require(doc.setDrawingSheetSettings(id,drawing,&error),
+            ("Could not persist a source-linked GD&T annotation: "+error.toStdString()).c_str());
+    require(doc.find(id)->drawingSettings.gdtFrames.size()==1,
+            "Source-linked manual tolerance frame not stored");
+    const auto stored=doc.find(id)->drawingSettings;
+    // In-place FCF editing must retain stable ID/body references, be undoable,
+    // and not silently replace other annotations or approve stale geometry.
+    auto revised=stored;
+    revised.gdtFrames[0].toleranceMm=0.25;
+    revised.gdtFrames[0].xMm=24.0;
+    require(doc.setDrawingSheetSettings(id,revised,&error)&&
+            doc.find(id)->drawingSettings.gdtFrames[0].id==stored.gdtFrames[0].id&&
+            doc.find(id)->drawingSettings.gdtFrames[0].sourceGeometryToken==stored.gdtFrames[0].sourceGeometryToken,
+            "Editing geometric tolerance changed stable frame identity or body revision");
+    require(doc.undo()&&doc.find(id)->drawingSettings.gdtFrames==stored.gdtFrames,
+            "Undo did not restore original tolerance frame values");
+    require(doc.redo()&&doc.find(id)->drawingSettings.gdtFrames==revised.gdtFrames,
+            "Redo did not restore edited tolerance frame values");
+    require(doc.setDrawingSheetSettings(id,stored,&error),
+            "Restore reference tolerance frame after editor regression");
+    QByteArray svg;
+    require(cad::buildOrthographicDrawingSvg(*doc.find(id),&svg,&error,nullptr,nullptr,nullptr,
+             cad::OrthographicProjection::ThirdAngle,cad::DrawingSheetSize::A4Landscape,
+             cad::DrawingAuxiliaryView::Isometric,0.5,{}, {},{}, {},stored.sheetId,
+             stored.noteAnnotations,stored.dimensionAnnotations,stored.partsListAnnotation,
+             {},stored.sourceBodyIds,{}, {}, {},stored.edgeDimensionAnnotations,
+             {*doc.find(id)},stored.gdtFrames),
+            ("Could not render manual tolerance frame: "+error.toStdString()).c_str());
+    require(svg.contains("data-drawing-annotation=\"geometric-tolerance-frame\"")&&
+            svg.contains("gdt-position-1"),
+            "Rendered manufacturing drawing lost tolerance frame identity");
+    const QString project=dir.filePath("gdt-drawing.cadscene");
+    require(doc.saveAs(project,&error),"Could not save manufacturing drawing project");
+    cad::SceneDocument reopened;
+    require(reopened.load(project,&error)&&reopened.find(id)&&
+            reopened.find(id)->drawingSettings.gdtFrames==stored.gdtFrames,
+            "Save/reopen mutated persistent source-linked tolerance frames");
+    cad::DrawingSheetSettings invalid=stored;
+    invalid.gdtFrames[0].datumB="A";
+    require(!reopened.setDrawingSheetSettings(id,invalid,&error)&&
+            reopened.find(id)->drawingSettings.gdtFrames==stored.gdtFrames,
+            "Duplicate datum frame changed the saved drawing");
+    require(reopened.translate(id,1,0,0,&error),"Could not mutate drawing source geometry");
+    const auto moved=reopened.find(id);
+    require(!cad::buildOrthographicDrawingSvg(*moved,&svg,&error,nullptr,nullptr,nullptr,
+             cad::OrthographicProjection::ThirdAngle,cad::DrawingSheetSize::A4Landscape,
+             cad::DrawingAuxiliaryView::Isometric,0.5,{}, {},{}, {},stored.sheetId,
+             stored.noteAnnotations,stored.dimensionAnnotations,stored.partsListAnnotation,
+             {},stored.sourceBodyIds,{}, {}, {},stored.edgeDimensionAnnotations,
+             {*moved},stored.gdtFrames),
+            "Drawing regeneration silently accepted a stale manually authored tolerance");
+}
+
+// A group rename/move updates only assembly-path metadata, not the B-rep,
+// placement, component identity or feature graph; undo/reopen preserve paths.
+void testAssemblyHierarchySubtreeMoves() {
+    cad::SceneDocument d;QString issue;
+    for(int i=0;i<4;++i)
+        require(d.addPrimitive(cad::Primitive::Box,{10,10,10},&issue),"assembly group test box");
+    const QStringList paths={"Plant/Drive/Gears","Plant/Drive/Bearings",
+                             "Plant/Frame","Plant/Drive/Gears"};
+    QStringList ids,tokens;
+    for(int i=0;i<4;++i) {
+        const QString id=d.parts()[i].id; ids.append(id);
+        require(d.setPartMetadata(id,QStringLiteral("PART-%1").arg(i),"Fixture","A",paths[i],&issue),
+                "assembly group metadata");
+        tokens.append(d.find(id)->geometryToken);
+    }
+    const auto groups=d.assemblyGroupPaths();
+    require(groups.contains("Plant")&&groups.contains("Plant/Drive")&&
+            groups.contains("Plant/Drive/Gears")&&groups.contains("Plant/Frame"),
+            "group listing must contain intermediate parents");
+    require(d.moveAssemblySubtree("Plant/Drive","Plant/Transmission",&issue),
+            ("moving a nested assembly subtree failed: "+issue.toStdString()).c_str());
+    require(d.find(ids[0])->assemblyPath=="Plant/Transmission/Gears"&&
+            d.find(ids[1])->assemblyPath=="Plant/Transmission/Bearings"&&
+            d.find(ids[2])->assemblyPath=="Plant/Frame"&&
+            d.find(ids[3])->assemblyPath=="Plant/Transmission/Gears",
+            "moving a parent must relocate all nested occurrences and not siblings");
+    for(int i=0;i<4;++i)
+        require(d.find(ids[i])->geometryToken==tokens[i],
+                "assembly metadata must not invalidate solid geometry");
+    const QString expected=d.find(ids[0])->assemblyPath;
+    require(!d.moveAssemblySubtree("Plant/Transmission","Plant/Transmission/Child",&issue),
+            "moving a group under itself must be rejected");
+    require(!d.moveAssemblySubtree("Plant/Transmission","Plant/Frame",&issue),
+            "moving a group into an occupied group must be rejected");
+    require(!d.moveAssemblySubtree("Plant/Transmission","Plant/../Evil",&issue),
+            "relative traversal in hierarchy must be rejected");
+    require(!d.moveAssemblySubtree("Missing/Group","Plant/Other",&issue),
+            "moving a nonexistent group must be rejected");
+    require(d.find(ids[0])->assemblyPath==expected,"rejected group mutation was not atomic");
+    require(d.undo()&&d.find(ids[0])->assemblyPath=="Plant/Drive/Gears"&&
+            d.find(ids[1])->assemblyPath=="Plant/Drive/Bearings",
+            "single undo must restore complete group move");
+    require(d.redo()&&d.find(ids[0])->assemblyPath==expected,
+            "redo must restore full moved assembly group");
+    QTemporaryDir dir;
+    require(dir.isValid(),"assembly group temporary directory");
+    const QString file=dir.filePath("nested-assembly.cadscene");
+    require(d.saveAs(file,&issue),"save assembly group move");
+    cad::SceneDocument loaded;
+    require(loaded.load(file,&issue),"reopen assembly group move");
+    for(int i=0;i<4;++i)
+        require(loaded.find(ids[i])->assemblyPath==d.find(ids[i])->assemblyPath,
+                "assembly hierarchy must persist after save/reopen");
+    const auto rows=loaded.billOfMaterials(&issue);
+    require(rows.size()==4,"BOM must separate distinct parts in moved groups");
+    require(loaded.assemblyGroupPaths().contains("Plant/Transmission/Bearings"),
+            "reopened hierarchy missing nested group");
+}
+
 } // namespace
 int main(int argc,char** argv) {
     QGuiApplication application(argc,argv);
@@ -6936,7 +8465,7 @@ int main(int argc,char** argv) {
         if(argc==2&&std::string(argv[1])=="--body-schedule-csv") { testBodyScheduleCsv(); std::cout<<"PASS: "<<checks<<" body-schedule-csv assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--bom-parts-standards") { testBomPartsStandards(); std::cout<<"PASS: "<<checks<<" BOM/parts/standards assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--occurrence-bom-metadata") { testOccurrenceBomMetadataInheritance(); std::cout<<"PASS: "<<checks<<" occurrence-BOM metadata assertions\n"; return 0; }
-        if(argc==2&&std::string(argv[1])=="--assembly-bom-group-keys") { testAssemblyBomGroupKeyBoundaries(); std::cout<<"PASS: "<<checks<<" assembly-bom-group-key assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--assembly-bom-group-keys") { testAssemblyBomGroupKeyBoundaries(); testAssemblyHierarchySubtreeMoves(); std::cout<<"PASS: "<<checks<<" assembly-bom-group-key assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--assembly-bom-full-scene") { testFullAssemblyBomBeyondSelectionCap(); std::cout<<"PASS: "<<checks<<" assembly-bom-full-scene assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--assembly-free-occurrence-yaw") { testFreeOccurrenceYawPlacement(); std::cout<<"PASS: "<<checks<<" assembly-free-occurrence-yaw assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--persistent-assemblies") { testPersistentAssemblyOccurrences(); std::cout<<"PASS: "<<checks<<" persistent-assembly assertions\n"; return 0; }
@@ -6945,9 +8474,9 @@ int main(int argc,char** argv) {
         if(argc==2&&std::string(argv[1])=="--stl-mesh-import") { testStlMeshImport(); std::cout<<"PASS: "<<checks<<" STL mesh-import assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--iges-exchange") { testIgesExchange(); std::cout<<"PASS: "<<checks<<" IGES exchange assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--obj-mesh-import") { testObjMeshImport(); std::cout<<"PASS: "<<checks<<" OBJ mesh-import assertions\n"; return 0; }
-        if(argc==2&&std::string(argv[1])=="--parametric-foundation") { testParametricFoundation(); std::cout<<"PASS: "<<checks<<" parametric-foundation assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--parametric-foundation") { testCoordinatedDimensionSuppressionV170(); testCoordinatedParametricBatchV170(); testParametricFoundation(); testV170Rc4ParametricFormulas(); testV170Rc5NativeConfigurations(); std::cout<<"PASS: "<<checks<<" parametric-foundation assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--parametric-links") { testParametricLinks(); std::cout<<"PASS: "<<checks<<" parametric-link assertions\n"; return 0; }
-        if(argc==2&&std::string(argv[1])=="--parametric-blind-hole") { testParametricBlindHolePattern(); testParametricBlindHole(); std::cout<<"PASS: "<<checks<<" parametric-blind-hole assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--parametric-blind-hole") { testParametricBlindHolePattern(); testCoordinatedFeatureSuppressionBatch(); testParametricBlindHole(); std::cout<<"PASS: "<<checks<<" parametric-blind-hole assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--parametric-feature-suppression") { testParametricFeatureSuppression(); std::cout<<"PASS: "<<checks<<" parametric-feature-suppression assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--assembly-joint-coordinate-guards") { testAssemblyJointCoordinateGuards(); std::cout<<"PASS: "<<checks<<" assembly-joint-coordinate-guard assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--assembly-joint-persistence-guards") { testAssemblyJointPersistenceGuards(); std::cout<<"PASS: "<<checks<<" assembly-joint-persistence-guard assertions\n"; return 0; }
@@ -6955,9 +8484,9 @@ int main(int argc,char** argv) {
         if(argc==2&&std::string(argv[1])=="--assembly-occurrence-pose-copy") { testAssemblyOccurrencePoseCopyGuard(); std::cout<<"PASS: "<<checks<<" assembly-occurrence-pose-copy assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--assembly-joints") { testMotionInterferenceScan(); testAssemblyJoints(); std::cout<<"PASS: "<<checks<<" assembly-joint assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--surface-body-persistence") { testSurfaceBodyPersistence(); std::cout<<"PASS: "<<checks<<" surface-body-persistence assertions\n"; return 0; }
-        if(argc==2&&std::string(argv[1])=="--sheet-metal-flat-pattern") { testSheetMetalFlatPattern(); std::cout<<"PASS: "<<checks<<" sheet-metal assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--sheet-metal-flat-pattern") { testAssociativeManufacturingPackageV170(); testSheetMetalFlatPattern(); std::cout<<"PASS: "<<checks<<" sheet-metal assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--folded-sheet-metal") { testFoldedSheetMetal(); std::cout<<"PASS: "<<checks<<" folded-sheet-metal assertions\n"; return 0; }
-        if(argc==2&&std::string(argv[1])=="--orthographic-drawing") { testDrawingSourceRevisionEdits(); testDrawingSheetIdentityUniqueness(); testDrawingExportPreflightDoesNotAcknowledgeFailedSnapshot(); testSelectedEdgeDrawingDimension(); testOrthographicDrawingExport(); std::cout<<"PASS: "<<checks<<" orthographic-drawing assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--orthographic-drawing") { testV170Rc4DrillingAndGdt(); testConservativeAxialHoleTable(); testDrawingSourceRevisionEdits(); testDrawingSheetIdentityUniqueness(); testDrawingExportPreflightDoesNotAcknowledgeFailedSnapshot(); testSelectedEdgeDrawingDimension(); testOrthographicDrawingExport(); std::cout<<"PASS: "<<checks<<" orthographic-drawing assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--planar-section") { testPlanarSectionMeasurement(); std::cout<<"PASS: "<<checks<<" planar-section assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--surface-summary") { testSurfaceTypeSummary(); std::cout<<"PASS: "<<checks<<" surface-summary assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--face-area") { testSelectedFaceArea(); std::cout<<"PASS: "<<checks<<" face-area assertions\n"; return 0; }
@@ -6966,10 +8495,10 @@ int main(int argc,char** argv) {
         if(argc==2&&std::string(argv[1])=="--edge-length") { testSelectedEdgeLength(); std::cout<<"PASS: "<<checks<<" edge-length assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--vertex-coordinates") { testSelectedVertexCoordinates(); std::cout<<"PASS: "<<checks<<" vertex-coordinate assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--vertex-distance") { testVertexDistance(); std::cout<<"PASS: "<<checks<<" vertex-distance assertions\n"; return 0; }
-        if(argc==2&&std::string(argv[1])=="--circular-hole-pattern") { testCircularHolePattern(); std::cout<<"PASS: "<<checks<<" circular-hole-pattern assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--circular-hole-pattern") { testCircularHolePattern(); cad::sprint7_test::patternsUpdateDescendants(); std::cout<<"PASS: "<<checks<<" circular-hole-pattern assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--helical-sweep") { testHelicalSweep(); std::cout<<"PASS: "<<checks<<" helical-sweep assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--variable-pitch-helix") { testVariablePitchHelicalSweep(); std::cout<<"PASS: "<<checks<<" variable-pitch-helix assertions\n"; return 0; }
-        if(argc==2&&std::string(argv[1])=="--dovetail-groove") { testDovetailGroove(); std::cout<<"PASS: "<<checks<<" dovetail-groove assertions\n"; return 0; }
+        if(argc==2&&std::string(argv[1])=="--dovetail-groove") { testDovetailGroove(); cad::sprint7_test::commitMachiningVariants(); cad::sprint7_test::rejectionPreservesScene(); std::cout<<"PASS: "<<checks<<" dovetail-groove assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--t-slot-groove") { testTSlotGroove(); std::cout<<"PASS: "<<checks<<" t-slot-groove assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--rounded-slot") { testRoundedSlot(); std::cout<<"PASS: "<<checks<<" rounded-slot assertions\n"; return 0; }
         if(argc==2&&std::string(argv[1])=="--keyhole-slot") { testKeyholeSlot(); std::cout<<"PASS: "<<checks<<" keyhole-slot assertions\n"; return 0; }

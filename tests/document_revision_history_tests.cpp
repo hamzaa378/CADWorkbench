@@ -81,6 +81,21 @@ int main(int argc,char** argv){
         require(hasFieldChange("scene/drawing_readiness_policy/required_title_block_fields/1")&&
                 diff.drawingReadinessPolicyChanged,
                 "Revision diff did not identify a project-level drawing policy field change");
+        cad::DocumentRevisionDiff workingDiff;
+        require(cad::DocumentRevisionHistory::compareWithSavedScene(scenePath,firstId,&workingDiff,&error)&&
+                workingDiff.newerRevisionId=="saved-scene"&&workingDiff.bodyChanges.size()==2&&
+                workingDiff.drawingReadinessPolicyChanged,
+                "Comparison against the current saved scene missed model or project changes");
+        require(cad::DocumentRevisionHistory::compareWithSavedScene(scenePath,secondId,&workingDiff,&error)&&
+                workingDiff.bodyChanges.isEmpty()&&workingDiff.fieldChanges.isEmpty(),
+                "An unchanged saved scene showed changes against its matching checkpoint");
+        const QByteArray currentScene=readFile(scenePath);
+        require(writeFile(scenePath,"{invalid scene"),"Could not prepare invalid working-scene fixture");
+        workingDiff.olderRevisionId="sentinel";
+        require(!cad::DocumentRevisionHistory::compareWithSavedScene(scenePath,firstId,&workingDiff,&error)&&
+                workingDiff.olderRevisionId=="sentinel",
+                "Invalid saved scene was compared or replaced the prior diff result");
+        require(writeFile(scenePath,currentScene),"Could not restore current saved-scene fixture");
         const auto widthChange=std::find_if(diff.fieldChanges.cbegin(),diff.fieldChanges.cend(),
             [](const auto& change){return change.path=="parts/body-1/named_parameters/width";});
         require(widthChange!=diff.fieldChanges.cend()&&widthChange->olderValue.toDouble()==10.0&&

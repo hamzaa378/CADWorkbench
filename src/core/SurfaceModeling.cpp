@@ -83,10 +83,26 @@ bool makeRuledSurfaceShell(const TopoDS_Wire& firstBoundary,const TopoDS_Wire& s
     int firstEdgeCount=0,secondEdgeCount=0;
     if(!validWire(firstBoundary,&firstEdgeCount)||!validWire(secondBoundary,&secondEdgeCount))
         return fail(error,"Both ruled-surface boundaries must be valid wires with non-degenerate edges.");
-    if(firstEdgeCount!=secondEdgeCount)
-        return fail(error,"Ruled-surface boundary wires must have the same number of corresponding edges.");
+    // Unequal edge counts are supported, but an open section cannot be
+    // paired with a closed section: such a loft has no consistent seam.
+    if(firstBoundary.Closed()!=secondBoundary.Closed())
+        return fail(error,"Ruled-surface boundaries must both be closed or both be open.");
     try{
-        const TopoDS_Shell candidate=BRepFill::Shell(firstBoundary,secondBoundary);
+        TopoDS_Shell candidate;
+        if(firstEdgeCount==secondEdgeCount){
+            candidate=BRepFill::Shell(firstBoundary,secondBoundary);
+        }else{
+            // BRepFill assumes one-to-one edge correspondence. OCCT's
+            // compatible-section builder can divide unequal wire topologies.
+            BRepOffsetAPI_ThruSections loft(false,true,1e-6);
+            loft.CheckCompatibility(true);
+            loft.AddWire(firstBoundary);
+            loft.AddWire(secondBoundary);
+            loft.Build();
+            if(!loft.IsDone()||loft.Shape().IsNull()||loft.Shape().ShapeType()!=TopAbs_SHELL)
+                return fail(error,"OCCT could not match the ruled-surface boundary profiles.");
+            candidate=TopoDS::Shell(loft.Shape());
+        }
         if(candidate.IsNull()||candidate.ShapeType()!=TopAbs_SHELL||!validSurface(candidate))
             return fail(error,"OCCT could not create a valid ruled shell between those wires.");
         *result=candidate;
@@ -103,17 +119,18 @@ bool makeLoftedSurfaceShell(const std::vector<TopoDS_Wire>& sectionWires,
     if(!result)return fail(error,"Provide an output shell for the lofted surface.");
     if(sectionWires.size()<2)
         return fail(error,"A lofted surface needs at least two section wires.");
-    int expectedEdgeCount=-1;
+    const bool firstClosed=sectionWires.front().Closed();
     for(const TopoDS_Wire& section:sectionWires){
-        int edgeCount=0;
-        if(!validWire(section,&edgeCount))
+        if(!validWire(section,nullptr))
             return fail(error,"Every loft section must be a valid wire with non-degenerate edges.");
-        if(expectedEdgeCount<0)expectedEdgeCount=edgeCount;
-        else if(edgeCount!=expectedEdgeCount)
-            return fail(error,"Loft section wires must have the same number of corresponding edges.");
+        if(section.Closed()!=firstClosed)
+            return fail(error,"Loft sections must all be closed or all be open.");
     }
     try{
-        BRepOffsetAPI_ThruSections loft(false,false);
+        BRepOffsetAPI_ThruSections loft(false,false,1e-6);
+        // The OCCT compatibility algorithm can split edges to pair unlike
+        // profiles. It does not guarantee success for self-crossing sections.
+        loft.CheckCompatibility(true);
         for(const TopoDS_Wire& section:sectionWires)loft.AddWire(section);
         loft.Build();
         if(!loft.IsDone())return fail(error,"OCCT could not build a surface through those loft sections.");

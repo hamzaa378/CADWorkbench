@@ -1,0 +1,29 @@
+{
+  "source_base": "CADWorkbench Sprint 8 combined preliminary ZIP",
+  "previous_archive_file_entries": 619,
+  "previous_files_missing": [],
+  "modified_previous_files": [
+    "CMakeLists.txt",
+    "scripts/RUN_BACKEND_FULL_REGRESSION_WITH_DIAGNOSTICS.ps1",
+    "src/core/MotionDriveLimitReview.h",
+    "tests/articulated_assembly_v170_tests.cpp",
+    "tests/test_sprint4_engineering_contract.py",
+    "tests/workshop_engineering_v164_tests.cpp",
+    "tools/run_portable_regressions.py"
+  ],
+  "python_source_tests": "900/900 PASS",
+  "portable_cpp_gcc": "37/37 PASS",
+  "portable_cpp_clang": "37/37 PASS",
+  "new_portable_assertions": {
+    "hole_position": 60025,
+    "rigid_motion_speed": 30016
+  },
+  "local_native_style_compilation": {
+    "articulated": "36 checks PASS, GCC Linux",
+    "workshop_tolerances": "317 checks PASS, GCC Linux"
+  },
+  "registered_native_ctests": 130,
+  "windows_native_executed_for_sprint9": false,
+  "manual_acceptance": "NOT RUN",
+  "status": "PRELIMINARY SOURCE ONLY"
+}

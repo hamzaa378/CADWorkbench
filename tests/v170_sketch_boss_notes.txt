@@ -1,0 +1,4 @@
+CADWorkbench v1.70 sketch boss increment
+Native tests: linked_sketch_extrusion_v170_tests.exe boss and boss-persistence
+Source / independent CAD-kernel tests: python -m unittest tests/v170_sketch_boss_preflight.py; python tests/v170_sketch_boss_kernel_reference.py
+See docs/V170_ASSOCIATIVE_SKETCH_BOSS.md

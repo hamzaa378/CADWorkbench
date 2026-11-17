@@ -26,6 +26,17 @@ struct SketchCircle {
     bool cutout = false;
 };
 
+struct SketchArc {
+    QString id;
+    QString startPointId, endPointId, midpointId;
+};
+
+// Cubic Bezier: the two control points are editable sketch points.
+struct SketchSpline {
+    QString id;
+    QString startPointId, endPointId, control1PointId, control2PointId;
+};
+
 enum class SketchConstraintType {
     Coincident,
     Horizontal,
@@ -49,11 +60,18 @@ enum class SketchConstraintType {
     SymmetricAboutLine,
     TangentCirclesExternal,
     TangentCirclesInternal,
-    PointOnSegment
+    PointOnSegment,
+    SegmentLength,
+    SignedPointLineDistance,
+    SegmentAngleFromX,
+    SignedPointCircleDistance
 };
 
 // Constraint references use point IDs for pointA/pointB and segment IDs for
 // segmentA/segmentB. Distance is in model units; angle is in radians.
+// SignedPointLineDistance is positive to the left of a directed segment;
+// SignedPointCircleDistance is positive outside the circle. SegmentAngleFromX
+// is counterclockwise from the positive sketch X axis.
 struct SketchConstraint {
     SketchConstraintType type = SketchConstraintType::Coincident;
     QString pointA;
@@ -71,6 +89,8 @@ struct SketchModel {
     QVector<SketchPoint> points;
     QVector<SketchSegment> segments;
     QVector<SketchCircle> circles;
+    QVector<SketchArc> arcs;
+    QVector<SketchSpline> splines;
     QVector<SketchConstraint> constraints;
 };
 
@@ -89,6 +109,15 @@ struct SketchSolveResult {
     int numericalRank = 0;
     int degreesOfFreedom = 0;
     double maximumResidual = 0.0;
+    QVector<double> constraintMaximumResiduals;
+    int largestResidualConstraintIndex = -1; // zero-based; -1 for unconstrained sketches
+    // Successful sketches may contain constraints that add no independent
+    // equations at the solved configuration. Indices are zero-based and are
+    // advisory (not automatic deletions or proof of a conflicting constraint).
+    QVector<int> redundantConstraintIndices;
+    // Local Jacobian nullspace advisory, in variable order: x,y for each
+    // point followed by circle radii. Coupled coordinates can share one DOF.
+    QVector<int> locallyMobileCoordinateIndices;
     QVector<QPointF> solvedPoints;
     QVector<double> solvedCircleRadii;
 };

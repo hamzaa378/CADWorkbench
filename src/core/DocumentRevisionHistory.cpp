@@ -255,6 +255,46 @@ bool validateTags(const QStringList& input,QStringList* normalized,QString* erro
 QJsonValue featureHistory(const QJsonObject& body) {
     return body.value(QStringLiteral("parametric_definition")).toObject().value(QStringLiteral("feature_history"));
 }
+
+DocumentRevisionDiff buildDiff(const QJsonObject& oldRoot,const QJsonObject& newRoot,
+                               const QString& olderId,const QString& newerId,
+                               const QString& olderSchema,const QString& newerSchema) {
+    const auto oldBodies=bodyMap(oldRoot),newBodies=bodyMap(newRoot);
+    QSet<QString> ids;for(auto it=oldBodies.cbegin();it!=oldBodies.cend();++it)ids.insert(it.key());
+    for(auto it=newBodies.cbegin();it!=newBodies.cend();++it)ids.insert(it.key());
+    DocumentRevisionDiff result;result.olderRevisionId=olderId;result.newerRevisionId=newerId;
+    result.olderSceneSchema=olderSchema;result.newerSceneSchema=newerSchema;
+    result.drawingReadinessPolicyChanged=oldRoot.value(QStringLiteral("drawing_readiness_policy"))!=newRoot.value(QStringLiteral("drawing_readiness_policy"));
+    QJsonObject olderSceneFields=oldRoot,newerSceneFields=newRoot;
+    olderSceneFields.remove(QStringLiteral("parts"));newerSceneFields.remove(QStringLiteral("parts"));
+    appendFieldChange(QStringLiteral("scene"),olderSceneFields,true,newerSceneFields,true,
+                      &result.fieldChanges,&result.fieldChangesTruncated);
+    QStringList orderedIds=ids.values();std::sort(orderedIds.begin(),orderedIds.end());
+    for(const QString& id:orderedIds){
+        const bool inOld=oldBodies.contains(id),inNew=newBodies.contains(id);
+        const bool historyChanged=inOld&&inNew&&featureHistory(oldBodies.value(id))!=featureHistory(newBodies.value(id));
+        if(inOld&&inNew&&geometryIdentity(oldBodies.value(id))==geometryIdentity(newBodies.value(id))&&
+           metadataIdentity(oldBodies.value(id))==metadataIdentity(newBodies.value(id))&&!historyChanged)continue;
+        DocumentRevisionBodyChange change;change.bodyId=id;
+        change.bodyName=inNew?newBodies.value(id).value(QStringLiteral("name")).toString():oldBodies.value(id).value(QStringLiteral("name")).toString();
+        change.added=!inOld;change.removed=!inNew;
+        if(inOld&&inNew){change.geometryChanged=geometryIdentity(oldBodies.value(id))!=geometryIdentity(newBodies.value(id));
+            change.metadataChanged=metadataIdentity(oldBodies.value(id))!=metadataIdentity(newBodies.value(id));
+            change.featureHistoryChanged=historyChanged;
+            if(change.geometryChanged)
+                appendFieldChange(QStringLiteral("parts/")+escapedPathSegment(id)+QStringLiteral("/geometry_fingerprint"),
+                                  QJsonValue(geometryIdentity(oldBodies.value(id))),true,
+                                  QJsonValue(geometryIdentity(newBodies.value(id))),true,
+                                  &result.fieldChanges,&result.fieldChangesTruncated);
+            QJsonObject olderMetadata=oldBodies.value(id),newerMetadata=newBodies.value(id);
+            olderMetadata.remove(QStringLiteral("brep"));olderMetadata.remove(QStringLiteral("geometry_token"));
+            newerMetadata.remove(QStringLiteral("brep"));newerMetadata.remove(QStringLiteral("geometry_token"));
+            appendFieldChange(QStringLiteral("parts/")+escapedPathSegment(id),olderMetadata,true,newerMetadata,true,
+                              &result.fieldChanges,&result.fieldChangesTruncated);}
+        result.bodyChanges.append(std::move(change));
+    }
+    return result;
+}
 } // namespace
 
 bool DocumentRevisionHistory::create(const QString& scenePath,const QString& label,const QString& note,
@@ -326,41 +366,25 @@ bool DocumentRevisionHistory::compare(const QString& scenePath,const QString& ol
     if(older==newer)return fail(error,"Choose two different document revisions to compare.");
     QJsonObject oldRoot,newRoot;
     if(!readSnapshot(scenePath,*older,nullptr,&oldRoot,error)||!readSnapshot(scenePath,*newer,nullptr,&newRoot,error))return false;
-    const auto oldBodies=bodyMap(oldRoot),newBodies=bodyMap(newRoot);
-    QSet<QString> ids;for(auto it=oldBodies.cbegin();it!=oldBodies.cend();++it)ids.insert(it.key());
-    for(auto it=newBodies.cbegin();it!=newBodies.cend();++it)ids.insert(it.key());
-    DocumentRevisionDiff result;result.olderRevisionId=olderId;result.newerRevisionId=newerId;
-    result.olderSceneSchema=older->sceneSchema;result.newerSceneSchema=newer->sceneSchema;
-    result.drawingReadinessPolicyChanged=oldRoot.value(QStringLiteral("drawing_readiness_policy"))!=newRoot.value(QStringLiteral("drawing_readiness_policy"));
-    QJsonObject olderSceneFields=oldRoot,newerSceneFields=newRoot;
-    olderSceneFields.remove(QStringLiteral("parts"));newerSceneFields.remove(QStringLiteral("parts"));
-    appendFieldChange(QStringLiteral("scene"),olderSceneFields,true,newerSceneFields,true,
-                      &result.fieldChanges,&result.fieldChangesTruncated);
-    QStringList orderedIds=ids.values();std::sort(orderedIds.begin(),orderedIds.end());
-    for(const QString& id:orderedIds){
-        const bool inOld=oldBodies.contains(id),inNew=newBodies.contains(id);
-        const bool historyChanged=inOld&&inNew&&featureHistory(oldBodies.value(id))!=featureHistory(newBodies.value(id));
-        if(inOld&&inNew&&geometryIdentity(oldBodies.value(id))==geometryIdentity(newBodies.value(id))&&
-           metadataIdentity(oldBodies.value(id))==metadataIdentity(newBodies.value(id))&&!historyChanged)continue;
-        DocumentRevisionBodyChange change;change.bodyId=id;
-        change.bodyName=inNew?newBodies.value(id).value(QStringLiteral("name")).toString():oldBodies.value(id).value(QStringLiteral("name")).toString();
-        change.added=!inOld;change.removed=!inNew;
-        if(inOld&&inNew){change.geometryChanged=geometryIdentity(oldBodies.value(id))!=geometryIdentity(newBodies.value(id));
-            change.metadataChanged=metadataIdentity(oldBodies.value(id))!=metadataIdentity(newBodies.value(id));
-            change.featureHistoryChanged=historyChanged;
-            if(change.geometryChanged)
-                appendFieldChange(QStringLiteral("parts/")+escapedPathSegment(id)+QStringLiteral("/geometry_fingerprint"),
-                                  QJsonValue(geometryIdentity(oldBodies.value(id))),true,
-                                  QJsonValue(geometryIdentity(newBodies.value(id))),true,
-                                  &result.fieldChanges,&result.fieldChangesTruncated);
-            QJsonObject olderMetadata=oldBodies.value(id),newerMetadata=newBodies.value(id);
-            olderMetadata.remove(QStringLiteral("brep"));olderMetadata.remove(QStringLiteral("geometry_token"));
-            newerMetadata.remove(QStringLiteral("brep"));newerMetadata.remove(QStringLiteral("geometry_token"));
-            appendFieldChange(QStringLiteral("parts/")+escapedPathSegment(id),olderMetadata,true,newerMetadata,true,
-                              &result.fieldChanges,&result.fieldChangesTruncated);}
-        result.bodyChanges.append(std::move(change));
-    }
-    *diff=std::move(result);return true;
+    *diff=buildDiff(oldRoot,newRoot,olderId,newerId,older->sceneSchema,newer->sceneSchema);
+    return true;
+}
+
+bool DocumentRevisionHistory::compareWithSavedScene(const QString& scenePath,const QString& revisionId,
+                                                     DocumentRevisionDiff* diff,QString* error) {
+    if(scenePath.trimmed().isEmpty()||!diff)
+        return fail(error,"Provide a saved scene path and an output record for the comparison.");
+    QVector<DocumentRevisionSummary> revisions;if(!readManifest(scenePath,&revisions,error))return false;
+    const auto* revision=findRevision(revisions,revisionId);
+    if(!revision)return fail(error,"The requested document revision was not found.");
+    QJsonObject oldRoot,newRoot;
+    if(!readSnapshot(scenePath,*revision,nullptr,&oldRoot,error))return false;
+    QByteArray savedBytes;if(!readFile(scenePath,kMaxSceneBytes,&savedBytes,error))return false;
+    QString currentSchema;
+    if(!validScene(savedBytes,&newRoot,&currentSchema,nullptr,error))return false;
+    *diff=buildDiff(oldRoot,newRoot,revisionId,QStringLiteral("saved-scene"),
+                    revision->sceneSchema,currentSchema);
+    return true;
 }
 
 bool DocumentRevisionHistory::restore(const QString& scenePath,const QString& revisionId,const QString& targetPath,QString* error) {

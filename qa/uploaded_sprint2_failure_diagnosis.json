@@ -1,0 +1,60 @@
+{
+  "schema": 1,
+  "status": "INCOMPLETE_OR_FAILED",
+  "native_ctest_complete": false,
+  "python_inventory_complete": true,
+  "full_audit_success_explicit": false,
+  "manual_acceptance": "NOT_ASSESSED",
+  "issues": [
+    {
+      "code": "CTEST_FAILED",
+      "line": 534,
+      "message": "44/130 Test  #45: cadcore_universal_feature_tree .......................***Failed    0.15 sec",
+      "recommendation": "Reproduce the named native CTest and retain its failure output."
+    },
+    {
+      "code": "GROUPED_EDGE_BUILD_FAILURE",
+      "line": 535,
+      "message": "FAIL at check 70: Witnessed unequal-size two-edge blend did not rebuild",
+      "recommendation": "Inspect size/edge witness field separation and reproduce cadcore_universal_feature_tree on Windows; keep failing operation and full kernel diagnostic."
+    },
+    {
+      "code": "CTEST_FAILED",
+      "line": 711,
+      "message": "The following tests FAILED:",
+      "recommendation": "Reproduce the named native CTest and retain its failure output."
+    },
+    {
+      "code": "CTEST_FAILED",
+      "line": 1032,
+      "message": "CTEST_FAILED line 1564: 44/130 Test  #45: cadcore_universal_feature_tree .......................***Failed    0.15 sec",
+      "recommendation": "Reproduce the named native CTest and retain its failure output."
+    },
+    {
+      "code": "CTEST_FAILED",
+      "line": 1034,
+      "message": "CTEST_FAILED line 1741: The following tests FAILED:",
+      "recommendation": "Reproduce the named native CTest and retain its failure output."
+    },
+    {
+      "code": "NATIVE_TEST_FAILURE",
+      "line": null,
+      "message": "At least one real native CTest failed",
+      "recommendation": "Reproduce failing native tests; do not claim a complete gate."
+    },
+    {
+      "code": "NATIVE_EVIDENCE_MISSING",
+      "line": null,
+      "message": "No complete 130/130 CTest summary",
+      "recommendation": "Capture the full CTest output after a successful build."
+    },
+    {
+      "code": "AUDIT_FAILED",
+      "line": null,
+      "message": "Full audit explicitly reported FAILED",
+      "recommendation": "Address build, CTest and Python failures."
+    }
+  ],
+  "log_file": "Pasted text(20261116-123230).txt",
+  "created_utc": "2026-11-16T12:44:46.900140+00:00"
+}

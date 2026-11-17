@@ -1,0 +1,35 @@
+{
+  "old_archive": "CADWorkbench_v170_BackendSprint3_EngineeringQA_COMBINED_PRELIMINARY_20261116.zip",
+  "old_files_preserved": 561,
+  "old_files_removed": 0,
+  "old_files_changed": 9,
+  "new_files": 15,
+  "modified": [
+    ".github/workflows/portable-regressions.yml",
+    "CMakeLists.txt",
+    "CONTINUE_HERE_LATEST_PRELIMINARY.md",
+    "scripts/RUN_BACKEND_FULL_REGRESSION_WITH_DIAGNOSTICS.ps1",
+    "src/core/AssemblyToleranceBudget.h",
+    "src/core/BranchReferenceAgreement.h",
+    "src/core/SimultaneousProximity.h",
+    "src/core/WorkshopEngineering.cpp",
+    "tools/run_portable_regressions.py"
+  ],
+  "added": [
+    "RUN_SPRINT4_DEFERRED_WINDOWS_AUDIT.ps1",
+    "SPRINT4_CONTINUATION_20261116.md",
+    "qa/SPRINT4_CHANGED_FILES.json",
+    "qa/sprint4_clang_33.log",
+    "qa/sprint4_gcc_33.log",
+    "qa/sprint4_python_830.log",
+    "qa/sprint4_source_audit.json",
+    "qa/sprint4_source_tree_scan.log",
+    "src/core/MotionSweptClearance.h",
+    "src/core/ShopToleranceAllocation.h",
+    "tests/geometry_numeric_stability_portable_tests.cpp",
+    "tests/motion_swept_clearance_portable_tests.cpp",
+    "tests/shop_tolerance_allocation_portable_tests.cpp",
+    "tests/test_sprint4_engineering_contract.py",
+    "tools/audit_full_source.py"
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "previous_archive": "CADWorkbench_v170_BackendSprint4_ThreePasses_COMBINED_PRELIMINARY_20261116.zip",
+  "preserved_previous_files": 578,
+  "deleted_previous_files": [],
+  "modified_previous_files": [
+    "CONTINUE_HERE_LATEST_PRELIMINARY.md",
+    "README.md",
+    "scripts/RUN_BACKEND_FULL_REGRESSION_WITH_DIAGNOSTICS.ps1",
+    "src/core/SceneDocument.cpp",
+    "src/core/SceneDocument.h",
+    "tests/articulated_assembly_scene_v170_tests.cpp",
+    "tools/audit_full_source.py"
+  ],
+  "new_files": [
+    "RUN_SPRINT5_DEFERRED_WINDOWS_AUDIT.ps1",
+    "SPRINT5_CONTINUATION_20261116.md",
+    "qa/sprint5_clang_33.log",
+    "qa/sprint5_gcc_33.log",
+    "qa/sprint5_python_847.log",
+    "qa/sprint5_source_audit.json",
+    "tests/test_sprint5_motion_workflow_contract.py",
+    "tests/v170_sprint5_workcell_kernel_reference.py"
+  ]
+}

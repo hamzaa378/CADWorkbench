@@ -1,0 +1,6 @@
+Evidence source: new Sprint 3 file tree, tested in the current Linux container.
+The full Windows/Qt/MSVC/OpenCascade C++ application was NOT built here.
+The grouped-edge OCP Python tests execute OpenCascade reference geometry,
+NOT the C++ SceneDocument attachment and persistence path.
+Uploaded failure diagnostic is from the previous Sprint 2 Windows log,
+NOT from a Sprint 3 Windows run.

@@ -1,0 +1,18 @@
+CADWorkbench v1.70 — Clean Windows Build Source, 7 November 2026
+
+This is a standalone project. Do not overlay it on an older Fix 3-7 tree.
+The previously reported C2065/C2146 inputEdges errors were caused by a
+legacy un-declared OCCT map type in src/core/SceneDocument.cpp. It now uses
+NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher>, already used
+elsewhere in this source.
+
+Run in PowerShell FROM THIS FOLDER:
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\RUN_WINDOWS_TESTS.ps1 -VcpkgRoot C:\vcpkg
+
+The full build and 130 native CTests require Windows/Visual Studio/Qt/OCCT.
+The user-supplied earlier build logs show a previous interleaved-history
+runtime regression. This package has not been run under native MSVC and that
+regression must still be checked; a successful portable test run is not
+sufficient to certify it.
+
+Additional details: V170_MSVC_BUILD_CORRECTION_20261107.md.

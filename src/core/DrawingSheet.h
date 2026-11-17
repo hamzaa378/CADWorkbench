@@ -46,7 +46,8 @@ bool buildOrthographicDrawingSvg(const Part& part, QByteArray* svg, QString* err
                                  const QVector<DrawingDetailAnnotation>& detailAnnotations = {},
                                  const QVector<DrawingSectionAnnotation>& sectionAnnotations = {},
                                  const QVector<DrawingEdgeDimensionAnnotation>& edgeDimensionAnnotations = {},
-                                 const QVector<Part>& sourceBodies = {});
+                                 const QVector<Part>& sourceBodies = {},
+                                 const QVector<DrawingGdtFrameAnnotation>& gdtFrames = {});
 bool exportOrthographicDrawingSvg(const Part& part, const QString& path, QString* error = nullptr,
                                   OrthographicProjection projection = OrthographicProjection::ThirdAngle,
                                   DrawingSheetSize sheetSize = DrawingSheetSize::A4Landscape,
@@ -66,9 +67,39 @@ bool exportOrthographicDrawingSvg(const Part& part, const QString& path, QString
                                   const QVector<DrawingDetailAnnotation>& detailAnnotations = {},
                                   const QVector<DrawingSectionAnnotation>& sectionAnnotations = {},
                                   const QVector<DrawingEdgeDimensionAnnotation>& edgeDimensionAnnotations = {},
-                                  const QVector<Part>& sourceBodies = {});
+                                  const QVector<Part>& sourceBodies = {},
+                                 const QVector<DrawingGdtFrameAnnotation>& gdtFrames = {});
 bool exportOrthographicDrawingPdf(const QByteArray& svg,const QString& path,DrawingSheetSize sheetSize,
                                   QString* error = nullptr);
+// Read-only geometry-aware preflight for an individually edited linked drawing
+// dimension. It uses the same witness resolver and projection rules as SVG
+// export, but never modifies the document or acknowledges a source revision.
+bool validateDrawingEdgeDimensionPreview(const Part& source,
+                                         const DrawingEdgeDimensionAnnotation& dimension,
+                                         QString* error = nullptr,
+                                         double* nominalMm = nullptr);
+
+// Read-only batch assessment for every persisted edge-linked drawing dimension.
+// Checks source existence, the current edge witness and projected measurement
+// using the same geometry preflight as actual SVG export. Stale but uniquely
+// resolvable is a REVIEW state, never silently acknowledged as current.
+struct DrawingDimensionAuditEntry {
+    QString annotationId,sourceId,kind,view,status,detail;
+    // Current nominal is read from the same verified SVG measurement used at
+    // export, rounded to its 0.001 mm displayed precision. Ranges are manual
+    // tolerance bands, not a statement of achievable manufacturing process.
+    bool hasMeasurement=false;
+    double nominalMm=0.0,minimumMm=0.0,maximumMm=0.0;
+};
+struct DrawingDimensionAudit {
+    QVector<DrawingDimensionAuditEntry> entries;
+    int current=0,needsRegeneration=0,broken=0,missing=0;
+    bool readyForRegeneration() const {return broken==0&&missing==0;}
+};
+bool auditDrawingDimensionLinks(const QVector<Part>& currentSources,
+                                const DrawingSheetSettings& saved,
+                                DrawingDimensionAudit* report,QString* error=nullptr);
+
 // Exports the generated sheet as editable DXF line, circle, and text entities.
 // DXF is a detached snapshot; saved model links remain in the native scene.
 bool buildOrthographicDrawingDxf(const QByteArray& svg,QByteArray* dxf,QString* error = nullptr);
