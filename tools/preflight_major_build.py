@@ -10,8 +10,33 @@ import re
 import sys
 
 
+def check_native_direct_includes(root: Path) -> list[str]:
+    """Prevent missing direct headers for native code not compiled by portable suites.
+
+    Sprint 15 passed the portable suites but failed MSVC at SceneDocument.cpp
+    because SheetMetal.cpp included the refold headers while SceneDocument.cpp
+    did not. Transitive includes are intentionally NOT accepted by this guard.
+    """
+    scene = root / 'src/core/SceneDocument.cpp'
+    if not scene.is_file():
+        return ['Missing SceneDocument.cpp for native direct-include check']
+    code = scene.read_text(encoding='utf-8')
+    includes = set(re.findall(r'(?m)^\s*#\s*include\s*"([^"]+)"', code))
+    requirements = (
+        ('detail::ContourPoint', 'FoldedContourTopology.h'),
+        ('refold::Bend', 'RefoldGeometryAudit.h'),
+        ('refold::Audit', 'RefoldGeometryAudit.h'),
+        ('refold::inspect(', 'RefoldGeometryAudit.h'),
+    )
+    missing = []
+    for symbol, header in requirements:
+        if symbol in code and header not in includes:
+            missing.append(f'MSVC C2065/C2653 risk: {symbol} requires a direct #include "{header}" in SceneDocument.cpp')
+    return missing
+
+
 def check(root: Path) -> list[str]:
-    errors=[]
+    errors=check_native_direct_includes(root)
     native = root/'tests/associative_features_v159_tests.cpp'
     if not native.is_file():
         return [f'Missing native regression source: {native}']

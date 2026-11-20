@@ -29,8 +29,8 @@ try {
     Pop-Location
 }
 $python=Get-Command py -ErrorAction SilentlyContinue
-if($python){& py -3 (Join-Path $root 'tools\diagnose_build.py') --log $fullTranscript --out $diagnosis --expected-python 952}
-else {& python (Join-Path $root 'tools\diagnose_build.py') --log $fullTranscript --out $diagnosis --expected-python 952}
+if($python){& py -3 (Join-Path $root 'tools\diagnose_build.py') --log $fullTranscript --out $diagnosis --expected-python 1050}
+else {& python (Join-Path $root 'tools\diagnose_build.py') --log $fullTranscript --out $diagnosis --expected-python 1050}
 $diagnosticCode=$LASTEXITCODE
 Write-Host "Diagnostic JSON: $diagnosis"
 if($auditCode -notin @(0,3)){

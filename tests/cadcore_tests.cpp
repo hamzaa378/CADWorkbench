@@ -8,6 +8,7 @@
 #include "core/ShapeFeatureTree.h" // declarations for captured and resized edge anchors
 #include "core/SheetMetal.h"
 #include "core/SheetMetalBendSequenceAudit.h"
+#include "core/LinkedFlatDevelopmentAudit.h"
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
@@ -5353,6 +5354,23 @@ void testCoordinatedParametricBatchV170(){
             scene.find(linked)->geometryToken==linkedToken,
             "what-if comparison did not rebuild independent alternatives read-only");
     const auto recordedAlternatives=alternatives;
+    // Sprint 14: promote a real evaluated alternative, reject stale geometry,
+    // preserve the dependent graph and treat undo as one change-set.
+    const QString alternativeFingerprint=scene.designGeometryFingerprint();
+    require(scene.applyParametricDesignAlternative(options[0],alternativeFingerprint,&issue)&&
+            scene.namedParameters(first).value("width")==32.0&&
+            scene.namedParameters(second).value("height")==35.0&&
+            scene.find(linked)->geometryToken!=linkedToken,
+            "Promoting evaluated alternative failed to rebuild source and linked result");
+    require(!scene.applyParametricDesignAlternative(options[2],alternativeFingerprint,&issue)&&
+            scene.namedParameters(first).value("width")==32.0,
+            "Stale alternative was silently applied to a newer geometry revision");
+    require(scene.undo()&&scene.designGeometryFingerprint()==alternativeFingerprint&&
+            scene.namedParameters(first).value("width")!=32.0,
+            "Undo of promoted alternative did not restore the entire assembly baseline");
+    require(scene.redo()&&scene.namedParameters(first).value("width")==32.0&&
+            scene.undo()&&scene.designGeometryFingerprint()==alternativeFingerprint,
+            "Redo/undo of promoted alternative did not preserve source and dependent history");
     require(!scene.evaluateParametricDesignAlternatives(
             {{"Duplicated",{}},{"Duplicated",{}}},&alternatives,&issue)&&
             alternatives.size()==recordedAlternatives.size(),
@@ -5813,6 +5831,28 @@ void testAssociativeManufacturingPackageV170(){
         require(hashes.value(name).toString().toLatin1()==digest,
                 "manufacturing manifest checksum does not match exported data");
     }
+    // The native package must also match an independent neutral development
+    // derived from the persistent folded definition. No output is approved.
+    cad::MultiBendFlatPattern checkedPattern;
+    require(cad::calculateFoldedSheetFlatPattern({30.0,20.0,30.0},25.0,1.0,
+            {{90.0,2.0},{-90.0,2.0}},QVector<double>{0.40,0.45},&checkedPattern,&issue),
+            "manufacturing source flat pattern recomputed");
+    cad::sheet::LinkedFlatAudit crossCheck;
+    std::string crossError;
+    std::vector<double> expectedStations,expectedAllowances;
+    for(double v:checkedPattern.bendLinePositionsMm)expectedStations.push_back(v);
+    for(double v:checkedPattern.bendAllowancesMm)expectedAllowances.push_back(v);
+    require(cad::sheet::auditLinkedFlatDevelopment({30.0,20.0,30.0},25.0,1.0,
+            {{90.0,2.0,0.40},{-90.0,2.0,0.45}},checkedPattern.flatLengthMm,
+            checkedPattern.widthMm,expectedStations,expectedAllowances,&crossCheck,&crossError)&&
+            crossCheck.bendStationsMm.size()==2&&!crossCheck.releaseApproved,
+            "native manufacturing neutral-bend cross-check rejected actual linked package");
+    expectedStations[0]+=1.0;
+    require(!cad::sheet::auditLinkedFlatDevelopment({30.0,20.0,30.0},25.0,1.0,
+            {{90.0,2.0,0.40},{-90.0,2.0,0.45}},checkedPattern.flatLengthMm,
+            checkedPattern.widthMm,expectedStations,expectedAllowances,&crossCheck,&crossError)&&
+            crossCheck.bendStationsMm.size()==2,
+            "invalid published bend station escaped native consistency/atomicity gate");
     require(!scene.exportLinkedFlatManufacturingPackage(blank,package,&issue)&&
             readBytes(package+"/manifest.json")==manifest.toJson(QJsonDocument::Indented),
             "existing manufacturing package was overwritten");
@@ -6146,6 +6186,25 @@ void testFoldedSheetMetal() {
             QStringLiteral("Folded sheet-metal solid has invalid bounds or thickness direction: volume=%1 x=[%2,%3] y=[%4,%5] z=[%6,%7]")
                 .arg(diagnostics.volume).arg(diagnostics.minX).arg(diagnostics.maxX)
                 .arg(diagnostics.minY).arg(diagnostics.maxY).arg(diagnostics.minZ).arg(diagnostics.maxZ).toStdString().c_str());
+    QByteArray refoldReport;
+    require(doc.auditFoldedSheetRefoldGeometry(doc.parts().first().id,&refoldReport,&error)&&
+            refoldReport.contains("Mid-surface flat length mm")&&
+            refoldReport.contains("NOT_ISSUED"),
+            "native refold geometry did not reconcile real OCCT folded volume");
+    const auto preservedRefold=refoldReport;
+    require(!doc.auditFoldedSheetRefoldGeometry("foreign-source",&refoldReport,&error)&&
+            refoldReport==preservedRefold,
+            "missing folded source unexpectedly replaced previous refold result");
+    // Multiple reversing bends: check the true saved OCCT volume against a
+    // freshly generated 2D folded cross-section, not merely a flat-length table.
+    cad::SceneDocument alternating;
+    require(alternating.addFoldedSheetMetal({30.0,25.0,30.0,25.0},25.0,1.0,
+            {{90.0,2.0},{-90.0,2.0},{90.0,2.0}},&error),
+            "complex three-bend refold solid could not be built");
+    QByteArray zigzagReport;
+    require(alternating.auditFoldedSheetRefoldGeometry(alternating.parts().first().id,
+            &zigzagReport,&error)&&zigzagReport.contains("REFOLD,4,3,2"),
+            "three-bend reversing refold did not reconcile folded geometry");
     const double firstVolume=diagnostics.volume;
     require(doc.undo()&&doc.parts().isEmpty()&&doc.redo()&&doc.parts().size()==1,
             "Folded sheet-metal creation did not undo and redo as one scene operation");
@@ -7755,6 +7814,18 @@ void testAssemblyJoints() {
             slider.find(sliderChild)->jointMotionKeyframes.size()==3,"Motion-track editing was not undoable and redoable");
     const QString sliderPath=dir.filePath("prismatic.cadscene");require(slider.saveAs(sliderPath,&error),"Could not save a prismatic joint");
     cad::SceneDocument sliderLoaded;require(sliderLoaded.load(sliderPath,&error),"Could not load a saved prismatic joint");
+    // Sprint 16 joins real persisted joint keyframes to the unified native
+    // readiness review. A piecewise-linear 0->10->0 mm track over 4 s has an
+    // exact peak joint-coordinate speed of 5 mm/s; this must NOT be presented
+    // as a proof of world-space body or collision speed.
+    QByteArray readinessEvidence;
+    const QString preflightRevision=sliderLoaded.find(sliderChild)->geometryToken;
+    require(sliderLoaded.buildIntegratedEngineeringReadinessCsv(&readinessEvidence,&error)&&
+            readinessEvidence.contains("JOINT_MOTION")&&
+            readinessEvidence.contains("Peak piecewise-linear coordinate rate=5 mm/s")&&
+            readinessEvidence.contains("MOTION_NOT_CERTIFIED")&&
+            sliderLoaded.find(sliderChild)->geometryToken==preflightRevision,
+            "Native integrated readiness missed a persisted prismatic joint-rate bound");
     require(sliderLoaded.find(sliderChild)->assemblyJointType=="Prismatic"&&
             sliderLoaded.find(sliderChild)->assemblyJointParentBodyId==sliderParent&&
             sliderLoaded.find(sliderChild)->jointTranslationMm==12&&sliderLoaded.find(sliderChild)->jointMaximumMm==25&&
@@ -7792,6 +7863,45 @@ void testAssemblyJoints() {
             "Mixed-joint pose was not one atomic undo step");
     require(pose.redo()&&std::abs(pose.find(poseSlider)->placementY-50)<1e-8,
             "Mixed-joint pose could not be redone");
+    // Sprint 16: coordinate a revolute and prismatic timeline edit in one
+    // atomic operation, with no per-track transient inconsistent schedule.
+    QMap<QString,QVector<cad::JointMotionKeyframe>> coordinatedTracks{
+        {poseRevolute,{{0,0},{1,30}}},
+        {poseSlider,{{0,0},{1,10}}}
+    };
+    QString coordinatedPreview="UNCHANGED_PREVIEW";
+    require(pose.previewJointMotionKeyframesBatch(coordinatedTracks,&coordinatedPreview,&error)&&
+            coordinatedPreview.contains("READ-ONLY MULTI-JOINT")&&
+            coordinatedPreview.contains("changed_tracks=2")&&
+            pose.find(poseRevolute)->jointMotionKeyframes.isEmpty()&&
+            pose.find(poseSlider)->jointMotionKeyframes.isEmpty(),
+            "Multi-joint timeline preview modified a real assembly");
+    const QString preservedPreview=coordinatedPreview;
+    auto invalidCoordinated=coordinatedTracks;
+    invalidCoordinated[poseSlider]={{0,0},{1,99}};
+    require(!pose.previewJointMotionKeyframesBatch(invalidCoordinated,&coordinatedPreview,&error)&&
+            coordinatedPreview==preservedPreview&&
+            !pose.setJointMotionKeyframesBatch(invalidCoordinated,&error)&&
+            pose.find(poseRevolute)->jointMotionKeyframes.isEmpty(),
+            "Invalid second joint motion track partially edited the first");
+    require(pose.setJointMotionKeyframesBatch(coordinatedTracks,&error)&&
+            pose.find(poseRevolute)->jointMotionKeyframes.size()==2&&
+            pose.find(poseSlider)->jointMotionKeyframes.size()==2,
+            "Could not commit the complete assembly motion timeline");
+    require(pose.undo()&&pose.find(poseRevolute)->jointMotionKeyframes.isEmpty()&&
+            pose.find(poseSlider)->jointMotionKeyframes.isEmpty(),
+            "Multi-joint motion timeline was not one undo checkpoint");
+    require(pose.redo()&&pose.find(poseRevolute)->jointMotionKeyframes.size()==2&&
+            pose.find(poseSlider)->jointMotionKeyframes.size()==2,
+            "Multi-joint motion timeline redo did not restore both tracks");
+    const auto timelinePath=dir.filePath("coordinated-motion-tracks.cadscene");
+    require(pose.saveAs(timelinePath,&error),"Cannot persist coordinated motion timeline");
+    cad::SceneDocument restoredTracks;
+    require(restoredTracks.load(timelinePath,&error)&&
+            restoredTracks.find(poseRevolute)->jointMotionKeyframes.size()==2&&
+            restoredTracks.find(poseSlider)->jointMotionKeyframes.size()==2,
+            "Coordinated motion timeline did not survive save/reopen");
+
 
     cad::SceneDocument definition;
     require(definition.addPrimitive(cad::Primitive::Box,{10,10,10},&error),"Could not create reusable-definition source");

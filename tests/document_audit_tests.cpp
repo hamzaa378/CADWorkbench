@@ -1,4 +1,5 @@
 #include "core/DocumentAudit.h"
+#include "core/DrawingRevisionImpact.h"
 #include "core/ShapeFeatureTree.h" // real OCCT witnessed drawing references
 #include "core/ManufacturingHandoff.h"
 
@@ -26,6 +27,169 @@ bool has(const cad::DocumentAuditReport& report,const QString& code) {
 int main(int argc,char** argv) {
     QCoreApplication application(argc,argv);
     try {
+        // Sprint 16: one read-only, bounded engineering preflight must join
+        // actual OCCT geometry, strict drawing regeneration and refold audit.
+        // It must not silently issue drawings or mutate the model and must
+        // report a revision-stale sheet as a blocker instead of hiding it.
+        {
+            cad::SceneDocument project;
+            QString reason;
+            QByteArray output("PREVIOUS REPORT");
+            require(!project.buildIntegratedEngineeringReadinessCsv(&output,&reason)&&
+                    output=="PREVIOUS REPORT", "Empty readiness source overwrote report");
+            require(project.addPrimitive(cad::Primitive::Box,{30,20,8},&reason),
+                    "Readiness fixture: cannot create an ordinary solid");
+            const QString plate=project.parts().last().id;
+            cad::DrawingSheetSettings sheet;
+            sheet.drawingNumber="S16-PLATE";
+            require(project.setDrawingSheetSettings(plate,sheet,&reason),
+                    "Readiness fixture: cannot persist linked drawing");
+            require(project.addFoldedSheetMetal({40,30},25,1,{{90,2}},&reason),
+                    "Readiness fixture: cannot create folded solid");
+            const QString folded=project.parts().last().id;
+            const QString originalToken=project.find(plate)->geometryToken;
+            require(project.buildIntegratedEngineeringReadinessCsv(&output,&reason)&&
+                    output.contains("GEOMETRY")&&output.contains("DRAWING")&&
+                    output.contains("SHEET_METAL")&&output.contains("NOT_ISSUED")&&
+                    output.contains("Stored/refolded OCCT volume")&&
+                    project.find(plate)->geometryToken==originalToken,
+                    "Integrated readiness failed cross-domain native preflight");
+            const QByteArray goodReport=output;
+            require(!project.buildIntegratedEngineeringReadinessCsv(nullptr,&reason)&&
+                    output==goodReport, "Null readiness result was not rejected atomically");
+            QTemporaryDir destination;
+            require(destination.isValid(),"Cannot create temporary readiness destination");
+            const auto csvPath=destination.filePath("unissued-readiness.csv");
+            require(project.exportIntegratedEngineeringReadinessCsv(csvPath,&reason)&&
+                    QFile::exists(csvPath),"Cannot atomically publish engineering readiness CSV");
+            require(project.translate(plate,1,0,0,&reason),
+                    "Readiness fixture: could not revise drawing source");
+            require(project.buildIntegratedEngineeringReadinessCsv(&output,&reason)&&
+                    output.contains("BLOCK")&&output.contains("drawing source or annotation is stale"),
+                    "Readiness audit failed to block a stale drawing source");
+            require(project.find(folded)!=nullptr&&
+                    output.contains("engineering_approval=NOT_ISSUED"),
+                    "Readiness report silently issued geometry or lost a saved part");
+        }
+        // Sprint 12: a reference that was current in the previous drawing
+        // revision must NOT remain current just because its own token is unchanged.
+        {
+            using namespace cad::drawing_audit;
+            DrawingRevisionImpact evidence;
+            std::string diagnostic;
+            const std::vector<Source> oldSources={{"plate","geom-v1","meta-v1"}};
+            const std::vector<Source> editedSources={{"plate","geom-v2","meta-v1"}};
+            const std::vector<Annotation> prior={{"D1","plate","geom-v1","",true,false}};
+            require(compareDrawingRevisions(oldSources,prior,editedSources,prior,&evidence,&diagnostic),
+                    "Drawing revision comparison failed to process source geometry change");
+            require(evidence.changedBodyIds.size()==1&&evidence.currentIssues.size()==1&&
+                    evidence.annotations[0].currentReferenceStale&&!evidence.releaseApproved,
+                    "Unchanged dimension token was silently approved across geometry revision");
+            auto reviewed=prior;
+            reviewed[0].capturedGeometryToken="geom-v2";
+            require(compareDrawingRevisions(oldSources,prior,editedSources,reviewed,&evidence,&diagnostic)&&
+                    evidence.modified==1&&evidence.currentIssues.empty()&&!evidence.releaseApproved,
+                    "Explicit revised dimension must remain unissued until human review");
+        }
+        // Sprint 14: multi-sheet edge witness recovery must be atomic, not a
+        // series of independently committed drawing edits. This also checks
+        // stale legacy indices and independently reviewed GD&T are not approved.
+        {
+            cad::SceneDocument batch;
+            QString issue;
+            require(batch.addPrimitive(cad::Primitive::Box,{30,20,10},&issue)&&
+                    batch.addPrimitive(cad::Primitive::Box,{26,16,8},&issue),
+                    "Batch drawing: could not create independent source parts");
+            const QString first=batch.parts()[0].id;
+            const QString second=batch.parts()[1].id;
+            for(const QString& owner:{first,second}){
+                const cad::Part* body=batch.find(owner);
+                QMap<QString,double> witness;
+                require(cad::captureStableEdgeAnchor(body->shape,1,&witness,&issue),
+                        "Batch drawing: could not capture original edge witness");
+                cad::DrawingEdgeDimensionAnnotation dim;
+                dim.id=owner==first?"batch-first":"batch-second";
+                dim.sourceBodyId=owner;dim.sourceGeometryToken=body->geometryToken;
+                dim.edgeIndex=1;dim.kind="LENGTH";dim.view="TOP";dim.edgeAnchor=witness;
+                cad::DrawingSheetSettings settings;
+                settings.edgeDimensionAnnotations.append(dim);
+                if(owner==second){
+                    auto legacy=dim;legacy.id="batch-legacy";legacy.edgeAnchor.clear();
+                    settings.edgeDimensionAnnotations.append(legacy);
+                    settings.gdtFrames.append({"batch-gdt",owner,body->geometryToken,
+                                             "POSITION",0.1,"A","B","C",20,20});
+                }
+                require(batch.setDrawingSheetSettings(owner,settings,&issue),
+                        "Batch drawing: could not persist source-linked drawing");
+            }
+            require(batch.translate(first,2,0,0,&issue)&&batch.translate(second,3,0,0,&issue),
+                    "Batch drawing: source revisions failed");
+            require(batch.refreshDrawingSheetSource(first,&issue)&&
+                    batch.refreshDrawingSheetSource(second,&issue),
+                    "Batch drawing: aggregate refresh failed");
+            QByteArray recoveryCsv;
+            require(batch.buildDrawingRecoveryCsv(&recoveryCsv,&issue)&&
+                    recoveryCsv.contains("batch-first")&&recoveryCsv.contains("batch-legacy")&&
+                    recoveryCsv.contains("REVIEW_REQUIRED")&&
+                    recoveryCsv.contains("GD_AND_T"),
+                    "Batch drawing: recovery register omitted stale edge and datum evidence");
+            const QString oldFirst=batch.find(first)->drawingSettings.edgeDimensionAnnotations[0].sourceGeometryToken;
+            const QString oldSecond=batch.find(second)->drawingSettings.edgeDimensionAnnotations[0].sourceGeometryToken;
+            QMap<QString,QStringList> unsafe{{first,{"batch-first"}},
+                                            {second,{"batch-second","batch-legacy"}}};
+            QString preview="UNCHANGED_PREVIEW";
+            require(!batch.previewDrawingEdgeReviewBatch(unsafe,&preview,&issue)&&
+                    preview=="UNCHANGED_PREVIEW"&&
+                    batch.find(first)->drawingSettings.edgeDimensionAnnotations[0].sourceGeometryToken==oldFirst,
+                    "Batch drawing: legacy index was accepted or failed preview was replaced");
+            require(!batch.reviewDrawingEdgeReviewBatch(unsafe,nullptr,&issue)&&
+                    batch.find(second)->drawingSettings.edgeDimensionAnnotations[0].sourceGeometryToken==oldSecond,
+                    "Batch drawing: invalid second sheet partially modified first sheet");
+            QMap<QString,QStringList> good{{first,{"batch-first"}},{second,{"batch-second"}}};
+            require(batch.previewDrawingEdgeReviewBatch(good,&preview,&issue)&&
+                    preview.contains("requested_annotations=2")&&
+                    batch.find(first)->drawingSettings.edgeDimensionAnnotations[0].sourceGeometryToken==oldFirst,
+                    "Batch drawing: safe preview changed live sheet revision");
+            QString result;
+            require(batch.reviewDrawingEdgeReviewBatch(good,&result,&issue)&&
+                    result.contains("changed_sheets=2")&&
+                    batch.find(first)->drawingSettings.edgeDimensionAnnotations[0].sourceGeometryToken==
+                        batch.find(first)->geometryToken&&
+                    batch.find(second)->drawingSettings.edgeDimensionAnnotations[0].sourceGeometryToken==
+                        batch.find(second)->geometryToken,
+                    "Batch drawing: two-sheet geometry review did not commit together");
+            const auto reviewed=batch.drawingSheetSourceStatus(second);
+            require(reviewed.staleAnnotationIds.contains("batch-legacy")&&
+                    reviewed.staleAnnotationIds.contains("batch-gdt")&&
+                    !reviewed.staleAnnotationIds.contains("batch-second"),
+                    "Batch drawing: selected edge review silently approved legacy/GD&T records");
+            require(batch.undo()&&
+                    batch.find(first)->drawingSettings.edgeDimensionAnnotations[0].sourceGeometryToken==oldFirst&&
+                    batch.find(second)->drawingSettings.edgeDimensionAnnotations[0].sourceGeometryToken==oldSecond,
+                    "Batch drawing: one undo must restore both sheets");
+            require(batch.redo()&&
+                    batch.find(first)->drawingSettings.edgeDimensionAnnotations[0].sourceGeometryToken==
+                        batch.find(first)->geometryToken&&
+                    batch.find(second)->drawingSettings.edgeDimensionAnnotations[0].sourceGeometryToken==
+                        batch.find(second)->geometryToken,
+                    "Batch drawing: redo must re-apply both reviews");
+            QTemporaryDir saved;
+            require(saved.isValid()&&batch.saveAs(saved.filePath("batch-review.cadscene"),&issue),
+                    "Batch drawing: could not save reviewed project");
+            cad::SceneDocument reopened;
+            require(reopened.load(saved.filePath("batch-review.cadscene"),&issue)&&
+                    reopened.drawingSheetSourceStatus(second).staleAnnotationIds.contains("batch-legacy")&&
+                    !reopened.drawingSheetSourceStatus(second).staleAnnotationIds.contains("batch-second"),
+                    "Batch drawing: save/reopen lost reviewed and unreviewed identities");
+            // Explicit repeated review is a no-op and creates no undo entry.
+            require(!reopened.canUndo()&&
+                    reopened.reviewDrawingEdgeReviewBatch(good,nullptr,&issue)&&
+                    !reopened.canUndo(),
+                    "Batch drawing: unchanged geometry review consumed undo history");
+            require(reopened.exportDrawingRecoveryCsv(saved.filePath("recovery.csv"),&issue)&&
+                    QFile::exists(saved.filePath("recovery.csv")),
+                    "Batch drawing: recovery report could not export atomically");
+        }
         cad::SceneDocument document;
         const auto empty=cad::runDocumentAudit(document);
         require(empty.bodyCount==0&&has(empty,"DOC_EMPTY")&&empty.errorCount>0,
@@ -248,6 +412,52 @@ int main(int argc,char** argv) {
                 "RC5 could not remove audited feature");
         require(has(cad::runDocumentAudit(annotated),"FEATURE_NOTE_SOURCE_MISSING"),
                 "RC5 orphaned inspection note was not reported");
+        // Sprint 15: independently render two saved drawing sheets from the
+        // current B-reps and atomically publish a new, unissued drawing set.
+        {
+            cad::SceneDocument series;
+            QString issue;
+            require(series.addPrimitive(cad::Primitive::Box,{20,15,10},&issue)&&
+                    series.addPrimitive(cad::Primitive::Box,{25,18,12},&issue),
+                    "multi-sheet export: fixture parts missing");
+            const QString first=series.parts()[0].id,second=series.parts()[1].id;
+            cad::DrawingSheetSettings sheet;
+            sheet.drawingNumber="DRAW-A";
+            require(series.setDrawingSheetSettings(first,sheet,&issue),
+                    "multi-sheet export: first saved drawing missing");
+            sheet.drawingNumber="DRAW-B";
+            require(series.setDrawingSheetSettings(second,sheet,&issue),
+                    "multi-sheet export: second saved drawing missing");
+            QMap<QString,QByteArray> drawings;
+            QMap<QString,cad::DrawingSheetSettings> prepared;
+            QString batchReport;
+            require(series.buildSavedDrawingSvgBatch({first,second},&drawings,&prepared,
+                    &batchReport,&issue)&&drawings.size()==2&&prepared.size()==2&&
+                    drawings[first].contains("<svg")&&drawings[second].contains("<svg"),
+                    "two saved drawing sheets did not regenerate from live geometry");
+            const auto oldOutput=drawings;
+            const auto firstSavedToken=series.find(first)->drawingSettings.sourceGeometryToken;
+            require(!series.buildSavedDrawingSvgBatch({first,first},&drawings,&prepared,
+                    &batchReport,&issue)&&drawings==oldOutput,
+                    "duplicate drawing sheet failed to reject atomically");
+            require(series.translate(first,5,0,0,&issue),
+                    "multi-sheet export: could not revise source");
+            require(series.buildSavedDrawingSvgBatch({first,second},&drawings,&prepared,
+                    &batchReport,&issue)&&
+                    series.find(first)->drawingSettings.sourceGeometryToken==firstSavedToken,
+                    "regeneration silently acknowledged a changed drawing source");
+            QTemporaryDir exports;
+            require(exports.isValid(),"multi-sheet export: no temporary directory");
+            const QString target=exports.filePath("unissued-drawings");
+            require(series.exportSavedDrawingSvgBatch({first,second},target,&batchReport,&issue)&&
+                    QFile::exists(target+"/sheet-001.svg")&&
+                    QFile::exists(target+"/sheet-002.svg")&&
+                    QFile::exists(target+"/DRAWING_BATCH_INDEX.csv")&&
+                    series.find(first)->drawingSettings.sourceGeometryToken==firstSavedToken,
+                    "unissued drawing batch did not publish atomically without approving revision");
+            require(!series.exportSavedDrawingSvgBatch({first,second},target,nullptr,&issue),
+                    "drawing batch overwrote an existing released directory");
+        }
         cad::DocumentAuditReport escape;
         escape.findings.append({cad::AuditSeverity::Warning,"Drawing","QUOTING","id,1",
                                 "title contains \"double quotes\"","check, repair"});

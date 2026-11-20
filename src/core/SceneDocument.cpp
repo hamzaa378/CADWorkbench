@@ -1,7 +1,12 @@
 #include "SceneDocument.h"
+#include "LinkedFlatDevelopmentAudit.h"
+#include "FoldedContourTopology.h" // direct owner: cad::detail::ContourPoint
+#include "RefoldGeometryAudit.h"   // direct owner: cad::refold::Bend/Audit/inspect
 #include "DirectionalHoleSpan.h"
 #include "AdaptiveMotionScan.h"
 #include "JointMotionInterpolation.h"
+#include "JointKeyframeRateAudit.h"
+#include "DocumentAudit.h"
 #include "StockContourMetrics.h"
 #include "StockMaterialCompatibility.h"
 #include "SimultaneousProximity.h"
@@ -1584,6 +1589,76 @@ bool SceneDocument::previewFoldedSheetMetalEdit(const QString& partId,
     return false;
 }
 
+bool SceneDocument::auditFoldedSheetRefoldGeometry(const QString& partId,
+        QByteArray* csv,QString* error) const{
+    if(!csv){setError(error,"Provide an output buffer for the refold geometry audit.");return false;}
+    const Part* source=find(partId);
+    if(!source||!source->hasFoldedSheetMetalDefinition||
+       source->geometryToken!=source->foldedSheetGeometryToken||source->shape.IsNull()){
+        setError(error,"The folded sheet source is missing, stale or not an OCCT solid.");return false;
+    }
+    QVector<QPointF> outline;
+    QString issue;
+    if(!buildFoldedSheetOutline(source->foldedSheetFlangesMm,
+            source->foldedSheetWidthMm,source->foldedSheetThicknessMm,
+            source->foldedSheetBends,&outline,&issue)){
+        setError(error,issue);return false;
+    }
+    std::vector<detail::ContourPoint> contour;contour.reserve(outline.size());
+    for(const auto& point:outline)contour.push_back({point.x(),point.y()});
+    std::vector<double> straight(source->foldedSheetFlangesMm.cbegin(),
+                                 source->foldedSheetFlangesMm.cend());
+    std::vector<refold::Bend> bends;
+    for(const auto& bend:source->foldedSheetBends)
+        bends.push_back({bend.angleDegrees,bend.insideRadiusMm});
+    refold::Audit audit;
+    std::string geometryIssue;
+    if(!refold::inspect(straight,source->foldedSheetThicknessMm,
+            source->foldedSheetWidthMm,bends,contour,&audit,&geometryIssue)){
+        setError(error,QString::fromStdString(geometryIssue));return false;
+    }
+    try{
+        GProp_GProps storedProperties,reproducedProperties;
+        BRepGProp::VolumeProperties(source->shape,storedProperties);
+        const TopoDS_Shape reproduced=makeFoldedSheetSolid(source->foldedSheetFlangesMm,source->foldedSheetWidthMm,
+            source->foldedSheetThicknessMm,source->foldedSheetBends,&issue);
+        if(reproduced.IsNull()||!validShape(reproduced,&issue)){
+            setError(error,QStringLiteral("Refold regeneration failed: %1").arg(issue));return false;
+        }
+        BRepGProp::VolumeProperties(reproduced,reproducedProperties);
+        const double storedVolume=storedProperties.Mass();
+        const double rebuiltVolume=reproducedProperties.Mass();
+        const double reference=audit.predictedSolidVolumeMm3;
+        if(!std::isfinite(storedVolume)||!std::isfinite(rebuiltVolume)||
+           storedVolume<=0||rebuiltVolume<=0||
+           std::abs(storedVolume-rebuiltVolume)>std::max(1e-4,rebuiltVolume*1e-6)||
+           std::abs(rebuiltVolume-reference)>std::max(1e-4,reference*1e-6)){
+            setError(error,"Stored folded OCCT volume differs from regenerated refold geometry.");return false;
+        }
+        const QString content=QStringLiteral(
+            "CADWorkbench independent refold geometry review,NOT_ISSUED\r\n"
+            "Body,Flanges,Bends,Direction reversals,Mid-surface flat length mm,"
+            "Ideal cross-section area mm2,Faceted cross-section area mm2,"
+            "Relative area error,Regenerated OCCT volume mm3,Stored OCCT volume mm3\r\n")+
+            QStringLiteral("REFOLD,%1,%2,%3,%4,%5,%6,%7,%8,%9\r\n")
+                .arg(source->foldedSheetFlangesMm.size())
+                .arg(audit.bendCount).arg(audit.reversedBendCount)
+                .arg(audit.exactMidSurfaceDevelopedLengthMm,0,'g',16)
+                .arg(audit.exactCrossSectionAreaMm2,0,'g',16)
+                .arg(audit.facetedCrossSectionAreaMm2,0,'g',16)
+                .arg(audit.relativeAreaError,0,'g',16)
+                .arg(rebuiltVolume,0,'g',16)
+                .arg(storedVolume,0,'g',16);
+        *csv=content.toUtf8();
+        if(error)error->clear();return true;
+    }catch(const Standard_Failure& failure){
+        setError(error,QStringLiteral("OCCT refold check failed: %1").arg(failure.what()));
+    }catch(const std::exception& failure){
+        setError(error,QStringLiteral("Refold check failed: %1").arg(failure.what()));
+    }
+    return false;
+}
+
 bool SceneDocument::buildLinkedFlatDevelopmentSet(const QString& flatBodyId,
         QByteArray* svg,QByteArray* dxf,QByteArray* bendCsv,QString* error) const{
     if(!svg||!dxf||!bendCsv||svg==dxf||svg==bendCsv||dxf==bendCsv){
@@ -1619,6 +1694,29 @@ bool SceneDocument::buildLinkedFlatDevelopmentSet(const QString& flatBodyId,
        stagedSvg.isEmpty()||stagedDxf.isEmpty()||stagedCsv.isEmpty()){
         setError(error,issue.isEmpty()?"Linked SVG/DXF/CSV set could not be validated.":issue);
         return false; // Caller outputs remain unchanged even if one generator failed.
+    }
+    // Independent neutral-axis audit against the saved folded definition.
+    // This catches a drift between the geometry exporter and the bend schedule
+    // before ANY caller buffer is modified or a package is published.
+    std::vector<double> nativeFlanges,stations,allowances;
+    std::vector<cad::sheet::BendInput> nativeBends;
+    nativeFlanges.reserve(static_cast<std::size_t>(folded->foldedSheetFlangesMm.size()));
+    nativeBends.reserve(static_cast<std::size_t>(folded->foldedSheetBends.size()));
+    for(double mm:folded->foldedSheetFlangesMm)nativeFlanges.push_back(mm);
+    for(int i=0;i<folded->foldedSheetBends.size();++i)
+        nativeBends.push_back({folded->foldedSheetBends[i].angleDegrees,
+            folded->foldedSheetBends[i].insideRadiusMm,factors[i]});
+    for(double mm:manufacturing.bendLinePositionsMm)stations.push_back(mm);
+    for(double mm:manufacturing.bendAllowancesMm)allowances.push_back(mm);
+    cad::sheet::LinkedFlatAudit reference;
+    std::string referenceError;
+    if(!cad::sheet::auditLinkedFlatDevelopment(nativeFlanges,
+            folded->foldedSheetWidthMm,folded->foldedSheetThicknessMm,
+            nativeBends,manufacturing.flatLengthMm,manufacturing.widthMm,
+            stations,allowances,&reference,&referenceError)){
+        setError(error,QStringLiteral("Linked development cross-check failed: %1")
+            .arg(QString::fromStdString(referenceError)));
+        return false;
     }
     *svg=std::move(stagedSvg);*dxf=std::move(stagedDxf);*bendCsv=std::move(stagedCsv);
     if(error)error->clear();
@@ -4527,6 +4625,103 @@ bool SceneDocument::replaceLiveArticulatedJointDefinition(int index,
     if(error)error->clear();return true;
 }
 
+// Coordinate multi-joint authoring: validate the whole proposed definition
+// set before changing ANY live occurrence. All revisions and the caller's
+// report remain intact if a single connection or solid cannot be solved.
+bool SceneDocument::stageArticulatedDefinitionBatch(
+        const QMap<int,ArticulatedNetworkJoint>& edits,
+        QVector<ArticulatedNetworkJoint>* definitions,
+        QVector<Part>* staged,bool* geometryChanged,bool* definitionsChanged,
+        QString* report,QString* error,double clearanceMm,
+        bool rejectUnsafeNominal) const{
+    if(!hasLiveArticulatedNetwork()||edits.isEmpty()||
+       edits.size()>liveArticulatedJoints_.size()||!definitions||!staged||
+       !geometryChanged||!definitionsChanged||!fit::validThreshold(clearanceMm)){
+        setError(error,"A saved articulated graph, 1-N joint edits, staging buffers and a valid clearance are required.");return false;
+    }
+    QVector<ArticulatedNetworkJoint> proposed=liveArticulatedJoints_;
+    bool changed=false;
+    for(auto it=edits.cbegin();it!=edits.cend();++it){
+        if(it.key()<0||it.key()>=proposed.size()||
+           !sameArticulatedConnection(proposed.at(it.key()),it.value())){
+            setError(error,"A batch edit must target a saved joint index without changing its endpoints or type.");return false;
+        }
+        changed=changed||!sameArticulatedDefinition(proposed.at(it.key()),it.value());
+        proposed[it.key()]=it.value();
+    }
+    QVector<Part> candidate;bool moved=false;
+    if(changed&&!stageLiveArticulatedRegeneration(proposed,&candidate,&moved,error))return false;
+    if(!changed)candidate=parts_;
+    QStringList ids{liveArticulatedFixed_};
+    for(const auto& joint:proposed){
+        if(!ids.contains(joint.parentBodyId))ids<<joint.parentBodyId;
+        if(!ids.contains(joint.childBodyId))ids<<joint.childBodyId;
+    }
+    QStringList lines{QStringLiteral("ATOMIC ARTICULATED MATE-DEFINITION BATCH PREVIEW"),
+        QStringLiteral("edited_joints=%1; changed_definitions=%2; staged_geometry_changed=%3")
+            .arg(edits.size()).arg(changed?1:0).arg(moved?1:0),
+        QStringLiteral("connected_occurrences=%1; strict_nominal=%2")
+            .arg(ids.size()).arg(rejectUnsafeNominal?1:0)};
+    if(ids.size()<=12){
+        SceneDocument detached;detached.parts_=candidate;
+        QVector<AssemblyFitPair> pairs;
+        if(!inspectAssemblyFit(detached,ids,clearanceMm,&pairs,error))return false;
+        int overlaps=0,contacts=0,insufficient=0;
+        for(const auto& pair:pairs){
+            if(pair.status==fit::Status::Interference)++overlaps;
+            if(pair.status==fit::Status::Contact)++contacts;
+            if(pair.status==fit::Status::InsufficientClearance)++insufficient;
+        }
+        lines<<QStringLiteral("exact_nominal_pairs=%1; overlaps=%2; contacts=%3; inadequate_clearances=%4")
+            .arg(pairs.size()).arg(overlaps).arg(contacts).arg(insufficient);
+        if(rejectUnsafeNominal&&(overlaps>0||insufficient>0||
+           (clearanceMm>0.0&&contacts>0))){
+            setError(error,"Batch mate edit failed the exact nominal clearance policy; no change committed.");return false;
+        }
+    }else{
+        lines<<QStringLiteral("exact_nominal_fit=NOT_CHECKED (>12 occurrences)");
+        if(rejectUnsafeNominal){
+            setError(error,"Strict mate edit requires inspecting at most twelve occurrences.");return false;
+        }
+    }
+    lines<<QStringLiteral("motion_intervals=NOT_CERTIFIED; manufacturing_approval=NOT_ISSUED");
+    *definitions=std::move(proposed);
+    *staged=std::move(candidate);
+    *geometryChanged=moved;
+    *definitionsChanged=changed;
+    if(report)*report=lines.join('\n');
+    if(error)error->clear();
+    return true;
+}
+
+bool SceneDocument::previewLiveArticulatedJointDefinitionBatch(
+        const QMap<int,ArticulatedNetworkJoint>& edits,QString* report,
+        QString* error,double clearanceMm,bool rejectUnsafeNominal) const{
+    if(!report){setError(error,"Provide a read-only batch preview report.");return false;}
+    QVector<ArticulatedNetworkJoint> definitions;
+    QVector<Part> staged;bool geometry=false,changed=false;
+    QString next;
+    if(!stageArticulatedDefinitionBatch(edits,&definitions,&staged,&geometry,&changed,
+                &next,error,clearanceMm,rejectUnsafeNominal))return false;
+    *report=std::move(next);
+    return true;
+}
+
+bool SceneDocument::replaceLiveArticulatedJointDefinitionBatch(
+        const QMap<int,ArticulatedNetworkJoint>& edits,QString* error,
+        double clearanceMm,bool rejectUnsafeNominal){
+    QVector<ArticulatedNetworkJoint> definitions;
+    QVector<Part> staged;bool geometry=false,changed=false;
+    if(!stageArticulatedDefinitionBatch(edits,&definitions,&staged,&geometry,&changed,
+                nullptr,error,clearanceMm,rejectUnsafeNominal))return false;
+    if(!changed){if(error)error->clear();return true;}
+    checkpoint();
+    if(geometry)parts_=std::move(staged);
+    liveArticulatedJoints_=std::move(definitions);
+    if(error)error->clear();
+    return true;
+}
+
 namespace {
 // Saved network member identities are a contract: a reference edit may
 // change edges but must not quietly introduce/remove component occurrences.
@@ -4643,6 +4838,90 @@ bool SceneDocument::setJointMotionKeyframes(const QString& childBodyId,const QVe
         if(child->jointMotionKeyframes[i].timeSeconds!=keyframes[i].timeSeconds||child->jointMotionKeyframes[i].value!=keyframes[i].value){same=false;break;}
     if(same)return true;
     checkpoint();child->jointMotionKeyframes=keyframes;return true;
+}
+
+// Preview and commit share this one validation path. Validates persisted
+// source joint identities and each complete rate/limit schedule before any
+// assignment, including keys that another editor may have changed meanwhile.
+bool SceneDocument::validateJointMotionKeyframesBatch(
+        const QMap<QString,QVector<JointMotionKeyframe>>& tracks,
+        bool* changed,QString* report,QString* error) const {
+    if(!changed||tracks.isEmpty()||tracks.size()>32){
+        setError(error,"Batch motion editing needs 1-32 saved joint tracks.");return false;
+    }
+    QStringList notes{QStringLiteral("READ-ONLY MULTI-JOINT MOTION TIMELINE PREVIEW"),
+        QStringLiteral("motion_collision_proof=NOT_CERTIFIED; release=NOT_ISSUED")};
+    bool anyChange=false;
+    qsizetype changedCount=0;
+    for(auto it=tracks.cbegin();it!=tracks.cend();++it){
+        const Part* child=find(it.key());
+        const bool revolute=child&&child->assemblyJointType==QStringLiteral("Revolute");
+        const bool prismatic=child&&child->assemblyJointType==QStringLiteral("Prismatic");
+        if(!child||(!revolute&&!prismatic)){
+            setError(error,QStringLiteral("Batch motion track '%1' must refer to an existing revolute/prismatic occurrence.").arg(it.key()));
+            return false;
+        }
+        const double min=revolute?child->jointMinimumDegrees:child->jointMinimumMm;
+        const double max=revolute?child->jointMaximumDegrees:child->jointMaximumMm;
+        std::vector<cad::motion::RateKeyframe> frames;
+        frames.reserve(it.value().size());
+        for(const auto& key:it.value())frames.push_back({key.timeSeconds,key.value});
+        cad::motion::RateAudit audit;
+        std::string why;
+        if(!cad::motion::auditKeyframeRates(frames,min,max,&audit,&why)){
+            setError(error,QStringLiteral("Invalid track for '%1': %2").arg(it.key(),QString::fromStdString(why)));
+            return false;
+        }
+        const auto& prior=child->jointMotionKeyframes;
+        bool same=prior.size()==it.value().size();
+        if(same)for(qsizetype i=0;i<prior.size();++i){
+            if(prior[i].timeSeconds!=it.value()[i].timeSeconds||prior[i].value!=it.value()[i].value){
+                same=false;break;
+            }
+        }
+        if(!same)++changedCount;
+        anyChange=anyChange||!same;
+        notes<<QStringLiteral("body=%1; kind=%2; frames=%3; duration_s=%4; peak_rate=%5 %6/s; velocity_steps=%7; edited=%8")
+            .arg(it.key(),child->assemblyJointType)
+            .arg(it.value().size())
+            .arg(audit.durationSeconds,0,'g',15)
+            .arg(audit.maximumAbsoluteRatePerSecond,0,'g',15)
+            .arg(revolute?QStringLiteral("deg"):QStringLiteral("mm"))
+            .arg(static_cast<qulonglong>(audit.velocityDiscontinuities))
+            .arg(same?0:1);
+    }
+    notes<<QStringLiteral("changed_tracks=%1; one_undo_checkpoint=%2")
+        .arg(changedCount).arg(anyChange?1:0);
+    *changed=anyChange;
+    if(report)*report=notes.join('\n');
+    if(error)error->clear();return true;
+}
+
+bool SceneDocument::previewJointMotionKeyframesBatch(
+        const QMap<QString,QVector<JointMotionKeyframe>>& tracks,
+        QString* report,QString* error) const {
+    if(!report){setError(error,"Provide an output report for the read-only motion preview.");return false;}
+    bool changed=false;
+    QString next;
+    if(!validateJointMotionKeyframesBatch(tracks,&changed,&next,error))return false;
+    *report=std::move(next);
+    return true;
+}
+
+bool SceneDocument::setJointMotionKeyframesBatch(
+        const QMap<QString,QVector<JointMotionKeyframe>>& tracks,
+        QString* error){
+    bool changed=false;
+    if(!validateJointMotionKeyframesBatch(tracks,&changed,nullptr,error))return false;
+    if(!changed){if(error)error->clear();return true;}
+    QVector<Part> candidate=parts_;
+    for(Part& part:candidate){
+        const auto it=tracks.constFind(part.id);
+        if(it!=tracks.cend())part.jointMotionKeyframes=it.value();
+    }
+    checkpoint();
+    parts_=std::move(candidate);
+    if(error)error->clear();return true;
 }
 
 bool SceneDocument::evaluateAssemblyMotionStudy(double timeSeconds,QString* error) {
@@ -5089,66 +5368,534 @@ bool SceneDocument::refreshDrawingSheetSource(const QString& partId,QString* err
     checkpoint();master->drawingSettings.sourceGeometryToken=current;master->drawingSettings.sourceDataToken=currentData;return true;
 }
 
+namespace {
+// One authoritative kernel-based reference review, shared by one-at-a-time
+// editing and multi-sheet authoring. Failures never change caller's output.
+bool prepareReviewedDrawingEdge(const Part& source,
+        const DrawingEdgeDimensionAnnotation& original,
+        DrawingEdgeDimensionAnnotation* result,QString* error){
+    if(!result||source.shape.IsNull()||source.geometryToken.isEmpty()){
+        if(error)*error="Drawing edge source geometry or output is missing.";return false;
+    }
+    const bool alreadyCurrent=original.sourceGeometryToken==source.geometryToken;
+    if(!alreadyCurrent&&original.edgeAnchor.isEmpty()){
+        if(error)*error="A legacy index-only edge changed revision; capture a new geometric witness.";
+        return false;
+    }
+    DrawingEdgeDimensionAnnotation reviewed=original;
+    if(!alreadyCurrent){
+        int resolved=0;
+        QString witnessError;
+        if(!resolveStableEdgeAnchor(source.shape,original.edgeAnchor,&resolved,&witnessError)&&
+           (original.kind==QStringLiteral("LENGTH")||
+            !resolveResizedFullCircleForDrawing(source.shape,original.edgeAnchor,
+                                                &resolved,&witnessError))){
+            if(error)*error=QStringLiteral("Cannot approve drawing edge ancestry: %1").arg(witnessError);
+            return false;
+        }
+        reviewed.edgeIndex=resolved;
+        reviewed.sourceGeometryToken=source.geometryToken;
+    }
+    QString measurementError;
+    if(!validateDrawingEdgeDimensionPreview(source,reviewed,&measurementError)){
+        if(error)*error=QStringLiteral("Cannot approve drawing measurement: %1").arg(measurementError);
+        return false;
+    }
+    *result=std::move(reviewed);
+    if(error)error->clear();return true;
+}
+} // namespace
+
 bool SceneDocument::reviewDrawingEdgeDimension(const QString& sheetOwnerId,
         const QString& annotationId,QString* error){
     const Part* owner=find(sheetOwnerId);
     if(!owner||!owner->hasDrawingSettings||annotationId.trimmed().isEmpty()){
-        setError(error,"Select a saved drawing and a nonempty selected-edge annotation ID.");
-        return false;
+        setError(error,"Select a saved drawing and a nonempty selected-edge annotation ID.");return false;
     }
     const auto& saved=owner->drawingSettings.edgeDimensionAnnotations;
     int annotationIndex=-1;
-    for(int i=0;i<saved.size();++i){
-        if(saved[i].id==annotationId){annotationIndex=i;break;}
-    }
+    for(int i=0;i<saved.size();++i)if(saved[i].id==annotationId){annotationIndex=i;break;}
     if(annotationIndex<0){setError(error,"The selected drawing edge annotation no longer exists.");return false;}
     const DrawingEdgeDimensionAnnotation& original=saved[annotationIndex];
     const Part* source=find(original.sourceBodyId);
-    if(!source||source->shape.IsNull()||source->geometryToken.isEmpty()){
-        setError(error,"The drawing edge source is missing or invalid.");return false;
-    }
-    const bool alreadyCurrent=original.sourceGeometryToken==source->geometryToken;
-    if(original.edgeAnchor.isEmpty()&&!alreadyCurrent){
-        setError(error,"A legacy index-only edge has changed revision; reselect and capture its witness before review.");
-        return false;
-    }
-    // Even when the revision token matches, explicit review must still
-    // verify that a purported current reference can be measured now.
-    if(alreadyCurrent){
-        QString previewError;
-        if(!validateDrawingEdgeDimensionPreview(*source,original,&previewError)){
-            setError(error,QStringLiteral("Stored drawing measurement is broken: %1").arg(previewError));
-            return false;
-        }
-        if(error)error->clear();
-        return true; // A geometry-validated no-op must not consume undo history.
-    }
-    int resolved=0;
-    QString witnessError;
-    if(!resolveStableEdgeAnchor(source->shape,original.edgeAnchor,&resolved,&witnessError)&&
-       (original.kind==QStringLiteral("LENGTH")||
-        !resolveResizedFullCircleForDrawing(source->shape,original.edgeAnchor,
-                                            &resolved,&witnessError))){
-        setError(error,QStringLiteral("Cannot approve drawing edge ancestry: %1").arg(witnessError));
-        return false;
-    }
-    DrawingEdgeDimensionAnnotation reviewed=original;
-    reviewed.edgeIndex=resolved;
-    reviewed.sourceGeometryToken=source->geometryToken;
-    // A pair measurement must independently reattach BOTH circles and prove
-    // that the second still exists. The expensive preview is deliberately
-    // performed only during an explicit review, not in every status query.
-    QString previewError;
-    if(!validateDrawingEdgeDimensionPreview(*source,reviewed,&previewError)){
-        setError(error,QStringLiteral("Cannot approve drawing measurement: %1").arg(previewError));
-        return false;
-    }
+    if(!source){setError(error,"The drawing edge source is missing or invalid.");return false;}
+    DrawingEdgeDimensionAnnotation reviewed;
+    if(!prepareReviewedDrawingEdge(*source,original,&reviewed,error))return false;
+    if(reviewed==original){if(error)error->clear();return true;}
     QVector<Part> staged=parts_;
     auto at=std::find_if(staged.begin(),staged.end(),[&](const Part& p){return p.id==sheetOwnerId;});
     if(at==staged.end()){setError(error,"The drawing sheet disappeared during review.");return false;}
     at->drawingSettings.edgeDimensionAnnotations[annotationIndex]=std::move(reviewed);
     checkpoint();
     parts_=std::move(staged);
+    if(error)error->clear();return true;
+}
+
+// Sprint 14: preview and commit share the same witnessed-edge kernel verifier
+// as single-annotation review. One detached scene copy is used for reporting;
+// the caller receives all selected revisions in one undo checkpoint or none.
+bool SceneDocument::stageDrawingEdgeReviewBatch(
+        const QMap<QString,QStringList>& selection,
+        QMap<QString,DrawingSheetSettings>* updated,
+        QString* report,QString* error) const{
+    if(!updated||selection.isEmpty()||selection.size()>40){
+        setError(error,"Select 1-40 saved drawing sheets and a separate staging buffer.");return false;
+    }
+    int total=0;
+    QMap<QString,DrawingSheetSettings> proposed;
+    for(auto it=selection.cbegin();it!=selection.cend();++it){
+        if(it.key().trimmed().isEmpty()||it.value().isEmpty()){
+            setError(error,"Every selected drawing must have at least one edge-annotation ID.");return false;
+        }
+        total+=it.value().size();
+        if(total>200){setError(error,"A drawing review transaction supports at most 200 annotations.");return false;}
+        const Part* owner=find(it.key());
+        if(!owner||!owner->hasDrawingSettings){
+            setError(error,QStringLiteral("Missing saved drawing sheet: %1").arg(it.key()));return false;
+        }
+        QSet<QString> unique;
+        DrawingSheetSettings sheet=owner->drawingSettings;
+        for(const QString& id:it.value()){
+            if(id.trimmed().isEmpty()||unique.contains(id)){
+                setError(error,"Edge annotation IDs must be nonempty and unique within each sheet.");return false;
+            }
+            unique.insert(id);
+            auto& saved=sheet.edgeDimensionAnnotations;
+            int index=-1;
+            for(int j=0;j<saved.size();++j)if(saved[j].id==id){index=j;break;}
+            if(index<0){setError(error,QStringLiteral("Drawing annotation %1 is missing from sheet %2.")
+                              .arg(id,it.key()));return false;}
+            const Part* source=find(saved[index].sourceBodyId);
+            if(!source){setError(error,QStringLiteral("Drawing annotation %1 has a missing source.")
+                                  .arg(id));return false;}
+            DrawingEdgeDimensionAnnotation reviewed;
+            QString issue;
+            if(!prepareReviewedDrawingEdge(*source,saved[index],&reviewed,&issue)){
+                setError(error,QStringLiteral("Sheet %1 / annotation %2: %3")
+                    .arg(it.key(),id,issue));return false;
+            }
+            saved[index]=std::move(reviewed);
+        }
+        if(!(sheet==owner->drawingSettings))proposed.insert(it.key(),std::move(sheet));
+    }
+    // One copy of the scene for the entire operation, rather than copying all
+    // B-rep-bearing parts for EACH selected annotation. Only the altered sheet
+    // settings are replaced; no geometry or GD&T revision is acknowledged.
+    SceneDocument staged;staged.parts_=parts_;
+    for(Part& part:staged.parts_){
+        const auto it=proposed.constFind(part.id);
+        if(it!=proposed.cend())part.drawingSettings=*it;
+    }
+    QStringList lines{QStringLiteral("DRAWING EDGE REVISION REVIEW (geometry checked; no GD&T approval)"),
+                      QStringLiteral("requested_annotations=%1").arg(total)};
+    for(auto it=selection.cbegin();it!=selection.cend();++it){
+        const auto status=staged.drawingSheetSourceStatus(it.key());
+        lines.append(QStringLiteral("sheet=%1; selected=%2; pending_stale_annotations=%3; sheet_current=%4")
+            .arg(it.key()).arg(it.value().size()).arg(status.staleAnnotationIds.size())
+            .arg(status.state==DrawingSourceState::Current?QStringLiteral("YES"):QStringLiteral("NO")));
+    }
+    lines.append(QStringLiteral("changed_sheets=%1; commit=ONE_UNDO; approval=NOT_ISSUED").arg(proposed.size()));
+    *updated=std::move(proposed);
+    if(report)*report=lines.join('\n');
+    if(error)error->clear();return true;
+}
+
+bool SceneDocument::previewDrawingEdgeReviewBatch(
+        const QMap<QString,QStringList>& selection,QString* report,QString* error) const{
+    if(!report){setError(error,"Provide a destination for the read-only drawing review.");return false;}
+    QMap<QString,DrawingSheetSettings> staged;
+    return stageDrawingEdgeReviewBatch(selection,&staged,report,error);
+}
+
+bool SceneDocument::reviewDrawingEdgeReviewBatch(
+        const QMap<QString,QStringList>& selection,QString* report,QString* error){
+    QMap<QString,DrawingSheetSettings> staged;
+    QString stagedReport;
+    if(!stageDrawingEdgeReviewBatch(selection,&staged,&stagedReport,error))return false;
+    if(!staged.isEmpty()){
+        checkpoint();
+        for(Part& part:parts_){
+            auto it=staged.constFind(part.id);
+            if(it!=staged.cend())part.drawingSettings=*it;
+        }
+    }
+    if(report)*report=std::move(stagedReport);
+    if(error)error->clear();return true;
+}
+
+// Sprint 16 project-level review joins the geometry, drawing, sheet-metal and
+// joint-track validators already implemented in the core. It deliberately
+// reports discrete motion-rate limits rather than making a false swept-solid
+// collision guarantee. Failing a single body yields a BLOCK row, not a partial
+// export failure, so the entire actionable register is available to the user.
+bool SceneDocument::buildIntegratedEngineeringReadinessCsv(QByteArray* output,
+        QString* error) const{
+    if(!output||parts_.isEmpty()||parts_.size()>200){
+        setError(error,"A nonempty, bounded CAD document and output buffer are required.");return false;
+    }
+    const auto escapeCsv=[](QString value)->QString{
+        value.replace('\r',QStringLiteral(" "));
+        value.replace('\n',QStringLiteral(" "));
+        if(!value.trimmed().isEmpty()&&
+           QStringLiteral("=+-@\t").contains(value.trimmed().front()))
+            value.prepend(QChar(0x27));
+        value.replace('"',QStringLiteral("\"\""));
+        return QStringLiteral("\"")+value+QStringLiteral("\"");
+    };
+    QString content=QStringLiteral(
+        "CADWorkbench integrated engineering readiness,NOT_ISSUED; HUMAN_SIGNOFF_REQUIRED; MOTION_NOT_CERTIFIED\r\n"
+        "Category,Body ID,Status,Finding,Current revision\r\n");
+    std::size_t blockers=0,reviews=0,checked=0;
+    const auto add=[&](const QString& category,const Part& part,const QString& severity,
+                       const QString& finding){
+        content+=escapeCsv(category)+','+escapeCsv(part.id)+','+escapeCsv(severity)+','+
+                 escapeCsv(finding)+','+escapeCsv(part.geometryToken)+QStringLiteral("\r\n");
+        if(severity==QStringLiteral("BLOCK"))++blockers;
+        else if(severity==QStringLiteral("REVIEW"))++reviews;
+        ++checked;
+    };
+    QVector<const Part*> ordered;
+    ordered.reserve(parts_.size());
+    for(const Part& item:parts_)ordered.append(&item);
+    std::sort(ordered.begin(),ordered.end(),[](const Part* a,const Part* b){return a->id<b->id;});
+    std::size_t sheetCount=0,refoldCount=0,trackCount=0;
+    for(const Part* pointer:ordered){
+        const Part& part=*pointer;
+        QString issue;
+        if(part.shape.IsNull()||!validShape(part.shape,&issue))
+            add(QStringLiteral("GEOMETRY"),part,QStringLiteral("BLOCK"),
+                QStringLiteral("Invalid or missing OCCT geometry: ")+issue);
+        else
+            add(QStringLiteral("GEOMETRY"),part,QStringLiteral("CHECKED"),
+                QStringLiteral("OCCT nominal geometry passes shape validation; real-world accuracy not certified"));
+        if(part.hasDrawingSettings){
+            ++sheetCount;
+            const auto state=drawingSheetSourceStatus(part.id);
+            if(state.state!=DrawingSourceState::Current){
+                add(QStringLiteral("DRAWING"),part,QStringLiteral("BLOCK"),
+                    QStringLiteral("Saved drawing source or annotation is stale; missing sources=%1; stale annotations=%2")
+                        .arg(state.missingSourceBodyIds.size()).arg(state.staleAnnotationIds.size()));
+            }else{
+                QMap<QString,QByteArray> drawings;
+                QMap<QString,DrawingSheetSettings> metadata;
+                QString details;
+                if(!buildSavedDrawingSvgBatch({part.id},&drawings,&metadata,&details,&issue))
+                    add(QStringLiteral("DRAWING"),part,QStringLiteral("BLOCK"),
+                        QStringLiteral("Strict OCCT drawing regeneration failed: ")+issue);
+                else
+                    add(QStringLiteral("DRAWING"),part,QStringLiteral("REVIEW"),
+                        QStringLiteral("Strict drawing regenerated read-only; annotations and exported SVG require human sign-off"));
+            }
+        }
+        if(part.hasFoldedSheetMetalDefinition){
+            ++refoldCount;
+            QByteArray foldedAudit;
+            if(!auditFoldedSheetRefoldGeometry(part.id,&foldedAudit,&issue))
+                add(QStringLiteral("SHEET_METAL"),part,QStringLiteral("BLOCK"),
+                    QStringLiteral("Independent folded OCCT refold/volume check failed: ")+issue);
+            else
+                add(QStringLiteral("SHEET_METAL"),part,QStringLiteral("REVIEW"),
+                    QStringLiteral("Stored/refolded OCCT volume and developed mid-surface checked; tooling and springback unverified"));
+        }
+        if(!part.jointMotionKeyframes.isEmpty()){
+            ++trackCount;
+            const bool revolute=part.assemblyJointType==QStringLiteral("Revolute");
+            const bool prismatic=part.assemblyJointType==QStringLiteral("Prismatic");
+            if(!revolute&&!prismatic){
+                add(QStringLiteral("JOINT_MOTION"),part,QStringLiteral("BLOCK"),
+                    QStringLiteral("Saved motion track is not attached to a supported revolute/prismatic joint"));
+            }else{
+                std::vector<cad::motion::RateKeyframe> frames;
+                frames.reserve(static_cast<std::size_t>(part.jointMotionKeyframes.size()));
+                for(const auto& key:part.jointMotionKeyframes)
+                    frames.push_back({key.timeSeconds,key.value});
+                cad::motion::RateAudit rates;
+                std::string reason;
+                const double low=revolute?part.jointMinimumDegrees:part.jointMinimumMm;
+                const double high=revolute?part.jointMaximumDegrees:part.jointMaximumMm;
+                if(!cad::motion::auditKeyframeRates(frames,low,high,&rates,&reason))
+                    add(QStringLiteral("JOINT_MOTION"),part,QStringLiteral("BLOCK"),
+                        QStringLiteral("Invalid saved joint schedule: ")+QString::fromStdString(reason));
+                else
+                    add(QStringLiteral("JOINT_MOTION"),part,QStringLiteral("REVIEW"),
+                        QStringLiteral("Peak piecewise-linear coordinate rate=%1 %2/s; direction reversals=%3; velocity steps=%4; solid-clearance proof not established")
+                            .arg(rates.maximumAbsoluteRatePerSecond,0,'g',16)
+                            .arg(revolute?QStringLiteral("deg"):QStringLiteral("mm"))
+                            .arg(static_cast<qulonglong>(rates.directionReversals))
+                            .arg(static_cast<qulonglong>(rates.velocityDiscontinuities)));
+            }
+        }
+    }
+    // Reuse the existing mature project audit rather than leaving parametric
+    // history, broken sketch dependencies, feature inspection and mate parents
+    // outside the integrated issue register. Informational findings are not
+    // release blockers; revision-stale histories ARE blockers in this stricter
+    // manufacturing-readiness view, even where the source audit uses Warning.
+    const DocumentAuditReport sourceAudit=runDocumentAudit(*this);
+    for(const auto& finding:sourceAudit.findings){
+        if(finding.severity==AuditSeverity::Information)continue;
+        const Part* body=find(finding.bodyId);
+        if(!body)continue; // project-wide metadata is checked in sourceAudit
+        const bool staleHistory=finding.code==QStringLiteral("PARAMETRIC_STALE")||
+            finding.code==QStringLiteral("FEATURE_TREE_STALE")||
+            finding.code==QStringLiteral("LINKED_SKETCH_STALE")||
+            finding.code==QStringLiteral("SKETCH_STALE")||
+            finding.code==QStringLiteral("FOLDED_DEFINITION_STALE");
+        add(QStringLiteral("MODEL_AUDIT"),*body,
+            finding.severity==AuditSeverity::Error||staleHistory?
+                QStringLiteral("BLOCK"):QStringLiteral("REVIEW"),
+            finding.code+QStringLiteral(": ")+finding.message+
+            (finding.suggestedAction.isEmpty()?QString():
+                 QStringLiteral(" Next: ")+finding.suggestedAction));
+    }
+    if(hasLiveArticulatedNetwork()){
+        const Part* fixed=find(liveArticulatedFixed_);
+        if(fixed)add(QStringLiteral("ARTICULATED_ASSEMBLY"),*fixed,QStringLiteral("REVIEW"),
+            QStringLiteral("Saved connected graph present with %1 mates; verify full motion and physical clearance independently")
+                .arg(liveArticulatedJoints_.size()));
+    }
+    content+=QStringLiteral("SUMMARY,PROJECT,BLOCKED,blockers=%1; human_reviews=%2; records=%3; saved_sheets=%4; folded_parts=%5; motion_tracks=%6; engineering_approval=NOT_ISSUED,\r\n")
+        .arg(static_cast<qulonglong>(blockers))
+        .arg(static_cast<qulonglong>(reviews)).arg(static_cast<qulonglong>(checked))
+        .arg(static_cast<qulonglong>(sheetCount)).arg(static_cast<qulonglong>(refoldCount))
+        .arg(static_cast<qulonglong>(trackCount));
+    const QByteArray complete=content.toUtf8();
+    if(complete.size()>2*1024*1024){
+        setError(error,"Integrated engineering preflight exceeded the 2 MiB report limit.");return false;
+    }
+    *output=complete;
+    if(error)error->clear();
+    return true;
+}
+
+bool SceneDocument::exportIntegratedEngineeringReadinessCsv(const QString& path,
+        QString* error) const {
+    if(path.trimmed().isEmpty()){
+        setError(error,"Choose a destination for the unissued engineering readiness CSV.");return false;
+    }
+    QByteArray report;
+    if(!buildIntegratedEngineeringReadinessCsv(&report,error))return false;
+    QSaveFile saved(path);
+    if(!saved.open(QIODevice::WriteOnly)||saved.write(report)!=report.size()||!saved.commit()){
+        saved.cancelWriting();
+        setError(error,QStringLiteral("Failed to atomically save engineering readiness CSV: %1").arg(saved.errorString()));
+        return false;
+    }
+    if(error)error->clear();return true;
+}
+
+bool SceneDocument::buildDrawingRecoveryCsv(QByteArray* output,QString* error) const{
+    if(!output){setError(error,"Provide a drawing recovery CSV output buffer.");return false;}
+    const auto quote=[](QString value){
+        if(!value.trimmed().isEmpty()&&QStringLiteral("=+-@\t\r").contains(value.trimmed().front()))
+            value.prepend(QChar(0x27));
+        value.replace('"',QStringLiteral("\"\""));
+        return QStringLiteral("\"")+value+QStringLiteral("\"");
+    };
+    QString text=QStringLiteral("CADWorkbench cross-sheet recovery register,NOT ISSUED - ENGINEERING REVIEW REQUIRED\r\n");
+    text+=QStringLiteral("Sheet body ID,Sheet ID,Drawing number,Reference kind,Reference ID,Source body ID,Current geometry revision,Captured geometry revision,Review status\r\n");
+    int total=0;
+    for(const Part& part:parts_){
+        if(!part.hasDrawingSettings)continue;
+        const DrawingSheetSettings& sheet=part.drawingSettings;
+        const auto status=drawingSheetSourceStatus(part.id);
+        const auto append=[&](const QString& kind,const QString& id,const QString& body,
+                              const QString& revision,const QString& state){
+            const Part* source=find(body);
+            text+=quote(part.id)+','+quote(sheet.sheetId)+','+quote(sheet.drawingNumber)+','+
+                quote(kind)+','+quote(id)+','+quote(body)+','+
+                quote(source?source->geometryToken:QStringLiteral("MISSING"))+','+
+                quote(revision)+','+quote(state)+QStringLiteral("\r\n");
+        };
+        const QString aggregate=status.state==DrawingSourceState::Current?
+            QStringLiteral("CURRENT"):QStringLiteral("REVIEW_REQUIRED");
+        append(QStringLiteral("SHEET"),sheet.sheetId,part.id,sheet.sourceGeometryToken,aggregate);
+        ++total;
+        for(const auto& edge:sheet.edgeDimensionAnnotations){
+            const Part* source=find(edge.sourceBodyId);
+            const bool stale=!source||source->geometryToken!=edge.sourceGeometryToken;
+            append(QStringLiteral("EDGE_DIMENSION"),edge.id,edge.sourceBodyId,edge.sourceGeometryToken,
+                   stale?QStringLiteral("REVIEW_REQUIRED"):QStringLiteral("TOKEN_CURRENT_GEOMETRY_NOT_RECHECKED"));
+            ++total;
+        }
+        for(const auto& frame:sheet.gdtFrames){
+            const Part* source=find(frame.sourceBodyId);
+            const bool stale=!source||source->geometryToken!=frame.sourceGeometryToken;
+            append(QStringLiteral("GD_AND_T"),frame.id,frame.sourceBodyId,frame.sourceGeometryToken,
+                   stale?QStringLiteral("REVIEW_REQUIRED"):QStringLiteral("TOKEN_CURRENT_HUMAN_REVIEW_REQUIRED"));
+            ++total;
+        }
+        if(total>20000){setError(error,"Drawing recovery register exceeds 20000 reference records.");return false;}
+    }
+    *output=text.toUtf8();if(error)error->clear();return true;
+}
+
+bool SceneDocument::exportDrawingRecoveryCsv(const QString& path,QString* error) const{
+    if(path.trimmed().isEmpty()){setError(error,"Select a drawing recovery CSV filename.");return false;}
+    QByteArray content;
+    if(!buildDrawingRecoveryCsv(&content,error))return false;
+    QSaveFile file(path);
+    if(!file.open(QIODevice::WriteOnly)||file.write(content)!=content.size()||!file.commit()){
+        setError(error,QStringLiteral("Could not atomically export drawing recovery CSV: %1").arg(file.errorString()));return false;
+    }
+    if(error)error->clear();return true;
+}
+
+bool SceneDocument::buildSavedDrawingSvgBatch(
+        const QStringList& sheetOwnerIds,QMap<QString,QByteArray>* svgByOwner,
+        QMap<QString,DrawingSheetSettings>* preparedByOwner,
+        QString* report,QString* error) const{
+    if(!svgByOwner||!preparedByOwner||svgByOwner==nullptr||preparedByOwner==nullptr||
+       sheetOwnerIds.isEmpty()||sheetOwnerIds.size()>12){
+        setError(error,"Select 1-12 saved drawing owners and distinct output maps.");return false;
+    }
+    QStringList owners=sheetOwnerIds;
+    owners.sort();
+    if(std::adjacent_find(owners.cbegin(),owners.cend())!=owners.cend()){
+        setError(error,"Drawing regeneration batch has duplicate sheet-owner IDs.");return false;
+    }
+    QMap<QString,QByteArray> generated;
+    QMap<QString,DrawingSheetSettings> staged;
+    QStringList lines{QStringLiteral("READ-ONLY LINKED DRAWING REGENERATION BATCH"),
+                      QStringLiteral("human_review=REQUIRED; drawing_issue=NOT_ISSUED")};
+    qsizetype totalBytes=0;
+    for(const QString& ownerId:owners){
+        const Part* owner=find(ownerId);
+        if(!owner||!owner->hasDrawingSettings){
+            setError(error,QStringLiteral("No saved drawing sheet for owner '%1'.").arg(ownerId));return false;
+        }
+        DrawingSheetSettings next=owner->drawingSettings;
+        QStringList ids=next.sourceBodyIds;
+        if(ids.isEmpty())ids<<ownerId;
+        ids.sort();
+        if(ids.size()>50||std::adjacent_find(ids.cbegin(),ids.cend())!=ids.cend()){
+            setError(error,"A drawing batch source set exceeds 50 bodies or has duplicate IDs.");return false;
+        }
+        QVector<Part> sources;sources.reserve(ids.size());
+        for(const QString& id:ids){
+            const Part* body=find(id);
+            if(!body){setError(error,QStringLiteral("Missing drawing source: %1").arg(id));return false;}
+            sources.append(*body);
+        }
+        // Neither a full sheet refresh nor a fresh SVG should silently
+        // approve stale individually witnessed edges or datum annotations.
+        for(const auto& edge:next.edgeDimensionAnnotations){
+            const Part* source=find(edge.sourceBodyId);
+            if(!source||source->geometryToken!=edge.sourceGeometryToken){
+                setError(error,QStringLiteral("Sheet %1: edge %2 is stale. Review its geometric witness first.")
+                    .arg(ownerId,edge.id));return false;
+            }
+            QString issue;
+            if(!validateDrawingEdgeDimensionPreview(*source,edge,&issue)){
+                setError(error,QStringLiteral("Sheet %1: invalid edge %2: %3")
+                    .arg(ownerId,edge.id,issue));return false;
+            }
+        }
+        for(const auto& gdt:next.gdtFrames){
+            const Part* source=find(gdt.sourceBodyId);
+            if(!source||source->geometryToken!=gdt.sourceGeometryToken){
+                setError(error,QStringLiteral("Sheet %1: GD&T %2 is stale and requires independent review.")
+                    .arg(ownerId,gdt.id));return false;
+            }
+        }
+        Part composite;
+        QString issue;
+        if(!buildDrawingAssemblyPart(sources,&composite,&issue)){
+            setError(error,issue);return false;
+        }
+        next.sourceBodyIds=ids;
+        next.sourceGeometryToken=composite.geometryToken;
+        next.sourceDataToken=drawingSourceDataToken(ids,&issue);
+        if(!issue.isEmpty()){setError(error,issue);return false;}
+        DrawingSheetSettings prepared;
+        if(!prepareDrawingSheetSettings(ownerId,next,&prepared,&issue)){
+            setError(error,issue);return false;
+        }
+        const auto projection=prepared.projection==QStringLiteral("First-angle")?
+            OrthographicProjection::FirstAngle:OrthographicProjection::ThirdAngle;
+        const auto size=prepared.sheetSize==QStringLiteral("A3")?
+            DrawingSheetSize::A3Landscape:DrawingSheetSize::A4Landscape;
+        const auto auxiliary=prepared.auxiliaryView==QStringLiteral("Section A-A")?
+            DrawingAuxiliaryView::SectionA:DrawingAuxiliaryView::Isometric;
+        const DrawingTitleBlock title{prepared.drawingNumber,prepared.drawnBy,
+           prepared.checkedBy,prepared.issueDate,prepared.revision};
+        const auto bom=billOfMaterials(ids,&issue);
+        if(!issue.isEmpty()){setError(error,issue);return false;}
+        QByteArray svg;
+        if(!buildOrthographicDrawingSvg(composite,&svg,&issue,nullptr,nullptr,nullptr,
+            projection,size,auxiliary,prepared.sectionDepthFraction,
+            prepared.generalNotes,title,prepared.viewCenters,prepared.viewIds,
+            prepared.sheetId,prepared.noteAnnotations,prepared.dimensionAnnotations,
+            prepared.partsListAnnotation,bom,ids,prepared.balloonAnnotations,
+            prepared.detailAnnotations,prepared.sectionAnnotations,
+            prepared.edgeDimensionAnnotations,sources,prepared.gdtFrames)){
+            setError(error,QStringLiteral("Sheet %1 failed to regenerate: %2")
+                .arg(ownerId,issue));return false;
+        }
+        totalBytes+=svg.size();
+        if(svg.isEmpty()||totalBytes>32*1024*1024){
+            setError(error,"Linked drawing SVG batch is empty or exceeds the 32 MiB budget.");return false;
+        }
+        lines<<QStringLiteral("owner=%1; sheet=%2; source_bodies=%3; svg_bytes=%4; GD&T=NOT_APPROVED")
+            .arg(ownerId,prepared.sheetId).arg(ids.size()).arg(svg.size());
+        generated.insert(ownerId,std::move(svg));
+        staged.insert(ownerId,std::move(prepared));
+    }
+    *svgByOwner=std::move(generated);
+    *preparedByOwner=std::move(staged);
+    if(report)*report=lines.join('\n');
+    if(error)error->clear();
+    return true;
+}
+
+bool SceneDocument::exportSavedDrawingSvgBatch(const QStringList& sheetOwnerIds,
+        const QString& newDirectory,QString* report,QString* error) const{
+    if(newDirectory.trimmed().isEmpty()){
+        setError(error,"Provide a new, nonexisting drawing export directory.");return false;
+    }
+    const QFileInfo destination(newDirectory);
+    if(destination.exists()||!QDir(destination.absolutePath()).exists()){
+        setError(error,"The drawing destination must not exist and its parent must exist.");return false;
+    }
+    QMap<QString,QByteArray> generated;
+    QMap<QString,DrawingSheetSettings> metadata;
+    QString nextReport;
+    if(!buildSavedDrawingSvgBatch(sheetOwnerIds,&generated,&metadata,&nextReport,error))return false;
+    QTemporaryDir staging(destination.absolutePath()+QStringLiteral("/.cad_drawings_staging_XXXXXX"));
+    if(!staging.isValid()){
+        setError(error,"Cannot create a same-filesystem drawing staging directory.");return false;
+    }
+    QByteArray index("Sheet,Owner,Source revision,SHA256,Status\r\n");
+    int count=0;
+    for(auto it=generated.cbegin();it!=generated.cend();++it){
+        const QString filename=QStringLiteral("sheet-%1.svg").arg(++count,3,10,QChar('0'));
+        QSaveFile file(staging.filePath(filename));
+        if(!file.open(QIODevice::WriteOnly)||file.write(it.value())!=it.value().size()||!file.commit()){
+            setError(error,"Could not write the full regenerated drawing set.");return false;
+        }
+        const auto digest=QCryptographicHash::hash(it.value(),QCryptographicHash::Sha256).toHex();
+        // Use safe numeric filenames: user-authored labels never enter paths.
+        const QString row=QStringLiteral("%1,%2,%3,%4,NOT_ISSUED\r\n")
+            .arg(filename,it.key(),metadata.value(it.key()).sourceGeometryToken,
+                 QString::fromLatin1(digest));
+        // Source tokens and UUIDs are system-generated, but CSV-formula
+        // safety is still required for arbitrary imported owner identities.
+        if(it.key().contains(',')||it.key().contains('\n')||it.key().contains('\r')||
+           QStringLiteral("=+-@").contains(it.key().left(1))){
+            setError(error,"An unsafe drawing-owner identity cannot be exported in CSV.");return false;
+        }
+        index+=row.toUtf8();
+    }
+    QSaveFile manifest(staging.filePath(QStringLiteral("DRAWING_BATCH_INDEX.csv")));
+    if(!manifest.open(QIODevice::WriteOnly)||manifest.write(index)!=index.size()||!manifest.commit()){
+        setError(error,"Could not finalize drawing batch index.");return false;
+    }
+    // Directory rename publishes every exported sheet together. A partial
+    // set is never placed in the final destination on failed rendering/write.
+    if(QFileInfo::exists(newDirectory)||!QDir().rename(staging.path(),destination.absoluteFilePath())){
+        setError(error,"Could not atomically publish the new drawing directory.");return false;
+    }
+    if(report)*report=std::move(nextReport);
     if(error)error->clear();
     return true;
 }
@@ -7575,11 +8322,11 @@ bool SceneDocument::previewNamedParameterBatch(
         if(it.value().isEmpty()){
             setError(error,QString("No dimensions were supplied for body %1.").arg(it.key()));return false;
         }
-        QString issue;
-        if(!staged.setNamedParameters(it.key(),it.value(),&issue)){
-            setError(error,QString("Batch source %1 failed: %2").arg(it.key(),issue));return false;
-        }
     }
+    if(changes.size()==1){
+        const auto it=changes.cbegin();
+        if(!staged.setNamedParameters(it.key(),it.value(),error))return false;
+    }else if(!staged.setCoordinatedParametricRevision(changes,{},error))return false;
     int rebuilt=0;
     for(const Part& before:parts_){
         const Part* after=staged.find(before.id);
@@ -7604,24 +8351,23 @@ bool SceneDocument::previewNamedParameterBatch(
 
 bool SceneDocument::setNamedParameterBatch(
         const QMap<QString,QMap<QString,double>>& changes,QString* error){
-    QString checked;
-    if(!previewNamedParameterBatch(changes,&checked,error))return false;
-    SceneDocument staged=*this;
+    if(changes.isEmpty()||changes.size()>12){
+        setError(error,"Select 1-12 parametric bodies for a single coordinated commit.");return false;
+    }
     for(auto it=changes.cbegin();it!=changes.cend();++it){
-        if(!staged.setNamedParameters(it.key(),it.value(),error))return false;
+        if(it.value().isEmpty()){
+            setError(error,QString("No dimensions were supplied for body %1.").arg(it.key()));return false;
+        }
     }
-    bool different=false;
-    for(const Part& current:parts_){
-        const Part* next=staged.find(current.id);
-        if(!next){setError(error,"Parametric batch lost an original scene body.");return false;}
-        if(current.geometryToken!=next->geometryToken||
-           current.namedParameterFormulas!=next->namedParameterFormulas||
-           current.namedParameters!=next->namedParameters){different=true;break;}
+    // Before Sprint 14, this path could rebuild every dependency cone twice
+    // for preview and twice for commit. An N-source edit could also fail on a
+    // transient intermediate solid. Reuse the already-transactional FINAL-
+    // STATE regeneration, with one dependent propagation and one undo step.
+    if(changes.size()==1){
+        const auto it=changes.cbegin();
+        return setNamedParameters(it.key(),it.value(),error);
     }
-    if(!different){if(error)error->clear();return true;}
-    checkpoint();
-    parts_=std::move(staged.parts_);
-    if(error)error->clear();return true;
+    return setCoordinatedParametricRevision(changes,{},error);
 }
 
 bool SceneDocument::evaluateParametricDesignAlternatives(
@@ -7708,6 +8454,70 @@ bool SceneDocument::evaluateParametricDesignAlternatives(
     }
     *results=std::move(stagedResults);
     if(error)error->clear();return true;
+}
+
+QString SceneDocument::designGeometryFingerprint() const{
+    // A candidate depends on the source parameter/formula graph AS WELL AS the
+    // visible B-rep. Formula-only changes can leave a geometry token equal;
+    // they still invalidate an earlier engineering design-choice evaluation.
+    QVector<const Part*> ordered;ordered.reserve(parts_.size());
+    for(const Part& part:parts_)ordered.append(&part);
+    std::sort(ordered.begin(),ordered.end(),[](const Part* a,const Part* b){return a->id<b->id;});
+    QJsonArray bodies;
+    for(const Part* part:ordered){
+        QJsonObject record;
+        record.insert(QStringLiteral("id"),part->id);
+        record.insert(QStringLiteral("geometry"),part->geometryToken);
+        record.insert(QStringLiteral("parametric_geometry"),part->parametricGeometryToken);
+        record.insert(QStringLiteral("current_configuration"),part->activeDesignConfiguration);
+        QJsonObject dimensions,formulas,links;
+        for(auto it=part->namedParameters.cbegin();it!=part->namedParameters.cend();++it)
+            dimensions.insert(it.key(),it.value());
+        for(auto it=part->namedParameterFormulas.cbegin();it!=part->namedParameterFormulas.cend();++it)
+            formulas.insert(it.key(),it.value());
+        for(auto it=part->parameterLinks.cbegin();it!=part->parameterLinks.cend();++it){
+            QJsonObject link;
+            link.insert(QStringLiteral("source"),it.value().source);
+            link.insert(QStringLiteral("scale"),it.value().scale);
+            link.insert(QStringLiteral("offset"),it.value().offset);
+            links.insert(it.key(),link);
+        }
+        QJsonArray suppressed;
+        for(const QString& feature:part->suppressedParametricFeatures)suppressed.append(feature);
+        record.insert(QStringLiteral("parameters"),dimensions);
+        record.insert(QStringLiteral("formulas"),formulas);
+        record.insert(QStringLiteral("links"),links);
+        record.insert(QStringLiteral("suppressed"),suppressed);
+        bodies.append(record);
+    }
+    return QString::fromLatin1(QCryptographicHash::hash(
+        QJsonDocument(bodies).toJson(QJsonDocument::Compact),QCryptographicHash::Sha256).toHex());
+}
+
+bool SceneDocument::applyParametricDesignAlternative(
+        const ParametricDesignAlternative& selected,
+        const QString& expectedGeometryFingerprint,QString* error){
+    if(selected.label.trimmed().isEmpty()||selected.changes.isEmpty()||
+       selected.changes.size()>12){
+        setError(error,"Select a named design alternative affecting 1-12 parametric bodies.");return false;
+    }
+    if(expectedGeometryFingerprint.isEmpty()||
+       expectedGeometryFingerprint!=designGeometryFingerprint()){
+        setError(error,"The design changed after this alternative was evaluated. Re-evaluate before applying.");return false;
+    }
+    for(auto it=selected.changes.cbegin();it!=selected.changes.cend();++it){
+        if(it.value().isEmpty()){
+            setError(error,"Every selected body must have at least one proposed dimension.");return false;
+        }
+    }
+    // One checked commit against the final state, not another independent
+    // interpretation of the candidate preview. All linked dependents are
+    // staged by the existing coordinated parametric regeneration engine.
+    if(selected.changes.size()==1){
+        const auto it=selected.changes.cbegin();
+        return setNamedParameters(it.key(),it.value(),error);
+    }
+    return setCoordinatedParametricRevision(selected.changes,{},error);
 }
 
 QStringList SceneDocument::suppressedParametricFeatures(const QString& partId) const {

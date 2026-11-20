@@ -1,0 +1,15 @@
+CADWorkbench Sprint 14 — Local Source Verification (2026-11-17)
+Release state: PRELIMINARY SOURCE; not yet compiled with MSVC/Qt/OpenCascade.
+Baseline preserved: Sprint 11 Windows app + 130/130 CTests + 952/952 Python tests.
+
+Python/source/OCP reference regression: 1030 tests, OK.
+GCC portable C++ executable suites: 42, PASS.
+Clang portable C++ executable suites: 42, PASS (independent replay).
+Static source audit: PASS; 130 native CTest registrations unchanged.
+Native Sprint 14 end-to-end CTests: NOT RUN on Windows.
+Sprint 14 CADWorkbench.exe MSVC build: NOT RUN.
+Manual acceptance scenarios: 0/60 formally verified.
+
+The Python test output contains deliberately exercised invalid-measurement fixture
+text prefixed 'FAIL:'; unittest's final aggregate is OK. This is not an actual
+failed test. No real production or standards certification is implied.

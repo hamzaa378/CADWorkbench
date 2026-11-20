@@ -1,24 +1,24 @@
-# Upload CADWorkbench Sprint 11 to GitHub
+# Upload CADWorkbench Sprint 14 to GitHub
 
 ## Which files to upload
 
-Upload the **contents of this `CADWorkbench` folder** as the root of **one repository**. Do not upload older Sprint 3–10 ZIPs into the repository; Sprint 11 is the consolidated full source, including prior work. The `src/`, `tests/`, `tools/`, `scripts/`, `docs/`, `.github/`, `qa/` and older engineering handover folders are preserved in the archive. Include `CMakeLists.txt`, `vcpkg.json`, the SHA-256 manifests, `.gitignore` and `.gitattributes`.
+Upload the **contents of this `CADWorkbench` folder** as the root of **one repository**. Do not upload older Sprint 3–10 ZIPs into the repository; Sprint 14 is the consolidated full source, including prior work. The `src/`, `tests/`, `tools/`, `scripts/`, `docs/`, `.github/`, `qa/` and older engineering handover folders are preserved in the archive. Include `CMakeLists.txt`, `vcpkg.json`, the SHA-256 manifests, `.gitignore` and `.gitattributes`.
 
-The archive intentionally excludes `build/`, compiled executable/DLLs, local `vcpkg_installed/`, virtual environments and personal audit logs. These are local machine outputs, not distributable source. **Keep the already-verified Windows Sprint 11 build and audit log outside GitHub** as rollback evidence until a fresh checkout is confirmed.
+The archive intentionally excludes `build/`, compiled executable/DLLs, local `vcpkg_installed/`, virtual environments and personal audit logs. These are local machine outputs, not distributable source. **Keep the Windows-verified Sprint 11 baseline build and audit log outside GitHub** as rollback evidence until a fresh checkout is confirmed.
 
 ## Recommended: push with Git (fresh Windows PowerShell)
 
-Extract `CADWorkbench_v170_Sprint11_GitHub_Ready_SOURCE_20261117.zip` in Downloads. In a fresh PowerShell session:
+Extract `CADWorkbench_v170_Sprint14_CoordinatedCAD_Integration_GitHub_Source_PRELIMINARY_20261117.zip` in Downloads. In a fresh PowerShell session:
 
 ```powershell
-Set-Location "$env:USERPROFILE\Downloads\CADWorkbench_v170_Sprint11_GitHub_Ready_SOURCE_20261117\CADWorkbench"
+Set-Location "$env:USERPROFILE\Downloads\CADWorkbench_Sprint14_GitHub\CADWorkbench"
 
 # Make sure Git for Windows is installed and you have configured your identity.
 git --version
 git init -b main
 git add .
 git status --short
-git commit -m "CADWorkbench v1.70 Sprint 11 verified source baseline"
+git commit -m "CADWorkbench v1.70 Sprint 14 preliminary integration source"
 
 # FIRST create an empty GitHub repository through github.com/new.
 # Choose no auto-generated README, .gitignore or license.

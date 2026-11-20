@@ -1,5 +1,6 @@
 #include "SheetMetal.h"
 #include "FoldedContourTopology.h"
+#include "RefoldGeometryAudit.h"
 
 #include <QSaveFile>
 #include <QTextStream>
@@ -99,6 +100,15 @@ bool buildFoldedSheetOutline(const QVector<double>& flanges,double sheetWidth,do
     if(!detail::simpleClosedContour(contour,&crossedEdges))
         return fail(error,QStringLiteral("Folded sheet profile overlaps, self-intersects, or collapses (contour edges %1 and %2). Adjust flange lengths, bend radii, angles, or thickness.")
             .arg(static_cast<int>(crossedEdges.first+1)).arg(static_cast<int>(crossedEdges.second+1)));
+    // Independent flattened-mid-surface versus folded-polygon conservation.
+    // The 2-D polygon is a *necessary* geometry check, not a 3-D refold proof.
+    std::vector<double> straight(flanges.cbegin(),flanges.cend());
+    std::vector<refold::Bend> turns;turns.reserve(bends.size());
+    for(const auto& bend:bends)turns.push_back({bend.angleDegrees,bend.insideRadiusMm});
+    refold::Audit conservation;std::string conservationIssue;
+    if(!refold::inspect(straight,thickness,sheetWidth,turns,contour,&conservation,&conservationIssue))
+        return fail(error,QStringLiteral("Folded refold consistency: %1")
+            .arg(QString::fromStdString(conservationIssue)));
     *outline=std::move(result);return true;
 }
 

@@ -48,19 +48,22 @@ class RevisionRecovery(unittest.TestCase):
         self.assertIn('bool SceneDocument::reviewDrawingEdgeDimension(',SCENE)
 
     def test_review_checks_both_identity_and_measured_projection(self):
-        review=SCENE.split('bool SceneDocument::reviewDrawingEdgeDimension(',1)[1].split(
-            'bool SceneDocument::setInterleavedFeatureHistory(',1)[0]
+        # Sprint 14 shares one kernel verifier between the original single-
+        # reference review and the atomic multi-sheet review. Keep checking
+        # the actual witness and projection, not their former code location.
+        helper=SCENE.split('bool prepareReviewedDrawingEdge(',1)[1].split(
+            'bool SceneDocument::reviewDrawingEdgeDimension(',1)[0]
         for token in ('original.edgeAnchor.isEmpty()',
-                      'resolveStableEdgeAnchor(source->shape,original.edgeAnchor',
+                      'resolveStableEdgeAnchor(source.shape,original.edgeAnchor',
                       'resolveResizedFullCircleForDrawing(',
-                      'validateDrawingEdgeDimensionPreview(*source,reviewed,',
-                      'reviewed.sourceGeometryToken=source->geometryToken;'):
-            with self.subTest(token=token): self.assertIn(token,review)
+                      'validateDrawingEdgeDimensionPreview(source,reviewed,',
+                      'reviewed.sourceGeometryToken=source.geometryToken;'):
+            with self.subTest(token=token): self.assertIn(token,helper)
 
     def test_failure_is_before_checkpoint(self):
         review=SCENE.split('bool SceneDocument::reviewDrawingEdgeDimension(',1)[1].split(
-            'bool SceneDocument::setInterleavedFeatureHistory(',1)[0]
-        self.assertLess(review.index('validateDrawingEdgeDimensionPreview'),review.index('checkpoint();'))
+            'bool SceneDocument::stageDrawingEdgeReviewBatch(',1)[0]
+        self.assertLess(review.index('prepareReviewedDrawingEdge('),review.index('checkpoint();'))
         self.assertLess(review.index('checkpoint();'),review.index('parts_=std::move(staged)'))
         self.assertIn('return false;',review)
 

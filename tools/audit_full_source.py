@@ -116,7 +116,7 @@ def inspect(root:Path)->dict:
         problems.append(f'Cannot parse portable test registry: {exc}')
     metrics['warnings']=[
         'This audit is STATIC only: Windows MSVC/Qt/OCCT compile, 130 native CTests and manual acceptance remain independent gates.',
-        'A large GUI translation unit remains intentionally unchanged under the UI feature freeze.',
+        'The large GUI translation unit is a maintainability and MSVC build risk; newly connected commands need native verification.',
     ]
     return {'status':'PASS_STATIC_SOURCE_INTEGRITY' if not problems else 'FAIL_STATIC_SOURCE_INTEGRITY',
             **metrics,'problems':problems}

@@ -24,11 +24,13 @@ SOURCES=(
     "stock_material_compatibility_portable_tests.cpp",
     "joint_drive_coupling_portable_tests.cpp",
     "joint_motion_interpolation_portable_tests.cpp",
+    "joint_keyframe_rate_audit_portable_tests.cpp",
     "stock_contour_metrics_portable_tests.cpp",
     "stock_contour_nesting_portable_tests.cpp",
     "simultaneous_proximity_portable_tests.cpp",
     "articulated_frame_euler_portable_tests.cpp",
     "folded_contour_topology_portable_tests.cpp",
+    "refold_geometry_audit_portable_tests.cpp",
     "manufacturing_hole_patterns_portable_tests.cpp",
     # The real model-dependency DAG and its causal rebuild trace are kernel-
     # independent but split across a .h/.cpp pair, so compile both here.
@@ -63,6 +65,9 @@ SOURCES=(
     "rigid_motion_speed_bound_portable_tests.cpp",
     "hole_inspection_workflow_portable_tests.cpp",
     "order_invariant_swept_portable_tests.cpp",
+    "hole_revision_impact_portable_tests.cpp",
+    "drawing_revision_impact_portable_tests.cpp",
+    "linked_flat_development_audit_portable_tests.cpp",
 )
 
 def main():

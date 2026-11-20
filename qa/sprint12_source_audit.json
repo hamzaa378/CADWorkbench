@@ -1,0 +1,17 @@
+{
+  "status": "PASS_STATIC_SOURCE_INTEGRITY",
+  "files_scanned": 420,
+  "lines_scanned": 87072,
+  "cpp_files": 136,
+  "python_files": 189,
+  "powershell_files": 8,
+  "portable_regressions": 41,
+  "native_ctest_registrations": 130,
+  "largest_cpp_file": "src/core/SceneDocument.cpp",
+  "largest_cpp_lines": 13909,
+  "warnings": [
+    "This audit is STATIC only: Windows MSVC/Qt/OCCT compile, 130 native CTests and manual acceptance remain independent gates.",
+    "A large GUI translation unit remains intentionally unchanged under the UI feature freeze."
+  ],
+  "problems": []
+}

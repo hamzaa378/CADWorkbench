@@ -507,6 +507,52 @@ void run(){
     check(reloadedRebind.refreshLiveArticulatedNetwork(&error),
           "reloaded rebound graph did not resolve");
 
+    // Sprint 15: two mate-definition changes form one graph solve, one
+    // geometry update and one undo record. Reject malformed batch atomically.
+    const auto beforeBatch=rebindScene.liveArticulatedJointDefinitions();
+    const auto beforeBatchToken=rebindScene.find(rebindIds[1])->geometryToken;
+    QMap<int,J> mateEdits;
+    J editedFirst=beforeBatch[0],editedSecond=beforeBatch[1];
+    editedFirst.childAtZero.translation={15,0,0};
+    editedSecond.childAtZero.translation={0,16,0};
+    mateEdits.insert(0,editedFirst);mateEdits.insert(1,editedSecond);
+    QString mateReport="keep report";
+    check(rebindScene.previewLiveArticulatedJointDefinitionBatch(mateEdits,
+          &mateReport,&error),"multi-joint definition preview");
+    check(mateReport.contains("ATOMIC ARTICULATED MATE-DEFINITION")&&
+          rebindScene.find(rebindIds[1])->geometryToken==beforeBatchToken,
+          "mate batch preview modified live geometry");
+    const auto preservedReport=mateReport;
+    QMap<int,J> badMates=mateEdits;
+    badMates.insert(3,editedFirst);
+    check(!rebindScene.previewLiveArticulatedJointDefinitionBatch(badMates,
+          &mateReport,&error)&&mateReport==preservedReport,
+          "out-of-range mate index or failed preview clobbered report");
+    check(!rebindScene.replaceLiveArticulatedJointDefinitionBatch(badMates,&error)&&
+          rebindScene.find(rebindIds[1])->geometryToken==beforeBatchToken,
+          "invalid multi-joint batch partially modified geometry");
+    check(rebindScene.replaceLiveArticulatedJointDefinitionBatch(mateEdits,&error),
+          "commit linked mate definition batch");
+    check(rebindScene.liveArticulatedJointDefinitions()[0].childAtZero.translation.x==15&&
+          rebindScene.liveArticulatedJointDefinitions()[1].childAtZero.translation.y==16,
+          "mate batch did not persist both joint frames");
+    const auto afterBatchToken=rebindScene.find(rebindIds[1])->geometryToken;
+    check(rebindScene.undo()&&
+          rebindScene.find(rebindIds[1])->geometryToken==beforeBatchToken&&
+          rebindScene.liveArticulatedJointDefinitions()[0].childAtZero.translation.x==0,
+          "batch undo failed to restore both joint definitions and solid");
+    check(rebindScene.redo()&&
+          rebindScene.find(rebindIds[1])->geometryToken==afterBatchToken&&
+          rebindScene.liveArticulatedJointDefinitions()[1].childAtZero.translation.y==16,
+          "batch redo failed to restore joint definitions and solid");
+    const QString batchPath=temp.path()+"/two-mates.cadscene";
+    check(rebindScene.saveAs(batchPath,&error),"save multi-joint edit");
+    cad::SceneDocument reopenedBatch;
+    check(reopenedBatch.load(batchPath,&error)&&
+          reopenedBatch.liveArticulatedJointDefinitions()[1].childAtZero.translation.y==16&&
+          reopenedBatch.refreshLiveArticulatedNetwork(&error),
+          "multi-joint edit not preserved after save/reopen");
+
     QFile original(liveFile);check(original.open(QIODevice::ReadOnly),"read saved articulated scene");
     QJsonObject archive=QJsonDocument::fromJson(original.readAll()).object();original.close();
     QJsonObject network=archive.value("live_articulated_mates").toObject();

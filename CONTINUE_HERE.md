@@ -1,3 +1,7 @@
+## Current checkpoint update — 2026-11-18
+
+Continue from **Sprint 16 Windows-verified** (130/130 native CTests, 1,050/1,050 Python tests) and the **Sprint 17 source-only UI automation add-on** documented in `SPRINT17_CONTINUATION_20261118.md`. No Sprint 17 VM UIA regression results exist yet. The 60 manual acceptance scenarios remain unapproved. Older checkpoint notes below are historical.
+
 > **CURRENT SOURCE AND VERIFICATION, 2026-11-17:** Start with [`README.md`](README.md) and [`LATEST_VERIFIED_BASELINE.md`](LATEST_VERIFIED_BASELINE.md). Sprint 11 builds on Windows, 130/130 native CTests and 952/952 Python/source checks passed. Manual engineering acceptance remains 0/60. The historical notes below have been superseded for current build status.
 
 ---

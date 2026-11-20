@@ -1,3 +1,7 @@
+## Current checkpoint update — 2026-11-18
+
+The latest **user-Windows-verified automated baseline is Sprint 16** (MSVC Release GUI compilation, 130/130 native CTests and 1,050/1,050 Python/source tests). Sprint 17 is a source-only UI automation add-on with 1,075/1,075 local Python tests; its VM GUI runs are pending. All 60 formal manual engineering acceptance scenarios remain pending. Earlier Sprint 11 baselines below are historical.
+
 # Verified CADWorkbench checkpoint — 17 November 2026
 
 **Source:** `CADWorkbench_v170_BackendSprint11_EngineeringWorkflow_COMBINED_PRELIMINARY_20261117.zip`, repackaged for GitHub. Project version `1.70.0`, Sprint 11, full consolidated source.

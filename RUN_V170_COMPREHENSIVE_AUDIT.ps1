@@ -6,6 +6,7 @@ param(
     [int]$Parallel = 4
 )
 $ErrorActionPreference='Stop'
+$env:PYTHONUTF8='1'  # Explicit UTF-8 when Python launches from Windows PowerShell 5.1.
 Set-StrictMode -Version Latest
 if($Parallel -lt 1 -or $Parallel -gt 16){throw 'Parallel must be between 1 and 16.'}
 $root=Split-Path -Parent $MyInvocation.MyCommand.Path

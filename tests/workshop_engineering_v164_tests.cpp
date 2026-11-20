@@ -2,6 +2,7 @@
 #include "core/AssemblyToleranceBudget.h"
 #include "core/HolePositionInspection.h"
 #include "core/HoleInspectionWorkflow.h"
+#include "core/HoleRevisionImpact.h"
 #include <cmath>
 #include <iostream>
 #include <limits>
@@ -181,6 +182,34 @@ void revisionBoundHoleWorkflows(){
     expect(!reviewRevisionBoundHoleMeasurements(design,{first},&report,&issue),
            "incomplete inspection is rejected, not silently approved");
 }
+void holeRevisionWorkflows(){
+    using namespace cad::inspection;
+    std::string issue;
+    const std::vector<DesignHoleReference> old={
+        {"BRACKET","geometry-7",1,10,20,5},
+        {"BRACKET","geometry-7",2,30,20,5}};
+    auto next=old;
+    HoleRevisionImpact result;
+    expect(compareDesignHoleRevisions(old,next,&result,&issue),
+           "same CAD hole references must compare");
+    expect(result.referenceMatches==2&&!result.evidenceApproval,
+           "unchanged reference does not approve existing metrology");
+    next[0].geometryToken="geometry-8";
+    expect(compareDesignHoleRevisions(old,next,&result,&issue),
+           "changing source revision must compare");
+    expect(result.changed==1&&result.referenceMatches==1&&
+           result.records.front().freshMeasurementRequired,
+           "geometry revision invalidates hole measurement evidence");
+    next.push_back({"BRACKET","geometry-8",3,40,20,5});
+    expect(compareDesignHoleRevisions(old,next,&result,&issue)&&result.added==1,
+           "new engineering hole requires measurement");
+    const auto previous=result;
+    next[0].nominalXmm=std::numeric_limits<double>::quiet_NaN();
+    expect(!compareDesignHoleRevisions(old,next,&result,&issue),
+           "nonfinite nominal geometry must be rejected");
+    expect(result.records.size()==previous.records.size()&&result.added==previous.added,
+           "invalid revision cannot overwrite earlier evidence");
+}
 void tolerances(){
     ToleranceResult r;std::string err;
     const std::vector<ToleranceTerm> terms={{"housing",20,-0.05,0.05,1},
@@ -209,7 +238,7 @@ int main(int argc,char** argv){
     const std::string name=argc>1?argv[1]:"all";
     if(name=="all"||name=="sections")sections();
     if(name=="all"||name=="machining")machining();
-    if(name=="all"||name=="tolerances"){tolerances();verifyManufacturingFitBudget();holePositionInspection();revisionBoundHoleWorkflows();}
+    if(name=="all"||name=="tolerances"){tolerances();verifyManufacturingFitBudget();holePositionInspection();revisionBoundHoleWorkflows();holeRevisionWorkflows();}
     if(checks==0){std::cerr<<"Unknown test suite\n";return 2;}
     std::cout<<(checks-failed)<<"/"<<checks<<" workshop checks passed\n";
     return failed?1:0;

@@ -22,6 +22,7 @@ add_library(cadcore STATIC
     src/core/RigidMotionSpeedBound.h
     src/core/HolePositionInspection.h
     src/core/HoleInspectionWorkflow.h
+    src/core/HoleRevisionImpact.h
     src/core/StockSheetLayout.h
     src/core/StockMaterialCompatibility.h
     src/core/AdaptiveMotionScan.cpp
@@ -46,6 +47,7 @@ add_library(cadcore STATIC
     src/core/DrillingFeasibility.cpp
     src/core/DrawingDxf.cpp
     src/core/SheetMetal.h
+    src/core/LinkedFlatDevelopmentAudit.h
     src/core/FoldedContourTopology.h
     src/core/SheetMetal.cpp
     src/core/SurfaceModeling.h
@@ -65,6 +67,7 @@ add_library(cadcore STATIC
     src/core/ToleranceRescuePlan.h
     src/core/ShopToleranceAllocation.h
     src/core/DrawingReferenceAudit.h
+    src/core/DrawingRevisionImpact.h
     src/core/WorkshopEngineering.cpp
     src/core/WorkshopGeometry.h
     src/core/WorkshopGeometry.cpp

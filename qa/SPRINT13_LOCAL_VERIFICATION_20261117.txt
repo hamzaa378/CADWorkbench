@@ -1,0 +1,23 @@
+CADWorkbench v1.70 Sprint 13 — LOCAL SOURCE VERIFICATION, 2026-11-17
+
+Complete Python/source geometry-reference regression:
+  python -m unittest discover -s tests -p '*.py' -q
+  PASS 1014/1014 (including the Sprint 13 native flat/batch fixture suite).
+Portable independent C++ executables:
+  python tools/run_portable_regressions.py --compiler g++ --jobs 4
+  PASS 42/42, including 9000 independent linked-flat numeric assertions.
+  python tools/run_portable_regressions.py --compiler clang++ --jobs 4
+  PASS 42/42, including 9000 independent linked-flat numeric assertions.
+Native Windows CTest names checked by tools/verify_130_tests.py:
+  130/130 registered, no removals or renamed CTest registrations.
+Static source audit:
+  PASS, no missing CMake file registrations, merge conflicts or Python syntax errors.
+
+SCOPE: GCC/Clang native portable C++ units and Python/OCP tests only.
+The modified SceneDocument.cpp and cadcore_tests.cpp have NOT yet been built
+with MSVC/Qt/OpenCascade in this release; the Sprint 13 Windows audit is pending.
+The last Windows verified baseline remains the user's Sprint 11 evidence.
+Manual engineering acceptance remains 0/60 NOT_RUN. Nothing herein certifies
+CNC fabrication, shop/tooling clearance, CMM results, revision issuance or
+actual 3D folded/flat/refold equivalence. Synthetic fixture packages model
+native output formats but are not physical shop measurements.

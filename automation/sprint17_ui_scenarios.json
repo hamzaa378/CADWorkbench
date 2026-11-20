@@ -1,0 +1,550 @@
+{
+  "schema": "cad-ui-scenarios-v1",
+  "description": "Each scenario runs in its own new CADWorkbench process and isolated evidence directory. Menu first, exact Ctrl+K fallback, unavailable is not UI failure. The probe cases are only availability discovery, not function tests.",
+  "scenarios": [
+    {
+      "id": "box_save_reopen",
+      "description": "Create a 40x30x20 box, assert body count, save native scene, reopen and assert persistence",
+      "steps": [
+        {
+          "op": "command",
+          "menu": [
+            "Create",
+            "Box..."
+          ],
+          "label": "Box...",
+          "query": "Box"
+        },
+        {
+          "op": "accept_dialog",
+          "title": "Create Box",
+          "fields": [
+            40,
+            30,
+            20
+          ]
+        },
+        {
+          "op": "assert_bodies",
+          "count": 1
+        },
+        {
+          "op": "command",
+          "menu": [
+            "File",
+            "Save As..."
+          ],
+          "label": "Save As...",
+          "query": "Save As"
+        },
+        {
+          "op": "save_file",
+          "title": "Save project",
+          "name": "box_smoke.cadscene"
+        },
+        {
+          "op": "assert_scene",
+          "name": "box_smoke.cadscene",
+          "checks": [
+            {
+              "path": "units",
+              "equals": "mm"
+            }
+          ]
+        },
+        {
+          "op": "command",
+          "menu": [
+            "File",
+            "New"
+          ],
+          "label": "New",
+          "query": "New"
+        },
+        {
+          "op": "assert_bodies",
+          "count": 0
+        },
+        {
+          "op": "open_file",
+          "name": "box_smoke.cadscene"
+        },
+        {
+          "op": "assert_bodies",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "id": "parametric_solid",
+      "description": "Create a constrained 40x30x20 rectangle extrusion and verify body exists",
+      "steps": [
+        {
+          "op": "command",
+          "menu": [
+            "Create",
+            "Constrained rectangle + editable extrusion..."
+          ],
+          "label": "Constrained rectangle + editable extrusion...",
+          "query": "Constrained rectangle editable extrusion"
+        },
+        {
+          "op": "accept_dialog",
+          "title": "Constrained rectangle extrusion",
+          "fields": [
+            40,
+            30,
+            20
+          ]
+        },
+        {
+          "op": "assert_bodies",
+          "count": 1
+        },
+        {
+          "op": "command",
+          "menu": [
+            "File",
+            "Save As..."
+          ],
+          "label": "Save As...",
+          "query": "Save As"
+        },
+        {
+          "op": "save_file",
+          "title": "Save project",
+          "name": "parametric_smoke.cadscene"
+        },
+        {
+          "op": "assert_scene",
+          "name": "parametric_smoke.cadscene",
+          "checks": [
+            {
+              "path": "parts.0.parametric_definition.type",
+              "equals": "rectangle-extrusion-v1"
+            },
+            {
+              "path": "parts.0.parametric_definition.parameters.width",
+              "equals": 40
+            },
+            {
+              "path": "parts.0.parametric_definition.parameters.height",
+              "equals": 30
+            },
+            {
+              "path": "parts.0.parametric_definition.parameters.depth",
+              "equals": 20
+            }
+          ]
+        },
+        {
+          "op": "select_body",
+          "index": 0
+        },
+        {
+          "op": "command_probe",
+          "menu": [
+            "Edit",
+            "Edit named parameters..."
+          ],
+          "label": "Edit named parameters...",
+          "query": "Edit named parameters"
+        }
+      ]
+    },
+    {
+      "id": "folded_geometry",
+      "description": "Create reversing-bend sheet-metal body and verify body count",
+      "steps": [
+        {
+          "op": "command",
+          "menu": [
+            "Create",
+            "Folded sheet-metal body..."
+          ],
+          "label": "Folded sheet-metal body...",
+          "query": "Folded sheet-metal body"
+        },
+        {
+          "op": "accept_dialog",
+          "title": "Folded sheet-metal body",
+          "fields": [
+            "40,30,35",
+            "90,-90",
+            "1.5,1.5",
+            "25",
+            "1.5"
+          ]
+        },
+        {
+          "op": "assert_bodies",
+          "count": 1
+        },
+        {
+          "op": "command",
+          "menu": [
+            "File",
+            "Save As..."
+          ],
+          "label": "Save As...",
+          "query": "Save As"
+        },
+        {
+          "op": "save_file",
+          "title": "Save project",
+          "name": "folded_smoke.cadscene"
+        },
+        {
+          "op": "assert_scene",
+          "name": "folded_smoke.cadscene",
+          "checks": [
+            {
+              "path": "parts.0.folded_sheet_definition.type",
+              "equals": "faceted-folded-sheet-v1"
+            },
+            {
+              "path": "parts.0.folded_sheet_definition.sheet_width_mm",
+              "equals": 25
+            },
+            {
+              "path": "parts.0.folded_sheet_definition.thickness_mm",
+              "equals": 1.5
+            },
+            {
+              "path": "parts.0.folded_sheet_definition.straight_flanges_mm.0",
+              "equals": 40
+            },
+            {
+              "path": "parts.0.folded_sheet_definition.bends.1.angle_degrees",
+              "equals": -90
+            }
+          ]
+        },
+        {
+          "op": "select_body",
+          "index": 0
+        },
+        {
+          "op": "command_probe",
+          "menu": [
+            "Inspect",
+            "Audit stored folded refold geometry and OCCT volume..."
+          ],
+          "label": "Audit stored folded refold geometry and OCCT volume...",
+          "query": "Audit stored folded refold"
+        }
+      ]
+    },
+    {
+      "id": "box_undo_redo",
+      "description": "Create a box, undo back to empty document, redo back to one body",
+      "steps": [
+        {
+          "op": "command",
+          "menu": [
+            "Create",
+            "Box..."
+          ],
+          "label": "Box...",
+          "query": "Box"
+        },
+        {
+          "op": "accept_dialog",
+          "title": "Create Box",
+          "fields": [
+            40,
+            30,
+            20
+          ]
+        },
+        {
+          "op": "assert_bodies",
+          "count": 1
+        },
+        {
+          "op": "command",
+          "menu": [
+            "Edit",
+            "Undo"
+          ],
+          "label": "Undo",
+          "query": "Undo"
+        },
+        {
+          "op": "assert_bodies",
+          "count": 0
+        },
+        {
+          "op": "command",
+          "menu": [
+            "Edit",
+            "Redo"
+          ],
+          "label": "Redo",
+          "query": "Redo"
+        },
+        {
+          "op": "assert_bodies",
+          "count": 1
+        }
+      ]
+    },
+    {
+      "id": "parametric_dimension_edit",
+      "description": "Create constrained solid, edit width expression and assert persisted 60 mm parameter",
+      "steps": [
+        {
+          "op": "command",
+          "menu": [
+            "Create",
+            "Constrained rectangle + editable extrusion..."
+          ],
+          "label": "Constrained rectangle + editable extrusion...",
+          "query": "Constrained rectangle editable extrusion"
+        },
+        {
+          "op": "accept_dialog",
+          "title": "Constrained rectangle extrusion",
+          "fields": [
+            40,
+            30,
+            20
+          ]
+        },
+        {
+          "op": "assert_bodies",
+          "count": 1
+        },
+        {
+          "op": "select_body",
+          "index": 0
+        },
+        {
+          "op": "command",
+          "menu": [
+            "Edit",
+            "Edit named parameters..."
+          ],
+          "label": "Edit named parameters...",
+          "query": "Edit named parameters"
+        },
+        {
+          "op": "accept_dialog",
+          "title": "Persistent dimension expressions",
+          "fields": [
+            "20 mm",
+            "30 mm",
+            "60 mm"
+          ]
+        },
+        {
+          "op": "command",
+          "menu": [
+            "File",
+            "Save As..."
+          ],
+          "label": "Save As...",
+          "query": "Save As"
+        },
+        {
+          "op": "save_file",
+          "title": "Save project",
+          "name": "edited_params.cadscene"
+        },
+        {
+          "op": "assert_scene",
+          "name": "edited_params.cadscene",
+          "checks": [
+            {
+              "path": "parts.0.parametric_definition.parameters.width",
+              "equals": 60
+            },
+            {
+              "path": "parts.0.parametric_definition.parameters.height",
+              "equals": 30
+            },
+            {
+              "path": "parts.0.parametric_definition.parameters.depth",
+              "equals": 20
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "project_readiness_dialog",
+      "description": "Run integrated readiness menu and verify report dialog is actually displayed",
+      "steps": [
+        {
+          "op": "command",
+          "menu": [
+            "Inspect",
+            "Integrated project readiness: geometry, drawings, refold and joint rates..."
+          ],
+          "label": "Integrated project readiness: geometry, drawings, refold and joint rates...",
+          "query": "Integrated project readiness"
+        },
+        {
+          "op": "assert_dialog",
+          "title": "Integrated engineering preflight",
+          "contains": "UNISSUED"
+        },
+        {
+          "op": "close_dialog",
+          "title": "Integrated engineering preflight",
+          "button": "No"
+        }
+      ]
+    },
+    {
+      "id": "probe_drawing_export",
+      "description": "Discover drawing SVG export; not a drawing correctness assertion",
+      "steps": [
+        {
+          "op": "command_probe",
+          "menu": [
+            "File",
+            "Export orthographic drawing SVG..."
+          ],
+          "label": "Export orthographic drawing SVG...",
+          "query": "Export orthographic drawing SVG"
+        }
+      ]
+    },
+    {
+      "id": "probe_drawing_batch",
+      "description": "Discover atomic multi-sheet drawing regeneration",
+      "steps": [
+        {
+          "op": "command_probe",
+          "menu": [
+            "File",
+            "Regenerate all saved drawings (strict atomic SVG batch)..."
+          ],
+          "label": "Regenerate all saved drawings (strict atomic SVG batch)...",
+          "query": "Regenerate all saved drawings"
+        }
+      ]
+    },
+    {
+      "id": "probe_drawing_sources",
+      "description": "Discover saved drawing-source audit",
+      "steps": [
+        {
+          "op": "command_probe",
+          "menu": [
+            "File",
+            "Check saved drawing source..."
+          ],
+          "label": "Check saved drawing source...",
+          "query": "Check saved drawing source"
+        }
+      ]
+    },
+    {
+      "id": "probe_component_creation",
+      "description": "Discover make-component action",
+      "steps": [
+        {
+          "op": "command_probe",
+          "menu": [
+            "Assembly",
+            "Make selected body a component..."
+          ],
+          "label": "Make selected body a component...",
+          "query": "Make selected body a component"
+        }
+      ]
+    },
+    {
+      "id": "probe_occurrence_insertion",
+      "description": "Discover component occurrence insertion",
+      "steps": [
+        {
+          "op": "command_probe",
+          "menu": [
+            "Assembly",
+            "Insert component occurrence..."
+          ],
+          "label": "Insert component occurrence...",
+          "query": "Insert component occurrence"
+        }
+      ]
+    },
+    {
+      "id": "probe_revolute_motion",
+      "description": "Discover revolute-joint motion control",
+      "steps": [
+        {
+          "op": "command_probe",
+          "menu": [
+            "Assembly",
+            "Drive selected revolute joint..."
+          ],
+          "label": "Drive selected revolute joint...",
+          "query": "Drive selected revolute joint"
+        }
+      ]
+    },
+    {
+      "id": "probe_motion_retime",
+      "description": "Discover atomic retiming of saved joint motion tracks",
+      "steps": [
+        {
+          "op": "command_probe",
+          "menu": [
+            "Assembly",
+            "Retime all saved joint motion tracks (one undo)..."
+          ],
+          "label": "Retime all saved joint motion tracks (one undo)...",
+          "query": "Retime all saved joint motion tracks"
+        }
+      ]
+    },
+    {
+      "id": "probe_refold_audit",
+      "description": "Discover stored folded-solid geometric refold audit",
+      "steps": [
+        {
+          "op": "command_probe",
+          "menu": [
+            "Inspect",
+            "Audit stored folded refold geometry and OCCT volume..."
+          ],
+          "label": "Audit stored folded refold geometry and OCCT volume...",
+          "query": "Audit stored folded refold geometry"
+        }
+      ]
+    },
+    {
+      "id": "probe_project_readiness",
+      "description": "Discover integrated engineering readiness report",
+      "steps": [
+        {
+          "op": "command_probe",
+          "menu": [
+            "Inspect",
+            "Integrated project readiness: geometry, drawings, refold and joint rates..."
+          ],
+          "label": "Integrated project readiness: geometry, drawings, refold and joint rates...",
+          "query": "Integrated project readiness"
+        }
+      ]
+    },
+    {
+      "id": "probe_sheet_dxf",
+      "description": "Discover flat sheet-metal DXF export",
+      "steps": [
+        {
+          "op": "command_probe",
+          "menu": [
+            "File",
+            "Export selected folded body flat pattern DXF..."
+          ],
+          "label": "Export selected folded body flat pattern DXF...",
+          "query": "Export selected folded body flat pattern"
+        }
+      ]
+    }
+  ]
+}

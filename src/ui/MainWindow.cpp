@@ -601,7 +601,69 @@ void MainWindow::buildUi() {
         });
         review.exec();
     });
+    file->addAction("Review witnessed drawing edge revisions across sheets...",this,[this]{
+        QMap<QString,QStringList> requested;
+        const QStringList highlighted=selectedIds();
+        const bool oneSheet=highlighted.size()==1&&document_.find(highlighted.first())&&
+            document_.find(highlighted.first())->hasDrawingSettings;
+        for(const cad::Part& owner:document_.parts()){
+            if(!owner.hasDrawingSettings||(oneSheet&&owner.id!=highlighted.first()))continue;
+            const auto state=document_.drawingSheetSourceStatus(owner.id);
+            for(const auto& dimension:owner.drawingSettings.edgeDimensionAnnotations){
+                if(state.staleAnnotationIds.contains(dimension.id))
+                    requested[owner.id].append(dimension.id);
+            }
+        }
+        if(requested.isEmpty()){
+            QMessageBox::information(this,"Drawing revision review",
+                "No stale witnessed edge dimensions were found in the chosen sheet set. "
+                "This does not validate other GD&T annotations or certify a drawing.");return;
+        }
+        QString report,issue;
+        if(!document_.previewDrawingEdgeReviewBatch(requested,&report,&issue)){
+            reportError("Drawing revision review blocked",issue);return;
+        }
+        if(QMessageBox::question(this,"Review source-linked edge revisions",
+            report.left(3000)+"\n\nReview and acknowledge only these independently resolved edge dimensions "
+            "as ONE undoable edit? GD&T, the aggregate sheet revision and drawing issue status "
+            "will NOT be approved.",QMessageBox::Yes|QMessageBox::No,QMessageBox::No)!=QMessageBox::Yes)return;
+        if(!document_.reviewDrawingEdgeReviewBatch(requested,&report,&issue)){
+            reportError("Drawing revision review rejected",issue);return;
+        }
+        refresh(true);
+        statusBar()->showMessage("Selected witnessed drawing revisions reviewed together; drawing remains unissued.",8500);
+    });
+    file->addAction("Export all saved drawing revision issues CSV...",this,[this]{
+        QString path=QFileDialog::getSaveFileName(this,"Export drawing revision review register",
+            "drawing-recovery-review.csv","CSV (*.csv)");
+        if(path.isEmpty())return;
+        if(!path.endsWith(".csv",Qt::CaseInsensitive))path+=".csv";
+        QString issue;
+        if(!document_.exportDrawingRecoveryCsv(path,&issue)){
+            reportError("Export drawing review",issue);return;
+        }
+        statusBar()->showMessage("Unissued drawing revision register exported.",7000);
+    });
     file->addAction("Regenerate saved drawing SVG...",this,&MainWindow::refreshSavedDrawingSource);
+    file->addAction("Regenerate all saved drawings (strict atomic SVG batch)...",this,[this]{
+        QStringList owners;
+        for(const cad::Part& body:document_.parts())if(body.hasDrawingSettings)owners<<body.id;
+        if(owners.isEmpty()||owners.size()>12){
+            reportError("Strict drawing regeneration","Select a document with 1-12 saved sheets.");return;
+        }
+        const QString parent=QFileDialog::getExistingDirectory(this,
+            "Choose parent for a NEW, unissued drawing batch folder");
+        if(parent.isEmpty())return;
+        const QString output=QDir(parent).filePath(QStringLiteral("CADWorkbench_DrawingReview_%1")
+            .arg(QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss_zzz")));
+        QString report,issue;
+        if(!document_.exportSavedDrawingSvgBatch(owners,output,&report,&issue)){
+            reportError("Strict drawing batch",issue);return;
+        }
+        QMessageBox::information(this,"Linked drawing set exported",
+            report+"\n\nSaved unissued SVG batch: "+output+
+            "\n\nReview each sheet before issuing it. Saved source revisions remain untouched.");
+    });
     file->addAction("Regenerate ALL saved drawing previews (not issued)...",this,[this]{
         // F08: stage every sheet from CURRENT geometry before writing ANY file.
         // The resulting previews are intentionally UNISSUED; no sheet revision,
@@ -903,6 +965,84 @@ void MainWindow::buildUi() {
                             &MainWindow::editSavedArticulatedDrives);
     assemblyMenu->addAction("Edit articulated joint axis, limits and reference offset...",this,
                             &MainWindow::editSavedArticulatedJointDefinition);
+    assemblyMenu->addAction("Edit ALL saved articulated mate frame offsets (atomic)...",this,[this]{
+        if(!document_.hasLiveArticulatedNetwork()){
+            reportError("Batch mate-frame editor","Save a live articulated network first.");return;
+        }
+        const auto original=document_.liveArticulatedJointDefinitions();
+        if(original.isEmpty()||original.size()>64){
+            reportError("Batch mate-frame editor","The saved joint count is outside 1-64.");return;
+        }
+        QDialog dialog(this);dialog.setWindowTitle("Atomic articulated mate frame editor");
+        dialog.resize(700,500);
+        auto* layout=new QVBoxLayout(&dialog);
+        auto* instructions=new QLabel(
+            "Edit zero-pose frame translations (mm) for multiple joints. "
+            "Axis orientation, joint type and travel limits remain unchanged. "
+            "Every changed frame is solved together; all solid placements are rolled back "
+            "if any joint or constraint fails. Continuous motion clearance is NOT certified.",&dialog);
+        instructions->setWordWrap(true);layout->addWidget(instructions);
+        auto* table=new QTableWidget(original.size(),4,&dialog);
+        table->setHorizontalHeaderLabels({"Saved connection","Zero X (mm)","Zero Y (mm)","Zero Z (mm)"});
+        table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+        for(int i=0;i<original.size();++i){
+            const auto& joint=original[i];
+            auto* identity=new QTableWidgetItem(QString("%1: %2 -> %3")
+                .arg(i+1).arg(joint.parentBodyId.left(8),joint.childBodyId.left(8)));
+            identity->setFlags(identity->flags()&~Qt::ItemIsEditable);
+            table->setItem(i,0,identity);
+            const double xyz[]={joint.childAtZero.translation.x,
+                                joint.childAtZero.translation.y,
+                                joint.childAtZero.translation.z};
+            for(int j=0;j<3;++j)table->setItem(i,j+1,
+                new QTableWidgetItem(QString::number(xyz[j],'g',15)));
+        }
+        layout->addWidget(table);
+        auto* strict=new QCheckBox("Reject nominal interference / insufficient clearance",&dialog);
+        strict->setChecked(false);layout->addWidget(strict);
+        auto* controls=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);
+        layout->addWidget(controls);
+        connect(controls,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);
+        connect(controls,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+        if(dialog.exec()!=QDialog::Accepted)return;
+        QMap<int,cad::SceneDocument::ArticulatedNetworkJoint> proposed;
+        for(int i=0;i<original.size();++i){
+            auto next=original[i];
+            double* fields[]={&next.childAtZero.translation.x,
+                              &next.childAtZero.translation.y,
+                              &next.childAtZero.translation.z};
+            for(int j=0;j<3;++j){
+                bool ok=false;
+                const auto* cell=table->item(i,j+1);
+                const double value=cell?cell->text().trimmed().toDouble(&ok):0.0;
+                if(!ok||!std::isfinite(value)||std::abs(value)>100000){
+                    reportError("Batch mate-frame editor",QString("Joint %1 has an invalid offset.").arg(i+1));return;
+                }
+                *fields[j]=value;
+            }
+            if(next.childAtZero.translation.x!=original[i].childAtZero.translation.x||
+               next.childAtZero.translation.y!=original[i].childAtZero.translation.y||
+               next.childAtZero.translation.z!=original[i].childAtZero.translation.z)
+                proposed.insert(i,next);
+        }
+        if(proposed.isEmpty()){
+            statusBar()->showMessage("No mate-frame offsets changed.",5000);return;
+        }
+        QString preview,issue;
+        if(!document_.previewLiveArticulatedJointDefinitionBatch(proposed,&preview,&issue,
+                0.0,strict->isChecked())){
+            reportError("Atomic mate-frame preview",issue);return;
+        }
+        if(QMessageBox::question(this,"Review complete mate network",
+            preview+"\n\nCommit all changed frame definitions as one undo checkpoint?",
+            QMessageBox::Yes|QMessageBox::No,QMessageBox::No)!=QMessageBox::Yes)return;
+        if(!document_.replaceLiveArticulatedJointDefinitionBatch(proposed,&issue,
+                0.0,strict->isChecked())){
+            reportError("Atomic mate-frame commit",issue);return;
+        }
+        refresh(true);
+        statusBar()->showMessage("All selected mate frames committed atomically.",8000);
+    });
     assemblyMenu->addAction("Rebind saved articulated joint endpoints (full-solve preview)...",this,
                             &MainWindow::rebindSavedArticulatedJoint);
     assemblyMenu->addAction("Edit saved articulated joint driving coordinate...",this,
@@ -927,6 +1067,39 @@ void MainWindow::buildUi() {
     assemblyMenu->addAction("Create prismatic joint (select parent then child)...",this,&MainWindow::createPrismaticJoint);
     assemblyMenu->addAction("Drive selected prismatic joint...",this,&MainWindow::driveSelectedPrismaticJoint);
     assemblyMenu->addAction("Edit selected joint motion track...",this,&MainWindow::editSelectedJointMotionTrack);
+    assemblyMenu->addAction("Retime all saved joint motion tracks (one undo)...",this,[this]{
+        QMap<QString,QVector<cad::JointMotionKeyframe>> proposed;
+        bool accepted=false;
+        const double multiplier=QInputDialog::getDouble(this,"Retime assembly motion",
+            "Time multiplier for ALL tracks (2.0 = half speed, 0.5 = double speed):",
+            1.0,0.1,10.0,2,&accepted);
+        if(!accepted)return;
+        if(std::abs(multiplier-1.0)<1e-12){
+            statusBar()->showMessage("Motion tracks unchanged.",5000);return;
+        }
+        for(const auto& part:document_.parts()){
+            if(part.jointMotionKeyframes.isEmpty())continue;
+            QVector<cad::JointMotionKeyframe> keys=part.jointMotionKeyframes;
+            for(auto& key:keys)key.timeSeconds*=multiplier;
+            proposed.insert(part.id,std::move(keys));
+        }
+        if(proposed.isEmpty()){
+            reportError("Assembly motion retiming","No saved joint motion tracks found.");return;
+        }
+        QString report,issue;
+        if(!document_.previewJointMotionKeyframesBatch(proposed,&report,&issue)){
+            reportError("Assembly motion retiming",issue);return;
+        }
+        if(QMessageBox::question(this,"Retime all joint tracks",
+            report+"\n\nCommit all track changes in one undoable operation?",
+            QMessageBox::Yes|QMessageBox::No,QMessageBox::No)!=QMessageBox::Yes)return;
+        if(!document_.setJointMotionKeyframesBatch(proposed,&issue)){
+            reportError("Assembly motion retiming",issue);return;
+        }
+        refresh(true);
+        statusBar()->showMessage("All saved joint motion timelines retimed together; undo available.",8500);
+    });
+
     assemblyMenu->addAction("Review selected joint drive limits (read-only)...",this,[this]{
         const auto ids=selectedIds();
         const cad::Part* child=ids.size()==1?document_.find(ids.first()):nullptr;
@@ -1279,6 +1452,25 @@ void MainWindow::buildUi() {
     inspect->addAction("Assembly fit audit: all pairs, clearance and tolerance bounds...",this,&MainWindow::showAssemblyFitAudit);
     auto* diagnosticsAction = inspect->addAction("Geometry health and topology...",this,&MainWindow::diagnoseSelectedBody);
     auto* documentAuditAction = inspect->addAction("Audit whole project (sketch, features, joints, drawings)...",this,&MainWindow::showDocumentAudit);
+    inspect->addAction("Integrated project readiness: geometry, drawings, refold and joint rates...",this,[this]{
+        QByteArray evidence;QString issue;
+        if(!document_.buildIntegratedEngineeringReadinessCsv(&evidence,&issue)){
+            reportError("Integrated engineering readiness",issue);return;
+        }
+        if(QMessageBox::question(this,"Integrated engineering preflight",
+            QString::fromUtf8(evidence).left(6500)+
+            "\n\nAll results are UNISSUED. Save this review register?",
+            QMessageBox::Yes|QMessageBox::No,QMessageBox::Yes)!=QMessageBox::Yes)return;
+        QString destination=QFileDialog::getSaveFileName(this,
+            "Save integrated engineering readiness", "CADWorkbench-unissued-readiness.csv", "CSV (*.csv)");
+        if(destination.isEmpty())return;
+        if(!destination.endsWith(".csv",Qt::CaseInsensitive))destination+=".csv";
+        if(!document_.exportIntegratedEngineeringReadinessCsv(destination,&issue)){
+            reportError("Integrated engineering readiness",issue);return;
+        }
+        statusBar()->showMessage("Read-only engineering readiness exported. Human approval remains required.",9000);
+    });
+
     auto* sectionAction = inspect->addAction("Planar section contour...",this,&MainWindow::measureSelectedBodySection);
     auto* surfaceSummaryAction = inspect->addAction("Surface type summary...",this,&MainWindow::summarizeSelectedBodySurfaces);
     auto* faceAreaAction = inspect->addAction("Measure selected face area...",this,&MainWindow::measureSelectedFaceArea);
@@ -1292,6 +1484,30 @@ void MainWindow::buildUi() {
     auto* standardsCheckAction = inspect->addAction("Run BOM / ISO / ASME checks...",this,&MainWindow::runStandardsCheck);
     auto* drawingCheckAction = inspect->addAction("Check exported drawing SVG...",this,&MainWindow::checkDrawingSheet);
     auto* foldedShopCheckAction=inspect->addAction("Check selected folded sheet against shop limits...",this,&MainWindow::checkSelectedFoldedSheetShopLimits);
+    inspect->addAction("Audit stored folded refold geometry and OCCT volume...",this,[this]{
+        const QStringList chosen=selectedIds();
+        if(chosen.size()!=1){
+            reportError("Refold audit","Select exactly one saved folded sheet-metal source.");return;
+        }
+        QByteArray evidence;QString issue;
+        if(!document_.auditFoldedSheetRefoldGeometry(chosen.first(),&evidence,&issue)){
+            reportError("Refold audit",issue);return;
+        }
+        if(QMessageBox::question(this,"Geometric refold audit",
+            QString::fromUtf8(evidence).left(5000)+
+            "\n\nExport this unissued inspection evidence as CSV?",
+            QMessageBox::Yes|QMessageBox::No,QMessageBox::Yes)!=QMessageBox::Yes)return;
+        QString path=QFileDialog::getSaveFileName(this,"Export refold geometry check",
+            "refold-geometry-review.csv","CSV (*.csv)");
+        if(path.isEmpty())return;
+        if(!path.endsWith(".csv",Qt::CaseInsensitive))path+=".csv";
+        QSaveFile output(path);
+        if(!output.open(QIODevice::WriteOnly)||
+           output.write(evidence)!=evidence.size()||!output.commit()){
+            output.cancelWriting();reportError("Refold audit","Could not save the refold report.");return;
+        }
+        statusBar()->showMessage("OCCT refold conservation reviewed; not a manufacturing certification.",8500);
+    });
     inspect->addAction("Audit selected folded body bend sequence...",this,
                        &MainWindow::auditSelectedFoldedSheetBendSequence);
 
@@ -6893,6 +7109,7 @@ void MainWindow::exploreParametricDesignAlternatives(){
         {QStringLiteral("Expanded dimensions"),expanded}};
     QVector<cad::ParametricDesignAlternativeResult> result;
     QString issue;
+    const QString evaluatedGeometryFingerprint=document_.designGeometryFingerprint();
     if(!document_.evaluateParametricDesignAlternatives(candidates,&result,&issue)){
         reportError("Parametric alternatives",issue);return;
     }
@@ -6937,7 +7154,8 @@ void MainWindow::exploreParametricDesignAlternatives(){
             .arg(candidates[index].label).arg(ids.size())
             .arg(impactLines.isEmpty()?QStringLiteral("No changed bodies."):impactLines.join('\n')),
         QMessageBox::Yes|QMessageBox::No,QMessageBox::No)!=QMessageBox::Yes)return;
-    if(!document_.setNamedParameterBatch(candidates[index].changes,&issue)){
+    if(!document_.applyParametricDesignAlternative(candidates[index],
+            evaluatedGeometryFingerprint,&issue)){
         reportError("Commit parametric design alternative",issue);return;
     }
     refresh(true);

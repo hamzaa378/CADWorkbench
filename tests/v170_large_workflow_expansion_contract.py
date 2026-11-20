@@ -16,7 +16,8 @@ class ExpandedWorkflowContracts(unittest.TestCase):
         self.assertIn('*results=std::move(stagedResults)',fn)
     def test_design_ui_exposes_explicit_commit(self):
         self.assertIn('exploreParametricDesignAlternatives',self.ui)
-        self.assertIn('document_.setNamedParameterBatch(candidates[index].changes',self.ui)
+        self.assertIn('document_.applyParametricDesignAlternative(candidates[index]',self.ui)
+        self.assertIn('evaluatedGeometryFingerprint',self.ui)
         self.assertIn('document_.evaluateParametricDesignAlternatives',self.ui)
     def test_workspace_samples_are_real_regenerated_solids(self):
         fn=self.core.split('bool SceneDocument::buildLiveArticulatedEnvelopeCsv(',1)[1].split('bool SceneDocument::updateLiveArticulatedCoordinates(',1)[0]

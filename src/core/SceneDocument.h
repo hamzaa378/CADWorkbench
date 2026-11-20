@@ -978,6 +978,12 @@ public:
     bool foldedSheetMetalDefinition(const QString& partId,QVector<double>* straightFlangeLengthsMm,
                                     double* sheetWidthMm,double* thicknessMm,
                                     QVector<FoldedSheetBend>* bends,bool* current = nullptr) const;
+    // Read-only refold geometry audit against the PERSISTED actual OCCT solid.
+    // Rebuilds the faceted cross-section independently, checks mid-surface
+    // development/volume conservation and verifies that the stored B-rep
+    // agrees with a fresh folded solid. All output is unissued engineering QA.
+    bool auditFoldedSheetRefoldGeometry(const QString& partId,
+        QByteArray* csv,QString* error=nullptr) const;
     // Read-only OCCT rebuild plus neutral flat-length check before a folded edit.
     // Does not update tokens, drawings or undo history; outputs are atomic.
     bool previewFoldedSheetMetalEdit(const QString& partId,const QVector<double>& flanges,
@@ -1231,6 +1237,18 @@ public:
         QString* error=nullptr,double requiredClearanceMm=0.0) const;
     bool replaceLiveArticulatedJointDefinition(int index,
         const ArticulatedNetworkJoint& candidate,QString* error=nullptr);
+    // Sprint 15: edit several existing articulated mate definitions in one
+    // graph solve, B-rep regeneration and undo checkpoint. No individual
+    // intermediate joint pose can poison an otherwise valid final graph.
+    // Strict mode rejects failed nominal fits and any uninspected >12-body
+    // graph. Continuous swept-motion safety is NOT implied by this API.
+    bool previewLiveArticulatedJointDefinitionBatch(
+        const QMap<int,ArticulatedNetworkJoint>& edits,QString* report,
+        QString* error=nullptr,double clearanceMm=0.0,
+        bool rejectUnsafeNominal=false) const;
+    bool replaceLiveArticulatedJointDefinitionBatch(
+        const QMap<int,ArticulatedNetworkJoint>& edits,QString* error=nullptr,
+        double clearanceMm=0.0,bool rejectUnsafeNominal=false);
     // Rebind one existing saved joint to two OTHER members of the very same
     // persisted articulated network. Preserves joint kind, axis, limits and
     // index; graph connectivity, loop closure and every staged B-rep are
@@ -1249,6 +1267,17 @@ public:
     QVector<ArticulatedNetworkJoint> liveArticulatedJointDefinitions() const {return liveArticulatedJoints_;}
     bool setJointMotionKeyframes(const QString& childBodyId,const QVector<JointMotionKeyframe>& keyframes,
                                  QString* error = nullptr);
+    // Coordinated multi-joint timeline edit. Previews exact per-joint rates,
+    // validates EVERY saved track before changing anything, and commits all
+    // changed tracks in one undo checkpoint. It does not modify joint poses,
+    // execute the motion, or certify collision-free motion.
+    bool previewJointMotionKeyframesBatch(
+        const QMap<QString,QVector<JointMotionKeyframe>>& tracks,
+        QString* report,QString* error=nullptr) const;
+    bool setJointMotionKeyframesBatch(
+        const QMap<QString,QVector<JointMotionKeyframe>>& tracks,
+        QString* error=nullptr);
+
     bool evaluateAssemblyMotionStudy(double timeSeconds,QString* error = nullptr);
     bool scanAssemblyMotionInterference(const QString& firstId,const QString& secondId,
                                         double startSeconds,double endSeconds,int sampleCount,
@@ -1295,6 +1324,42 @@ public:
     // a failed preflight leaves the sheet and document byte-for-byte intact.
     bool reviewDrawingEdgeDimension(const QString& sheetOwnerId,const QString& annotationId,
                                     QString* error = nullptr);
+    // Read-only multi-sheet preflight and atomic geometry-checked approval of
+    // selected EDGE DIMENSIONS only. Every witness/projection must resolve
+    // before any saved drawing changes. Does NOT acknowledge GD&T or the whole
+    // sheet; callers must review those separately. One undo entry for the
+    // entire selection; duplicate or broken IDs fail without a partial update.
+    bool previewDrawingEdgeReviewBatch(const QMap<QString,QStringList>& selection,
+                                       QString* report,QString* error=nullptr) const;
+    bool reviewDrawingEdgeReviewBatch(const QMap<QString,QStringList>& selection,
+                                      QString* report=nullptr,QString* error=nullptr);
+    // Read-only and spreadsheet-safe cross-sheet recovery register. All saved
+    // sheet/edge/GD&T links are reported, not silently approved.
+    // Read-only consolidated engineering preflight. Executes actual OCCT
+    // refold and drawing regeneration checks, validates piecewise-linear joint
+    // schedules, and emits an actionable issue register. Never changes the
+    // design, issues a drawing, or certifies collision-free motion. Individual
+    // failed checks become BLOCK rows; invalid invocation preserves output.
+    bool buildIntegratedEngineeringReadinessCsv(QByteArray* output,
+        QString* error=nullptr) const;
+    bool exportIntegratedEngineeringReadinessCsv(const QString& path,
+        QString* error=nullptr) const;
+    bool buildDrawingRecoveryCsv(QByteArray* output,QString* error=nullptr) const;
+    bool exportDrawingRecoveryCsv(const QString& path,QString* error=nullptr) const;
+    // Rebuild complete SVGs for 1-12 persisted sheets from CURRENT source
+    // B-reps, view definitions, BOM and linked annotations. The operation is
+    // read-only and atomic for both output maps; stale geometry-linked edge
+    // dimensions and GD&T must be reviewed explicitly before publishing.
+    bool buildSavedDrawingSvgBatch(const QStringList& sheetOwnerIds,
+        QMap<QString,QByteArray>* svgByOwner,
+        QMap<QString,DrawingSheetSettings>* preparedByOwner,
+        QString* report=nullptr,QString* error=nullptr) const;
+    // Publish all regenerated SVGs plus their source revisions in one NEW
+    // directory. Never overwrites a released drawing or changes saved tokens.
+    // Human visual approval and per-annotation sign-off remain outstanding.
+    bool exportSavedDrawingSvgBatch(const QStringList& sheetOwnerIds,
+        const QString& newDirectory,QString* report=nullptr,
+        QString* error=nullptr) const;
     // Transactional shape-agnostic feature tree. Also works on existing/imported
     // surfaces; solid-only modifier types report a clear error on surfaces.
     // A direct external geometry edit makes the tree stale until explicitly rebased.
@@ -1419,6 +1484,13 @@ public:
     bool evaluateParametricDesignAlternatives(
         const QVector<ParametricDesignAlternative>& alternatives,
         QVector<ParametricDesignAlternativeResult>* results,QString* error=nullptr) const;
+    // Promote one evaluated dimension alternative using the SAME coordinated
+    // source/descendant rebuild as interactive parameter editing. The caller
+    // supplies the document geometry fingerprint captured at selection time;
+    // a stale UI candidate cannot silently overwrite a newer design.
+    QString designGeometryFingerprint() const;
+    bool applyParametricDesignAlternative(const ParametricDesignAlternative& selected,
+                    const QString& expectedGeometryFingerprint,QString* error=nullptr);
     // Change optional operations across multiple parametric source bodies as ONE
     // atomic feature-history transaction. Every linked descendant regenerates
     // after all sources have been rebuilt; an invalid feature or B-rep leaves
@@ -1740,6 +1812,10 @@ public:
     StandardsCheckReport checkStandards(StandardsProfile profile) const;
 
 private:
+    bool validateJointMotionKeyframesBatch(
+        const QMap<QString,QVector<JointMotionKeyframe>>& tracks,
+        bool* changed,QString* report,QString* error) const;
+
     // Single staged commit for direct machining edits and repeated patterns.
     // Protects source-linked descendants and the undo journal as one unit.
     bool commitMachiningShape(const QString& bodyId,const QString& expectedRevision,
@@ -1747,6 +1823,8 @@ private:
     bool stageShapeFeatureTreesBatch(const QMap<QString,QVector<ShapeFeatureNode>>& proposals,
                                      SceneDocument* staged,bool* changed,
                                      QStringList* changedBodyIds,QString* error) const;
+    bool stageDrawingEdgeReviewBatch(const QMap<QString,QStringList>& selection,
+            QMap<QString,DrawingSheetSettings>* updated,QString* report,QString* error) const;
     QVector<BillOfMaterialsRow> buildBillOfMaterials(const QStringList& bodyIds, QString* error) const;
     struct Snapshot {
         QVector<Part> parts;
@@ -1777,6 +1855,12 @@ private:
     bool stageLiveArticulatedRegeneration(const QVector<ArticulatedNetworkJoint>& joints,
                                            QVector<Part>* staged,bool* changed,
                                            QString* error) const;
+    bool stageArticulatedDefinitionBatch(
+        const QMap<int,ArticulatedNetworkJoint>& edits,
+        QVector<ArticulatedNetworkJoint>* definitions,
+        QVector<Part>* staged,bool* geometryChanged,bool* definitionsChanged,
+        QString* report,QString* error,double clearanceMm,
+        bool rejectUnsafeNominal) const;
     // Recompute all downstream linked Boolean bodies in insertion order. A
     // failed descendant stops the entire transaction before a checkpoint.
     bool propagateLinkedBodies(QVector<Part>* staged,QString* error) const;

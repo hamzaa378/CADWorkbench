@@ -26,10 +26,13 @@ class ThreeWorkstreamContract(unittest.TestCase):
         start = CORE.index('bool SceneDocument::previewNamedParameterBatch(')
         end = CORE.index('QStringList SceneDocument::suppressedParametricFeatures', start)
         segment = CORE[start:end]
-        self.assertGreaterEqual(segment.count('SceneDocument staged=*this;'), 2)
+        # Sprint 14: do not rebuild every dependent body repeatedly. Both
+        # preview and commit now use the single final-state coordinated path.
+        self.assertIn('SceneDocument staged=*this;', segment)
         self.assertIn('staged.setNamedParameters(', segment)
-        self.assertIn('checkpoint();', segment)
-        self.assertIn('parts_=std::move(staged.parts_)', segment)
+        self.assertIn('staged.setCoordinatedParametricRevision(changes,{},error)', segment)
+        self.assertIn('return setCoordinatedParametricRevision(changes,{},error)', segment)
+        self.assertNotIn('parts_=std::move(staged.parts_)', segment)
         self.assertIn('validShape(after->shape,error)', segment)
         self.assertIn('BRepGProp::VolumeProperties', segment)
 
